@@ -48,6 +48,7 @@ from nemo.collections.tts.torch.tts_data_types import (
     TTSDataType,
     Voiced_mask,
     WithLens,
+    SSLFeatures
 )
 from nemo.collections.tts.torch.tts_tokenizers import BaseTokenizer, EnglishCharsTokenizer, EnglishPhonemesTokenizer
 from nemo.core.classes import Dataset
@@ -412,6 +413,16 @@ class TTSDataset(Dataset):
 
     def add_speaker_id(self, **kwargs):
         pass
+    
+    def add_ssl_features(self, **kwargs):
+        self.ssl_features_folder = kwargs.pop('ssl_features_folder', None)
+
+        if self.ssl_features_folder is None:
+            self.ssl_features_folder = Path(self.sup_data_path) / SSLFeatures.name
+        else:
+            self.ssl_features_folder = Path(self.ssl_features_folder)
+
+        self.ssl_features_folder.mkdir(exist_ok=True, parents=True)
 
     def get_spec(self, audio):
         with torch.cuda.amp.autocast(enabled=False):
@@ -546,6 +557,13 @@ class TTSDataset(Dataset):
         speaker_id = None
         if SpeakerID in self.sup_data_types_set:
             speaker_id = torch.tensor(sample["speaker_id"]).long()
+        
+        ssl_features = None
+        ssl_features_length = None
+        if SSLFeatures in self.sup_data_types_set:
+            ssl_features_path = self.ssl_features_folder / f"{rel_audio_path_as_text_id}.pt"
+            ssl_features = torch.load(ssl_features_path)
+            ssl_features_length = torch.tensor(ssl_features.shape[1]).long()
 
         return (
             audio,
@@ -563,6 +581,8 @@ class TTSDataset(Dataset):
             speaker_id,
             voiced_mask,
             p_voiced,
+            ssl_features,
+            ssl_features_length
         )
 
     def __len__(self):
@@ -595,6 +615,8 @@ class TTSDataset(Dataset):
             _,
             voiced_masks,
             p_voiceds,
+            ssl_features,
+            ssl_features_length
         ) = zip(*batch)
 
         max_audio_len = max(audio_lengths).item()
@@ -603,6 +625,7 @@ class TTSDataset(Dataset):
         max_durations_len = max([len(i) for i in durations_list]) if Durations in self.sup_data_types_set else None
         max_pitches_len = max(pitches_lengths).item() if Pitch in self.sup_data_types_set else None
         max_energies_len = max(energies_lengths).item() if Energy in self.sup_data_types_set else None
+        max_ssl_features_len = max(ssl_features_length).item() if SSLFeatures in self.sup_data_types_set else None
 
         if LogMel in self.sup_data_types_set:
             log_mel_pad = torch.finfo(batch[0][2].dtype).tiny
@@ -678,6 +701,9 @@ class TTSDataset(Dataset):
 
             if SpeakerID in self.sup_data_types_set:
                 speaker_ids.append(speaker_id)
+            
+            if SSLFeatures in self.sup_data_types_set:
+                ssl_features.append(general_padding(ssl_features, ssl_features_length.item(), max_ssl_features_len))
 
         data_dict = {
             "audio": torch.stack(audios),
@@ -695,6 +721,8 @@ class TTSDataset(Dataset):
             "speaker_id": torch.stack(speaker_ids) if SpeakerID in self.sup_data_types_set else None,
             "voiced_mask": torch.stack(voiced_masks) if Voiced_mask in self.sup_data_types_set else None,
             "p_voiced": torch.stack(p_voiceds) if P_voiced in self.sup_data_types_set else None,
+            "ssl_features": torch.stack(ssl_features) if SSLFeatures in self.sup_data_types_set else None,
+            "ssl_features_lens": torch.stack(ssl_features_length) if SSLFeatures in self.sup_data_types_set else None,
         }
 
         return data_dict
@@ -917,6 +945,7 @@ class VocoderDataset(Dataset):
         if not self.load_precomputed_mel:
             features = AudioSegment.segment_from_file(
                 sample["audio_filepath"],
+                target_sr=self.sample_rate,
                 n_segments=self.n_segments if self.n_segments is not None else -1,
                 trim=self.trim,
             )
