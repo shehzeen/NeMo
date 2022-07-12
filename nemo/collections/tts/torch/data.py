@@ -615,8 +615,8 @@ class TTSDataset(Dataset):
             _,
             voiced_masks,
             p_voiceds,
-            ssl_features,
-            ssl_features_length
+            ssl_features_list,
+            ssl_features_lengths
         ) = zip(*batch)
 
         max_audio_len = max(audio_lengths).item()
@@ -625,7 +625,7 @@ class TTSDataset(Dataset):
         max_durations_len = max([len(i) for i in durations_list]) if Durations in self.sup_data_types_set else None
         max_pitches_len = max(pitches_lengths).item() if Pitch in self.sup_data_types_set else None
         max_energies_len = max(energies_lengths).item() if Energy in self.sup_data_types_set else None
-        max_ssl_features_len = max(ssl_features_length).item() if SSLFeatures in self.sup_data_types_set else None
+        max_ssl_features_len = max(ssl_features_lengths).item() if SSLFeatures in self.sup_data_types_set else None
 
         if LogMel in self.sup_data_types_set:
             log_mel_pad = torch.finfo(batch[0][2].dtype).tiny
@@ -639,7 +639,7 @@ class TTSDataset(Dataset):
             if AlignPriorMatrix in self.sup_data_types_set
             else []
         )
-        audios, tokens, log_mels, durations_list, pitches, energies, speaker_ids, voiced_masks, p_voiceds = (
+        audios, tokens, log_mels, durations_list, pitches, energies, speaker_ids, voiced_masks, p_voiceds, ssl_features_list = (
             [],
             [],
             [],
@@ -649,6 +649,7 @@ class TTSDataset(Dataset):
             [],
             [],
             [],
+            []
         )
 
         for i, sample_tuple in enumerate(batch):
@@ -668,6 +669,8 @@ class TTSDataset(Dataset):
                 speaker_id,
                 voiced_mask,
                 p_voiced,
+                ssl_features,
+                ssl_features_length
             ) = sample_tuple
 
             audio = general_padding(audio, audio_len.item(), max_audio_len)
@@ -703,7 +706,7 @@ class TTSDataset(Dataset):
                 speaker_ids.append(speaker_id)
             
             if SSLFeatures in self.sup_data_types_set:
-                ssl_features.append(general_padding(ssl_features, ssl_features_length.item(), max_ssl_features_len))
+                ssl_features_list.append(general_padding(ssl_features, ssl_features_length.item(), max_ssl_features_len))
 
         data_dict = {
             "audio": torch.stack(audios),
@@ -721,8 +724,8 @@ class TTSDataset(Dataset):
             "speaker_id": torch.stack(speaker_ids) if SpeakerID in self.sup_data_types_set else None,
             "voiced_mask": torch.stack(voiced_masks) if Voiced_mask in self.sup_data_types_set else None,
             "p_voiced": torch.stack(p_voiceds) if P_voiced in self.sup_data_types_set else None,
-            "ssl_features": torch.stack(ssl_features) if SSLFeatures in self.sup_data_types_set else None,
-            "ssl_features_lens": torch.stack(ssl_features_length) if SSLFeatures in self.sup_data_types_set else None,
+            "ssl_features": torch.stack(ssl_features_list) if SSLFeatures in self.sup_data_types_set else None,
+            "ssl_features_lens": torch.stack(ssl_features_lengths) if SSLFeatures in self.sup_data_types_set else None,
         }
 
         return data_dict

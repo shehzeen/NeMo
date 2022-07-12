@@ -308,7 +308,7 @@ class FilterbankFeatures(nn.Module):
 
     def forward(self, x, seq_len):
         seq_len = self.get_seq_len(seq_len.float())
-
+        print("stft pad amount", self.stft_pad_amount)
         if self.stft_pad_amount is not None:
             x = torch.nn.functional.pad(
                 x.unsqueeze(1), (self.stft_pad_amount, self.stft_pad_amount), "reflect"
