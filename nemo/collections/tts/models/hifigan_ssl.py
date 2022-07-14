@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pytorch_lightning.loggers.wandb import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 
 from nemo.collections.tts.helpers.helpers import get_batch_size, get_num_workers, plot_spectrogram_to_numpy
 from nemo.collections.tts.losses.hifigan_losses import DiscriminatorLoss, FeatureMatchingLoss, GeneratorLoss
@@ -153,33 +153,15 @@ class HifiGanModel(Vocoder, Exportable):
         return self(spec=spec).squeeze(1)
 
     def training_step(self, batch, batch_idx):
-        # if self.input_as_mel:
-        #     # Pre-computed spectrograms will be used as input
-        #     audio, audio_len, audio_mel = batch
-        # else:
-        #     audio, audio_len = batch
-        #     audio_mel, _ = self.audio_to_melspec_precessor(audio, audio_len)
-
-        # Mel as input for L1 mel loss
-        audio = batch['audio']
-        audio_len = batch['audio_lens']
-        audio_mel = batch['ssl_features']
-        ssl_len = batch['ssl_features_lens']
-        print("ssl features", audio_mel.shape)
-        print("ssl featur lens", ssl_len)
+        
+        audio, audio_len, audio_mel, audio_mel_len = batch
         audio_trg_mel, _len_mel = self.trg_melspec_fn(audio, audio_len)
-        print("audio_trg_mel", audio_trg_mel.shape)
-        print("audio_trg_mel_len", _len_mel)
+        
 
         audio = audio.unsqueeze(1)
 
         audio_pred = self.generator(x=audio_mel)
-        audio_pred = audio_pred[:,:,:audio.shape[2]]
-        audio = audio[:,:,:audio_pred.shape[2]]
-
-        print("audio_pred", audio_pred.shape)
-        print("audio", audio.shape)
-
+        
         audio_pred_mel, _ = self.trg_melspec_fn(audio_pred.squeeze(1), audio_len)
 
         optim_g, optim_d = self.optimizers()
@@ -234,34 +216,10 @@ class HifiGanModel(Vocoder, Exportable):
         self.log("g_l1_loss", loss_mel, prog_bar=True, logger=False, sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
-        # if self.input_as_mel:
-        #     audio, audio_len, audio_mel = batch
-        #     audio_mel_len = [audio_mel.shape[1]] * audio_mel.shape[0]
-        # else:
-        #     audio, audio_len = batch
-        #     audio_mel, audio_mel_len = self.audio_to_melspec_precessor(audio, audio_len)
-
-        audio = batch['audio']
-        audio_len = batch['audio_lens']
-        audio_mel = batch['ssl_features']
-        audio_mel_len = batch['ssl_features_lens']
-
-        print("ssl features", audio_mel.shape)
-        print("ssl featur lens", audio_mel_len)
+        audio, audio_len, audio_mel, audio_mel_len = batch
         audio_trg_mel, _len_mel = self.trg_melspec_fn(audio, audio_len)
-        print("audio_trg_mel", audio_trg_mel.shape)
-        print("audio_trg_mel_len", _len_mel)
-        print("audio len", audio_len)
-        print("factor", _len_mel/audio_mel_len)
-        print("factor ssl", audio_len/audio_mel_len)
-        print("factor mel", audio_len/_len_mel)
-
-
         audio_pred = self(spec=audio_mel)
-        audio_pred = audio_pred[:,:,:audio.shape[1]]
-        audio = audio[:,:audio_pred.shape[2]]
-        print("audio_pred", audio_pred.shape)
-        print("audio input", audio.shape)
+        
         # Perform bias denoising
         pred_denoised = self._bias_denoise(audio_pred, audio_mel).squeeze(1)
         pred_denoised_mel, _ = self.audio_to_melspec_precessor(pred_denoised, audio_len)
@@ -275,50 +233,61 @@ class HifiGanModel(Vocoder, Exportable):
         self.log_dict({"val_loss": loss_mel}, on_epoch=True, sync_dist=True)
 
         # Plot audio once per epoch
-        if batch_idx == 0 and isinstance(self.logger, WandbLogger) and HAVE_WANDB:
-            clips = []
-            specs = []
-            for i in range(min(5, audio.shape[0])):
-                clips += [
-                    wandb.Audio(
-                        audio[i, : audio_len[i]].data.cpu().numpy(),
-                        caption=f"real audio {i}",
-                        sample_rate=self.sample_rate,
-                    ),
-                    wandb.Audio(
-                        audio_pred[i, 0, : audio_len[i]].data.cpu().numpy().astype('float32'),
-                        caption=f"generated audio {i}",
-                        sample_rate=self.sample_rate,
-                    ),
-                    wandb.Audio(
-                        pred_denoised[i, : audio_len[i]].data.cpu().numpy(),
-                        caption=f"denoised audio {i}",
-                        sample_rate=self.sample_rate,
-                    ),
-                ]
-                specs += [
-                    wandb.Image(
-                        plot_spectrogram_to_numpy(audio_mel[i, :, : audio_mel_len[i]].data.cpu().numpy()),
-                        caption=f"input mel {i}",
-                    ),
-                    wandb.Image(
-                        plot_spectrogram_to_numpy(audio_pred_mel[i, :, : audio_mel_len[i]].data.cpu().numpy()),
-                        caption=f"output mel {i}",
-                    ),
-                    wandb.Image(
-                        plot_spectrogram_to_numpy(pred_denoised_mel[i, :, : audio_mel_len[i]].data.cpu().numpy()),
-                        caption=f"denoised mel {i}",
-                    ),
-                ]
-                # if self.input_as_mel:
-                specs += [
-                    wandb.Image(
-                        plot_spectrogram_to_numpy(gt_mel[i, :, : audio_mel_len[i]].data.cpu().numpy()),
-                        caption=f"gt mel {i}",
-                    ),
-                ]
+        print("Creating tensorboard logs")
+        
 
-            self.logger.experiment.log({"audio": clips, "specs": specs})
+        if batch_idx == 0:
+
+            self.logger.experiment.add_audio(
+                "Real audio",
+                audio[0, :audio_len[0]].data.cpu().numpy(),
+                self.global_step,
+                self.sample_rate
+            )
+
+            self.logger.experiment.add_audio(
+                "Generated audio",
+                audio_pred[0, 0, :audio_len[0]].data.cpu().numpy(),
+                self.global_step,
+                self.sample_rate
+            )
+
+            self.logger.experiment.add_audio(
+                "Denoised audio",
+                pred_denoised[0, :audio_len[0]].data.cpu().numpy(),
+                self.global_step,
+                self.sample_rate
+            )
+
+            self.logger.experiment.add_image(
+                "Input SSL Features",
+                plot_spectrogram_to_numpy(audio_mel[0, :, : audio_mel_len[0]].data.cpu().numpy()),
+                self.global_step,
+                dataformats='HWC'
+            )
+
+            self.logger.experiment.add_image(
+                "Output mel",
+                plot_spectrogram_to_numpy(audio_pred_mel[0, :, : gt_mel_len[0]].data.cpu().numpy()),
+                self.global_step,
+                dataformats='HWC'
+            )
+
+            self.logger.experiment.add_image(
+                "Output mel denoised",
+                plot_spectrogram_to_numpy(pred_denoised_mel[0, :, : gt_mel_len[0]].data.cpu().numpy()),
+                self.global_step,
+                dataformats='HWC'
+            )
+
+            self.logger.experiment.add_image(
+                "Ground truth mel",
+                plot_spectrogram_to_numpy(gt_mel[0, :, : gt_mel_len[0]].data.cpu().numpy()),
+                self.global_step,
+                dataformats='HWC'
+            )
+            
+            
 
     def _bias_denoise(self, audio, mel):
         def stft(x):
@@ -365,7 +334,7 @@ class HifiGanModel(Vocoder, Exportable):
             logging.error(f"The {name} dataloader for {self} has shuffle set to True!!!")
 
         dataset = instantiate(cfg.dataset)
-        return torch.utils.data.DataLoader(dataset, collate_fn=dataset.general_collate_fn, **cfg.dataloader_params)
+        return torch.utils.data.DataLoader(dataset, collate_fn=dataset.collate_fn, **cfg.dataloader_params)
 
     def setup_training_data(self, cfg):
         self._train_dl = self.__setup_dataloader_from_config(cfg)

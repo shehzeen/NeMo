@@ -193,26 +193,14 @@ class Generator(NeuralModule):
         initial_input_size=80,
         apply_weight_init_conv_pre=False,
     ):
-        print("upsample initial channels:", upsample_initial_channel)
-        print("initial_input_size", initial_input_size)
         super().__init__()
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_rates)
-        self.conv_pre = weight_norm(Conv1d(512, 80, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(initial_input_size, upsample_initial_channel, 7, 1, padding=3))
         self.lrelu_slope = LRELU_SLOPE
         resblock = ResBlock1 if resblock == 1 else ResBlock2
 
         self.ups = nn.ModuleList()
-        self.pre_up = weight_norm(
-            ConvTranspose1d(
-                80,
-                80,
-                16,
-                4,
-                padding=(16-4) // 2,
-            )
-        )
-
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             self.ups.append(
                 weight_norm(
@@ -255,7 +243,6 @@ class Generator(NeuralModule):
     @typecheck()
     def forward(self, x):
         x = self.conv_pre(x)
-        x = self.pre_up(x)
         for upsample_layer, resblock_group in zip(self.ups, self.resblocks):
             x = F.leaky_relu(x, self.lrelu_slope)
             x = upsample_layer(x)

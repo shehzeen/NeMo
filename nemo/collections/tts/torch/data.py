@@ -53,6 +53,9 @@ from nemo.collections.tts.torch.tts_data_types import (
 from nemo.collections.tts.torch.tts_tokenizers import BaseTokenizer, EnglishCharsTokenizer, EnglishPhonemesTokenizer
 from nemo.core.classes import Dataset
 from nemo.utils import logging
+from nemo.collections.asr.models import ssl_models
+from omegaconf import open_dict
+import hydra.utils
 
 EPSILON = 1e-9
 WINDOW_FN_SUPPORTED = {
@@ -451,7 +454,7 @@ class TTSDataset(Dataset):
         # Load audio
         features = self.featurizer.process(sample["audio_filepath"], trim=self.trim)
         audio, audio_length = features, torch.tensor(features.shape[0]).long()
-
+        print(sample["audio_filepath"], audio.shape)
         if "text_tokens" in sample:
             text = torch.tensor(sample["text_tokens"]).long()
             text_length = torch.tensor(len(sample["text_tokens"])).long()
@@ -834,6 +837,140 @@ class MixerTTSXDataset(TTSDataset):
         return joined_data
 
 
+class SSLVocoderDataset(Dataset):
+    def __init__(
+        self,
+        manifest_filepath: Union[str, Path, List[str], List[Path]],
+        sample_rate: int,
+        n_segments: Optional[int] = None,
+        max_duration: Optional[float] = None,
+        min_duration: Optional[float] = None,
+        ignore_file: Optional[Union[str, Path]] = None,
+        trim: Optional[bool] = False
+    ):
+        """Dataset which can be used for training and fine-tuning vocoder with pre-computed mel-spectrograms.
+        Args:
+            manifest_filepath (Union[str, Path, List[str], List[Path]]): Path(s) to the .json manifests containing
+            information on the dataset. Each line in the .json file should be valid json. Note: the .json file itself
+            is not valid json. Each line should contain the following:
+                "audio_filepath": <PATH_TO_WAV>,
+                "duration": <Duration of audio clip in seconds> (Optional),
+                "mel_filepath": <PATH_TO_LOG_MEL> (Optional, can be in .npy (numpy.save) or .pt (torch.save) format)
+            sample_rate (int): The sample rate of the audio. Or the sample rate that we will resample all files to.
+            n_segments (int): The length of audio in samples to load. For example, given a sample rate of 16kHz, and
+                n_segments=16000, a random 1-second section of audio from the clip will be loaded. The section will
+                be randomly sampled everytime the audio is batched. Can be set to None to load the entire audio.
+                Must be specified if load_precomputed_mel is True.
+            max_duration (Optional[float]): Max duration of audio clips in seconds. All samples exceeding this will be
+                pruned prior to training. Note: Requires "duration" to be set in the manifest file. It does not load
+                audio to compute duration. Defaults to None which does not prune.
+            min_duration (Optional[float]): Min duration of audio clips in seconds. All samples lower than this will be
+                pruned prior to training. Note: Requires "duration" to be set in the manifest file. It does not load
+                audio to compute duration. Defaults to None which does not prune.
+            ignore_file (Optional[Union[str, Path]]): The location of a pickle-saved list of audio paths
+                that will be pruned prior to training. Defaults to None which does not prune.
+            trim (bool): Whether to apply librosa.effects.trim to the audio file. Defaults to False.
+        """
+        super().__init__()
+        
+        # Initialize and read manifest file(s), filter out data by duration and ignore_file
+        if isinstance(manifest_filepath, str):
+            manifest_filepath = [manifest_filepath]
+        self.manifest_filepath = manifest_filepath
+
+        data = []
+        total_duration = 0
+        for manifest_file in self.manifest_filepath:
+            with open(Path(manifest_file).expanduser(), 'r') as f:
+                logging.info(f"Loading dataset from {manifest_file}.")
+                for line in tqdm(f):
+                    item = json.loads(line)
+
+                    file_info = {
+                        "audio_filepath": item["audio_filepath"],
+                        "duration": item["duration"] if "duration" in item else None,
+                    }
+
+                    data.append(file_info)
+
+                    if file_info["duration"] is None:
+                        logging.info(
+                            "Not all audio files have duration information. Duration logging will be disabled."
+                        )
+                        total_duration = None
+
+                    if total_duration is not None:
+                        total_duration += item["duration"]
+
+        logging.info(f"Loaded dataset with {len(data)} files.")
+        if total_duration is not None:
+            logging.info(f"Dataset contains {total_duration / 3600:.2f} hours.")
+
+        self.data = TTSDataset.filter_files(data, ignore_file, min_duration, max_duration, total_duration)
+        self.base_data_dir = get_base_dir([item["audio_filepath"] for item in self.data])
+
+        # Initialize audio and mel related parameters
+        self.featurizer = WaveformFeaturizer(sample_rate=sample_rate)
+        self.sample_rate = sample_rate
+        self.n_segments = n_segments
+        self.trim = trim
+
+        self.ssl_model = ssl_models.SpeechEncDecSelfSupervisedModel.from_pretrained(model_name='ssl_en_conformer_large').cpu()
+        with open_dict(self.ssl_model.cfg):
+            self.ssl_model.cfg.preprocessor.exact_pad = True
+        self.ssl_model.preprocessor = hydra.utils.instantiate(self.ssl_model.cfg.preprocessor)
+
+        ssl_cfg = self.ssl_model.cfg
+        ssl_sample_rate = ssl_cfg.preprocessor.sample_rate
+        self.ssl_sample_rate = ssl_sample_rate
+        ssl_window_stride_seconds = ssl_cfg.preprocessor.window_stride
+        downsampling_rate_wav_to_mel = int(ssl_window_stride_seconds * ssl_sample_rate) # 160
+        downsampling_rate_mel_to_ssl = int(ssl_cfg.encoder.subsampling_factor) # 4
+        self.pad_multiple = downsampling_rate_wav_to_mel * downsampling_rate_mel_to_ssl
+
+    def _collate_fn(self, batch):
+        return torch.utils.data.dataloader.default_collate(batch)
+
+    def __getitem__(self, index):
+        sample = self.data[index]
+        
+        features = AudioSegment.segment_from_file(
+            sample["audio_filepath"],
+            target_sr=self.sample_rate,
+            n_segments=self.n_segments if self.n_segments is not None else -1,
+            trim=self.trim,
+        )
+        audio_samples = features.samples
+        audio_samples_forssl = librosa.core.resample(audio_samples, orig_sr=self.sample_rate, target_sr=self.ssl_sample_rate)
+        audio_samples_forssl = torch.tensor(audio_samples_forssl)
+        
+        audio_ssl, audio_ssl_length = audio_samples_forssl, torch.tensor(audio_samples_forssl.shape[0]).long()
+        audio, audio_length = torch.tensor(audio_samples), torch.tensor(audio_samples.shape[0]).long()
+        
+        # pad audio to a multiple of self.pad_multiple
+        if audio_ssl.shape[0] % self.pad_multiple != 0:
+            audio_ssl = torch.cat([audio_ssl, torch.zeros(self.pad_multiple - audio_ssl.shape[0] % self.pad_multiple, dtype=torch.float)])
+            audio_ssl_length = torch.tensor(audio_ssl.shape[0]).long()
+
+            target_audio_length = int(audio_ssl.shape[0] * (self.sample_rate / self.ssl_sample_rate))
+            audio = torch.cat([audio, torch.zeros(target_audio_length - audio.shape[0], dtype=torch.float)])
+            audio_length = torch.tensor(audio.shape[0]).long()
+        
+        with torch.no_grad():
+            processed_signal, processed_signal_length = self.ssl_model.preprocessor(
+                input_signal=audio_ssl[None], length=audio_ssl_length[None],
+            )
+            encoded, encoded_len = self.ssl_model.encoder.forward_for_export(audio_signal=processed_signal, length=processed_signal_length)
+            encoded = encoded[0].detach()
+            encoded_len = encoded_len[0].detach()
+            encoded = encoded[:, :encoded_len.item()]
+        
+        return audio, audio_length, encoded, encoded_len
+
+    def __len__(self):
+        return len(self.data)
+
+
 class VocoderDataset(Dataset):
     def __init__(
         self,
@@ -874,14 +1011,7 @@ class VocoderDataset(Dataset):
             hop_length (Optional[int]): The hope length between fft computations. Must be specified if load_precomputed_mel is True.
         """
         super().__init__()
-
-        if load_precomputed_mel:
-            if hop_length is None:
-                raise ValueError("hop_length must be specified when load_precomputed_mel is True")
-
-            if n_segments is None:
-                raise ValueError("n_segments must be specified when load_precomputed_mel is True")
-
+        
         # Initialize and read manifest file(s), filter out data by duration and ignore_file
         if isinstance(manifest_filepath, str):
             manifest_filepath = [manifest_filepath]

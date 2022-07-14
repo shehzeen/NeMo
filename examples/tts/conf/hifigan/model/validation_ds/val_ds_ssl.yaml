@@ -1,15 +1,13 @@
 dataset:
-  _target_: "nemo.collections.tts.torch.data.TTSDataset"
-  manifest_filepath: ${train_dataset}
+  _target_: "nemo.collections.tts.torch.data.SSLVocoderDataset"
+  manifest_filepath: ${validation_datasets}
   sample_rate: ${sample_rate}
-  text_tokenizer:
-    _target_: nemo.collections.tts.torch.tts_tokenizers.EnglishCharsTokenizer
-  sup_data_types: ["ssl_features"]
-  max_duration: 2
-  ssl_features_folder: ???
+  n_segments: ${val_n_segments}
+  max_duration: ${val_max_duration}
+  min_duration: ${val_min_duration}
 dataloader_params:
   drop_last: false
   shuffle: false
-  batch_size: 8
+  batch_size: 16
   num_workers: 1
   pin_memory: true
