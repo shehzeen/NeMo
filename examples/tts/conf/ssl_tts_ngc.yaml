@@ -29,9 +29,9 @@ model:
   sample_rate: 16000
 
   train_ds:
-    manifest_filepath: "/home/shehzeenh/datasets/speaker_verification_full/vox1/train_formatted.json"
-    manifest_speaker_verification_fp: "/home/shehzeenh/datasets/speaker_verification_full/vox1/train_formatted.json"
-    manifest_content_fp: "/home/shehzeenh/datasets/All_LibriSpeech/train_clean_100.json"
+    manifest_filepath: "/raid/ssl_tts_tmp/train_vox_ngc.json"
+    manifest_speaker_verification_fp: "/raid/ssl_tts_tmp/train_vox_ngc.json"
+    manifest_content_fp: "/raid/ssl_tts_tmp/train_libri_ngc.json"
     sample_rate: ${model.sample_rate}
     batch_size: 24 # you may increase batch_size if your memory allows
     shuffle: true
@@ -50,9 +50,9 @@ model:
     bucketing_batch_size: null
 
   validation_ds:
-    manifest_filepath: "/home/shehzeenh/datasets/speaker_verification_full/vox1/dev_formatted.json"
-    manifest_speaker_verification_fp: "/home/shehzeenh/datasets/speaker_verification_full/vox1/dev_formatted.json"
-    manifest_content_fp: "/home/shehzeenh/datasets/All_LibriSpeech/dev_clean.json"
+    manifest_filepath: "/raid/ssl_tts_tmp/dev_vox_ngc.json"
+    manifest_speaker_verification_fp: "/raid/ssl_tts_tmp/dev_vox_ngc.json"
+    manifest_content_fp: "/raid/ssl_tts_tmp/dev_libri_ngc.json"
     sample_rate: ${model.sample_rate}
     batch_size: 24 # you may increase batch_size if your memory allows
     shuffle: false

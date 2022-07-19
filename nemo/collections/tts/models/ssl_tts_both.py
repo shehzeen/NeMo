@@ -111,7 +111,8 @@ class SSLDisentangler(ModelPT):
                 content_dataset = TTSData.TTSDataset(
                     manifest_filepath=data_config['manifest_content_fp'],
                     sample_rate=16000,
-                    text_tokenizer=_text_tokenizer)
+                    text_tokenizer=_text_tokenizer,
+                    max_duration=16.7)
                 content_loader = torch.utils.data.DataLoader(
                     content_dataset, 
                     batch_size=data_config['batch_size'],
