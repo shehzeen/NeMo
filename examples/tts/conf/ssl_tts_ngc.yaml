@@ -140,7 +140,7 @@ model:
 
   optim:
     name: adam
-    lr: 1e-4
+    lr: 1e-5
     # optimizer arguments
     # betas: [0.9, 0.98]
 
