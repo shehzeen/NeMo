@@ -1,8 +1,7 @@
 from typing import Dict, Optional, Union
-
+import itertools
 import torch
 import torch.nn as nn
-from omegaconf import DictConfig
 from pytorch_lightning import Trainer
 from pytorch_lightning.trainer.supporters import CombinedLoader
 from pytorch_lightning.loggers import LoggerCollection, TensorBoardLogger
@@ -14,7 +13,8 @@ from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from hydra.utils import instantiate
 from dataclasses import dataclass
 from nemo.collections.tts.torch.tts_tokenizers import BaseTokenizer, EnglishCharsTokenizer, EnglishPhonemesTokenizer
-
+from omegaconf import DictConfig, OmegaConf, open_dict
+from nemo.core.optim.lr_scheduler import WarmupPolicy
 
 def decode(tokenizer, token_list):
     return tokenizer.sep.join(tokenizer._id2token[t] for t in token_list)
@@ -135,6 +135,44 @@ class SSLDisentangler(ModelPT):
     def setup_validation_data(self, cfg):
         self._validation_dl = CombinedLoader(self.__setup_dataloader_from_config(self._cfg.validation_ds))
 
+    def configure_optimizers(self):
+        optim_backbone_config = self._cfg.optim_backbone.copy()
+        optim_downstream_config = self._cfg.optim_downstream.copy()
+
+        OmegaConf.set_struct(optim_backbone_config, False)
+        sched_backbone_config = optim_backbone_config.pop("sched", None)
+        OmegaConf.set_struct(optim_backbone_config, True)
+
+        OmegaConf.set_struct(optim_downstream_config, False)
+        sched_downstream_config = optim_downstream_config.pop("sched", None)
+        OmegaConf.set_struct(optim_downstream_config, True)
+
+        optim_backbone = instantiate(optim_backbone_config, params=self.encoder.parameters(),)
+        optim_downstream = instantiate(optim_downstream_config, params=itertools.chain(self.downstream_nets.parameters(), self.sv_linear.parameters(), self.content_linear.parameters(), self.sv_loss.parameters() ),)
+
+        if sched_backbone_config is not None and sched_downstream_config is not None:
+            
+            scheduler_backbone = WarmupPolicy(
+                optimizer=optim_backbone, max_steps=None, min_lr=sched_backbone_config.min_lr, warmup_steps=sched_backbone_config.warmup_steps,
+            )  # Use warmup to delay start
+            sch1_dict = {
+                'scheduler': scheduler_backbone,
+                'interval': 'step',
+            }
+
+            scheduler_downstream = WarmupPolicy(
+                optimizer=optim_downstream, max_steps=None, min_lr=sched_downstream_config.min_lr, warmup_steps=sched_downstream_config.warmup_steps,
+            )
+            sch2_dict = {
+                'scheduler': scheduler_downstream,
+                'interval': 'step',
+            }
+
+            return [optim_backbone, optim_downstream], [sch1_dict, sch2_dict]
+        else:
+            return [optim_backbone, optim_downstream]
+
+
     def forward(self, input_signal=None, input_signal_length=None):
         
         processed_signal, processed_signal_length = self.preprocessor(
@@ -162,18 +200,16 @@ class SSLDisentangler(ModelPT):
         
 
     def training_step(self, batch, batch_idx):
+        loss = 0.0
+        optim_backbone, optim_downstream = self.optimizers()
+        schedulers = self.lr_schedulers()
         
-        # loss = 0.0
-        optim = self.optimizers()
         for key in batch.keys():  
             if key == 'sv':
                 signal = batch[key]['audio']
                 signal_len = batch[key]['audio_lens']
                 speaker_id = batch[key]['speaker_id']
 
-
-                # Train sv task
-                optim.zero_grad()
                 sv_logits, sv_emb, _, _, _ = self.forward(
                     input_signal=signal, input_signal_length=signal_len
                 )
@@ -181,9 +217,14 @@ class SSLDisentangler(ModelPT):
                 pred_speaker = torch.argmax(sv_logits, dim=1)
                 
                 sv_loss = self.sv_loss(logits=sv_logits, labels=speaker_id)
-                # loss += sv_loss
-                self.manual_backward(sv_loss)
-                optim.step()
+                loss += sv_loss
+                if not self._cfg.combined_loss:
+                    print("sep loss")
+                    optim_backbone.zero_grad()
+                    optim_downstream.zero_grad()
+                    self.manual_backward(sv_loss)
+                    optim_backbone.step()
+                    optim_downstream.step()
                 
                 correct = pred_speaker.eq(speaker_id.data.view_as(pred_speaker)).sum().item()
                 acc = (correct/len(speaker_id))*100
@@ -197,21 +238,44 @@ class SSLDisentangler(ModelPT):
                 target = batch[key]['text'] # (B, T)
                 target_len = batch[key]['text_lens']
                 
-                # Train content task
-                optim.zero_grad()
                 _, _, content_embedding, content_log_probs, encoded_len = self.forward(
                     input_signal=signal, input_signal_length=signal_len
                 )
 
                 ctc_loss = self.ctc_loss(content_log_probs, target, encoded_len, target_len)
-                # loss += ctc_loss
-                self.manual_backward(ctc_loss)
-                optim.step()
+                loss += ctc_loss
+
+                if not self._cfg.combined_loss:
+                    print("sep loss")
+                    optim_backbone.zero_grad()
+                    optim_downstream.zero_grad()
+                    self.manual_backward(ctc_loss)
+                    optim_backbone.step()
+                    optim_downstream.step()
 
                 self.log("t_content_loss", ctc_loss)
 
 
-        # self.log("t_loss", loss)
+        if self._cfg.combined_loss:
+            print("combined loss")
+            optim_backbone.zero_grad()
+            optim_downstream.zero_grad()
+            self.manual_backward(loss)
+            optim_backbone.step()
+            optim_downstream.step()
+
+        if schedulers is not None:
+            sch1, sch2 = schedulers
+            sch1.step()
+            sch2.step()
+
+        if self.trainer.global_step % 10 == 0:
+            self.log("lr backbone", optim_backbone.param_groups[0]['lr'] )
+            self.log("lr downstream", optim_downstream.param_groups[0]['lr'] )
+            self.log("t_loss", loss)
+            print ("Loss", loss)
+            print ("lr backbone", optim_backbone.param_groups[0]['lr'])
+            print ("lr down", optim_downstream.param_groups[0]['lr'])
 
         # return {'loss': loss}
 

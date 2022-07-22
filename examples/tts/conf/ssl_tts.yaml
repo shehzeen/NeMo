@@ -27,7 +27,7 @@ init_from_pretrained_model: "ssl_en_conformer_large"
 
 model:
   sample_rate: 16000
-
+  combined_loss: true
   train_ds:
     manifest_filepath: "/home/shehzeenh/datasets/speaker_verification_full/vox1/train_formatted.json"
     manifest_speaker_verification_fp: "/home/shehzeenh/datasets/speaker_verification_full/vox1/train_formatted.json"
@@ -138,11 +138,21 @@ model:
   decoder_out: 128
 
 
-  optim:
-    name: adam
-    lr: 1e-4
+  optim_backbone:
+    _target_: torch.optim.Adam
+    lr: 1e-5
     # optimizer arguments
     # betas: [0.9, 0.98]
+    sched:
+      min_lr: 1e-6
+      warmup_steps: 100
+  
+  optim_downstream:
+    _target_: torch.optim.Adam
+    lr: 1e-4
+    sched:
+      min_lr: 1e-6
+      warmup_steps: 100
 
 
 trainer:
