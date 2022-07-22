@@ -100,7 +100,6 @@ class SSLDisentangler(ModelPT):
                     manifest_filepath=data_config['manifest_speaker_verification_fp'], 
                     sample_rate=16000, 
                     text_tokenizer=_text_tokenizer,
-                    max_duration=16.7,
                     sup_data_types=['speaker_id'])
                 sv_loader = torch.utils.data.DataLoader(
                     sv_dataset,
@@ -219,7 +218,6 @@ class SSLDisentangler(ModelPT):
                 sv_loss = self.sv_loss(logits=sv_logits, labels=speaker_id)
                 loss += sv_loss
                 if not self._cfg.combined_loss:
-                    print("sep loss")
                     optim_backbone.zero_grad()
                     optim_downstream.zero_grad()
                     self.manual_backward(sv_loss)
@@ -246,7 +244,6 @@ class SSLDisentangler(ModelPT):
                 loss += ctc_loss
 
                 if not self._cfg.combined_loss:
-                    print("sep loss")
                     optim_backbone.zero_grad()
                     optim_downstream.zero_grad()
                     self.manual_backward(ctc_loss)
@@ -257,7 +254,6 @@ class SSLDisentangler(ModelPT):
 
 
         if self._cfg.combined_loss:
-            print("combined loss")
             optim_backbone.zero_grad()
             optim_downstream.zero_grad()
             self.manual_backward(loss)
