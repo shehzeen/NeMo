@@ -145,14 +145,14 @@ model:
     # betas: [0.9, 0.98]
     sched:
       min_lr: 1e-6
-      warmup_steps: 100
+      warmup_steps: 1000
   
   optim_downstream:
     _target_: torch.optim.Adam
     lr: 1e-4
     sched:
       min_lr: 1e-6
-      warmup_steps: 100
+      warmup_steps: 1000
 
 
 trainer:
