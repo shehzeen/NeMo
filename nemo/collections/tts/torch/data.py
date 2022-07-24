@@ -877,7 +877,6 @@ class SSLVocoderDataset(Dataset):
         
         assert ssl_model_type in ["conformer", "conformer_multitask"]
         self.ssl_model_type = ssl_model_type
-        
         # Initialize and read manifest file(s), filter out data by duration and ignore_file
         if isinstance(manifest_filepath, str):
             manifest_filepath = [manifest_filepath]

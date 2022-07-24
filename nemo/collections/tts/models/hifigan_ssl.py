@@ -70,6 +70,7 @@ class HifiGanModel(Vocoder, Exportable):
         #     self.input_as_mel = self._train_dl.dataset.load_precomputed_mel
 
         self.automatic_optimization = False
+        self.ssl_model_type = self._cfg.ssl_model_type
 
     def _get_max_steps(self):
         return compute_max_steps(
@@ -153,14 +154,19 @@ class HifiGanModel(Vocoder, Exportable):
         return self(spec=spec).squeeze(1)
 
     def training_step(self, batch, batch_idx):
-        
-        audio, audio_len, audio_mel, audio_mel_len = batch
+        if self.ssl_model_type == "conformer":
+            audio, audio_len, encoded, _ = batch
+        elif self.ssl_model_type == "conformer_multitask":
+            audio, audio_len, content_embedding, encoded_len, speaker_embedding = batch
+            # repeat speaker embedding
+            speaker_embedding = speaker_embedding[:,:,None].repeat(1, 1, content_embedding.shape[2])
+            encoded = torch.cat([content_embedding, speaker_embedding], dim=1)            
         audio_trg_mel, _len_mel = self.trg_melspec_fn(audio, audio_len)
         
 
         audio = audio.unsqueeze(1)
 
-        audio_pred = self.generator(x=audio_mel)
+        audio_pred = self.generator(x=encoded)
         
         audio_pred_mel, _ = self.trg_melspec_fn(audio_pred.squeeze(1), audio_len)
 
@@ -216,12 +222,19 @@ class HifiGanModel(Vocoder, Exportable):
         self.log("g_l1_loss", loss_mel, prog_bar=True, logger=False, sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
-        audio, audio_len, audio_mel, audio_mel_len = batch
+        if self.ssl_model_type == "conformer":
+            audio, audio_len, encoded, encoded_len = batch
+        elif self.ssl_model_type == "conformer_multitask":
+            audio, audio_len, content_embedding, encoded_len, speaker_embedding = batch
+            # repeat speaker embedding
+            speaker_embedding = speaker_embedding[:,:,None].repeat(1, 1, content_embedding.shape[2])
+            encoded = torch.cat([content_embedding, speaker_embedding], dim=1)
+
         audio_trg_mel, _len_mel = self.trg_melspec_fn(audio, audio_len)
-        audio_pred = self(spec=audio_mel)
+        audio_pred = self(spec=encoded)
         
         # Perform bias denoising
-        pred_denoised = self._bias_denoise(audio_pred, audio_mel).squeeze(1)
+        pred_denoised = self._bias_denoise(audio_pred, encoded).squeeze(1)
         pred_denoised_mel, _ = self.audio_to_melspec_precessor(pred_denoised, audio_len)
 
         # if self.input_as_mel:
@@ -261,7 +274,7 @@ class HifiGanModel(Vocoder, Exportable):
 
             self.logger.experiment.add_image(
                 "Input SSL Features",
-                plot_spectrogram_to_numpy(audio_mel[0, :, : audio_mel_len[0]].data.cpu().numpy()),
+                plot_spectrogram_to_numpy(encoded[0, :, : encoded_len[0]].data.cpu().numpy()),
                 self.global_step,
                 dataformats='HWC'
             )

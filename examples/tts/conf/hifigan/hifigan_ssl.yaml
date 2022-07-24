@@ -17,13 +17,16 @@ lowfreq: 0
 highfreq: 8000
 window: hann  
 
-train_n_segments: 32768
+train_n_segments: 16000
 train_max_duration: null
 train_min_duration: 0.75
 
-val_n_segments: 65536
+val_n_segments: 25600
 val_max_duration: null
 val_min_duration: 3
+
+ssl_model_type: conformer_multitask
+ssl_model_ckpt_path: "/home/pneekhara/NeMo2022/SSLCheckPoints/2022-07-24_05-45-13/checkpoints/Conformer-SSL--val_loss=3.9643-epoch=11-last.ckpt"
 
 defaults:
   - model/generator: v_ssl
@@ -67,10 +70,11 @@ model:
   max_steps: 2500000
   l1_loss_factor: 45
   denoise_strength: 0.0025
+  ssl_model_type: ${ssl_model_type}
 
 trainer:
   num_nodes: 1
-  devices: 1
+  devices: -1
   accelerator: gpu
   strategy: ddp
   precision: 32
@@ -79,7 +83,7 @@ trainer:
   enable_checkpointing: False  # Provided by exp_manager
   logger: false # Provided by exp_manager
   log_every_n_steps: 100
-  val_check_interval: 100
+  val_check_interval: 1.0
   benchmark: false
 
 exp_manager:

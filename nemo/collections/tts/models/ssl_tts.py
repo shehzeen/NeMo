@@ -1,5 +1,7 @@
 from typing import Dict, Optional, Union
 import itertools
+
+from attr import has
 import torch
 import torch.nn as nn
 from pytorch_lightning import Trainer
@@ -29,6 +31,9 @@ class SSLDisentangler(ModelPT):
         self._tb_logger = None
 
         self.downstream_nets = nn.ModuleDict()
+        if not hasattr(self, '_text_tokenizer'):
+            self._text_tokenizer = EnglishCharsTokenizer(add_blank_at="last")
+
         for task in self._cfg.downstream_heads.task_names:
             
             if task == 'speaker_verification':
@@ -197,6 +202,30 @@ class SSLDisentangler(ModelPT):
                 
         return speaker_logits, speaker_embedding_normalized, content_embedding, content_log_probs, encoded_len
         
+    def forward_for_export(self, input_signal=None, input_signal_length=None):
+        
+        processed_signal, processed_signal_length = self.preprocessor(
+                input_signal=input_signal, length=input_signal_length,
+            )
+
+        encoded, encoded_len = self.encoder.forward_for_export(audio_signal=processed_signal, length=processed_signal_length) #b,c,t
+
+        for task in self._cfg.downstream_heads.task_names:
+            if task == "speaker_verification":
+                speaker_embedding = self.downstream_nets['speaker_verification'](encoded[:,:,0])
+                l2_norm = torch.norm(speaker_embedding, p=2,dim=-1, keepdim=True)
+                speaker_embedding_normalized = speaker_embedding/l2_norm
+                speaker_logits = self.sv_linear(speaker_embedding_normalized)
+
+            elif task == "content":
+                encoded_btc = encoded.permute(0, 2, 1)
+                content_embedding = self.downstream_nets['content'](encoded_btc)
+                content_logits = self.content_linear(content_embedding)
+                content_log_probs = content_logits.log_softmax(dim=2)
+                content_log_probs = content_log_probs.permute(1, 0, 2) #t,b,c for ctc
+                
+                
+        return speaker_logits, speaker_embedding_normalized, content_embedding, content_log_probs, encoded_len
 
     def training_step(self, batch, batch_idx):
         loss = 0.0
