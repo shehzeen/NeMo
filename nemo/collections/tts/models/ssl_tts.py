@@ -227,7 +227,7 @@ class SSLDisentangler(ModelPT):
                 correct = pred_speaker.eq(speaker_id.data.view_as(pred_speaker)).sum().item()
                 acc = (correct/len(speaker_id))*100
                 
-                self.log("t_sv_loss", sv_loss)
+                self.log("t_sv_loss", sv_loss.item())
                 self.log("t_sv_accuracy", acc)
             
             elif key == "content":
@@ -250,7 +250,7 @@ class SSLDisentangler(ModelPT):
                     optim_backbone.step()
                     optim_downstream.step()
 
-                self.log("t_content_loss", ctc_loss)
+                self.log("t_content_loss", ctc_loss.item())
 
 
         if self._cfg.combined_loss:
@@ -266,12 +266,12 @@ class SSLDisentangler(ModelPT):
             sch2.step()
 
         if self.trainer.global_step % 10 == 0:
-            self.log("lr backbone", optim_backbone.param_groups[0]['lr'] )
-            self.log("lr downstream", optim_downstream.param_groups[0]['lr'] )
-            self.log("t_loss", loss)
-            print ("Loss", loss)
-            print ("lr backbone", optim_backbone.param_groups[0]['lr'])
-            print ("lr down", optim_downstream.param_groups[0]['lr'])
+            # self.log("lr backbone", optim_backbone.param_groups[0]['lr'] )
+            # self.log("lr downstream", optim_downstream.param_groups[0]['lr'] )
+            # self.log("t_loss", loss)
+            print ("Loss", loss.item())
+            # print ("lr backbone", optim_backbone.param_groups[0]['lr'])
+            # print ("lr down", optim_downstream.param_groups[0]['lr'])
 
         # return {'loss': loss}
 
@@ -314,10 +314,10 @@ class SSLDisentangler(ModelPT):
                 
         
         return {
-            'val_loss': loss_total,
-            'sv_loss' : sv_loss,
-            'ctc_loss' : ctc_loss,
-            'accuracy_sv': acc_val
+            'val_loss': loss_total.cpu(),
+            'sv_loss' : sv_loss.cpu(),
+            'ctc_loss' : ctc_loss.cpu(),
+            'accuracy_sv': acc_val.cpu()
         }
 
     def validation_epoch_end(self, outputs):
