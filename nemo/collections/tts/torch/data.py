@@ -842,6 +842,8 @@ class SSLVocoderDataset(Dataset):
         self,
         manifest_filepath: Union[str, Path, List[str], List[Path]],
         sample_rate: int,
+        ssl_model_type: str,
+        ssl_model_ckpt_path: Union[str, Path],
         n_segments: Optional[int] = None,
         max_duration: Optional[float] = None,
         min_duration: Optional[float] = None,
@@ -872,6 +874,9 @@ class SSLVocoderDataset(Dataset):
             trim (bool): Whether to apply librosa.effects.trim to the audio file. Defaults to False.
         """
         super().__init__()
+        
+        assert ssl_model_type in ["conformer", "conformer_multitask"]
+        self.ssl_model_type = ssl_model_type
         
         # Initialize and read manifest file(s), filter out data by duration and ignore_file
         if isinstance(manifest_filepath, str):
@@ -915,11 +920,15 @@ class SSLVocoderDataset(Dataset):
         self.n_segments = n_segments
         self.trim = trim
 
-        self.ssl_model = ssl_models.SpeechEncDecSelfSupervisedModel.from_pretrained(model_name='ssl_en_conformer_large').cpu()
-        with open_dict(self.ssl_model.cfg):
-            self.ssl_model.cfg.preprocessor.exact_pad = True
-        self.ssl_model.preprocessor = hydra.utils.instantiate(self.ssl_model.cfg.preprocessor)
-
+        if ssl_model_type == "conformer":
+            self.ssl_model = ssl_models.SpeechEncDecSelfSupervisedModel.from_pretrained(model_name='ssl_en_conformer_large').cpu()
+            with open_dict(self.ssl_model.cfg):
+                self.ssl_model.cfg.preprocessor.exact_pad = True
+            self.ssl_model.preprocessor = hydra.utils.instantiate(self.ssl_model.cfg.preprocessor)
+        
+        elif ssl_model_type == "conformer_multitask":
+            pass
+        
         ssl_cfg = self.ssl_model.cfg
         ssl_sample_rate = ssl_cfg.preprocessor.sample_rate
         self.ssl_sample_rate = ssl_sample_rate
