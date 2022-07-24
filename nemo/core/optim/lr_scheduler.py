@@ -71,7 +71,7 @@ class WarmupPolicy(_LRScheduler):
         if step <= self.warmup_steps and self.warmup_steps > 0:
             return self._get_warmup_lr(step)
 
-        if step > self.max_steps:
+        if self.max_steps is not None and step > self.max_steps:
             return [self.min_lr for _ in self.base_lrs]
 
         return self._get_lr(step)
@@ -472,9 +472,6 @@ class NoamAnnealing(_LRScheduler):
 
         step = max(1, self.last_epoch)
 
-        if step > self.max_steps:
-            return [self.min_lr for _ in self.base_lrs]
-
         for initial_lr in self.base_lrs:
             if initial_lr < self.min_lr:
                 raise ValueError(
@@ -485,7 +482,11 @@ class NoamAnnealing(_LRScheduler):
         return new_lrs
 
     def _noam_annealing(self, initial_lr, step):
-        mult = self._normalize * min(step ** (-0.5), step * (self.warmup_steps ** (-1.5)))
+        if self.warmup_steps > 0:
+            mult = self._normalize * min(step ** (-0.5), step * (self.warmup_steps ** (-1.5)))
+        else:
+            mult = self._normalize * step ** (-0.5)
+
         out_lr = initial_lr * mult
         if step > self.warmup_steps:
             out_lr = max(out_lr, self.min_lr)
@@ -788,19 +789,24 @@ def prepare_lr_scheduler(
         num_workers = scheduler_config.get('t_num_workers')
 
         # Compute effective num max_steps
-        num_samples = len(train_dataloader.dataset)
+        if isinstance(train_dataloader, dict):
+            _train_dataloader = train_dataloader[list(train_dataloader.keys())[0]]
+        else:
+            _train_dataloader = train_dataloader
+
+        num_samples = len(_train_dataloader.dataset)
         # TODO: not sure if this will be the correct LR schedule for Megatron
         # we may need to override ModelPT setup_optimization
-        if train_dataloader.batch_size is not None:
-            batch_size = train_dataloader.batch_size
-        elif hasattr(train_dataloader, 'batch_sampler') and train_dataloader.batch_sampler is not None:
-            if train_dataloader.batch_sampler.micro_batch_size is not None:
-                batch_size = train_dataloader.batch_sampler.micro_batch_size
+        if _train_dataloader.batch_size is not None:
+            batch_size = _train_dataloader.batch_size
+        elif hasattr(_train_dataloader, 'batch_sampler') and _train_dataloader.batch_sampler is not None:
+            if _train_dataloader.batch_sampler.micro_batch_size is not None:
+                batch_size = _train_dataloader.batch_sampler.micro_batch_size
             else:
-                raise ValueError(f'Could not find batch_size from batch_sampler: {train_dataloader.batch_sampler}')
+                raise ValueError(f'Could not find batch_size from batch_sampler: {_train_dataloader.batch_sampler}')
         else:
-            raise ValueError(f'Could not find batch_size from train_dataloader: {train_dataloader}')
-        drop_last = train_dataloader.drop_last
+            raise ValueError(f'Could not find batch_size from train_dataloader: {_train_dataloader}')
+        drop_last = _train_dataloader.drop_last
 
         max_steps = compute_max_steps(
             max_epochs=max_epochs,
