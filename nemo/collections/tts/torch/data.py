@@ -86,6 +86,7 @@ class TTSDataset(Dataset):
         n_mels: int = 80,
         lowfreq: int = 0,
         highfreq: Optional[int] = None,
+        segment_max_duration: Optional[int] = None,
         **kwargs,
     ):
         """Dataset which can be used for training spectrogram generators and end-to-end TTS models.
@@ -229,6 +230,7 @@ class TTSDataset(Dataset):
         self.sample_rate = sample_rate
         self.featurizer = WaveformFeaturizer(sample_rate=self.sample_rate)
         self.trim = trim
+        self.segment_max_duration = segment_max_duration
 
         self.n_fft = n_fft
         self.n_mels = n_mels
@@ -436,10 +438,28 @@ class TTSDataset(Dataset):
         rel_audio_path_as_text_id = str(rel_audio_path).replace("/", "_")
         if sample["is_phoneme"] == 1:
             rel_audio_path_as_text_id += "_phoneme"
+        
+        if self.segment_max_duration is not None and 'duration' in sample and sample['duration'] > self.segment_max_duration/self.sample_rate:
+            # Segment the audio if > segment_max_duration (being used in SSL speaker verification)
+            # print("Segmenting")
+            # print("Duration" , int(sample['duration']))
+            # print("Rate" , self.sample_rate)
+            n_segments = int(self.segment_max_duration * self.sample_rate)
+            # print("N segments", n_segments)
+            features = AudioSegment.segment_from_file(
+                sample["audio_filepath"],
+                target_sr=self.sample_rate,
+                n_segments=n_segments,
+                trim=self.trim
+            )
+            features = torch.tensor(features.samples)
+            audio, audio_length = features, torch.tensor(features.shape[0]).long()
 
-        # Load audio
-        features = self.featurizer.process(sample["audio_filepath"], trim=self.trim)
-        audio, audio_length = features, torch.tensor(features.shape[0]).long()
+        else:
+            # Load audio
+            features = self.featurizer.process(sample["audio_filepath"], trim=self.trim)
+            audio, audio_length = features, torch.tensor(features.shape[0]).long()
+
 
         if "text_tokens" in sample:
             text = torch.tensor(sample["text_tokens"]).long()
