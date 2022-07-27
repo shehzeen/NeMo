@@ -439,13 +439,13 @@ class TTSDataset(Dataset):
         if sample["is_phoneme"] == 1:
             rel_audio_path_as_text_id += "_phoneme"
         
-        if self.segment_max_duration is not None and 'duration' in sample and sample['duration'] > self.segment_max_duration/self.sample_rate:
+        if self.segment_max_duration is not None and 'duration' in sample and sample['duration'] > self.segment_max_duration:
             # Segment the audio if > segment_max_duration (being used in SSL speaker verification)
             # print("Segmenting")
             # print("Duration" , int(sample['duration']))
             # print("Rate" , self.sample_rate)
+            # print("Max duration" , self.segment_max_duration)
             n_segments = int(self.segment_max_duration * self.sample_rate)
-            # print("N segments", n_segments)
             features = AudioSegment.segment_from_file(
                 sample["audio_filepath"],
                 target_sr=self.sample_rate,

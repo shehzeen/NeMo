@@ -100,7 +100,7 @@ class SSLDisentangler(ModelPT):
                     manifest_filepath=data_config['manifest_speaker_verification_fp'], 
                     sample_rate=16000, 
                     text_tokenizer=_text_tokenizer,
-                    segment_max_duration=1,
+                    segment_max_duration=data_config['segment_max_duration'],
                     sup_data_types=['speaker_id'])
                 sv_loader = torch.utils.data.DataLoader(
                     sv_dataset,

@@ -48,6 +48,7 @@ model:
     # bucketing params
     bucketing_strategy: "synced_randomized"
     bucketing_batch_size: null
+    segment_max_duration: 5
 
   validation_ds:
     manifest_filepath: "/home/shehzeenh/datasets/speaker_verification_full/vox1/dev_formatted.json"
@@ -60,6 +61,7 @@ model:
     pin_memory: true
     use_start_end_token: false
     min_duration: 8.0
+    segment_max_duration: 5
 
   # text_tokenizer:
   #   _target_: nemo.collections.tts.torch.tts_tokenizers.EnglishPhonemesTokenizer
