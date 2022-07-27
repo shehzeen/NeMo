@@ -3,6 +3,7 @@ dataset:
   manifest_filepath: ${validation_datasets}
   ssl_model_type: ${ssl_model_type}
   ssl_model_ckpt_path: ${ssl_model_ckpt_path}
+  ssl_content_emb_type: ${ssl_content_emb_type}
   sample_rate: ${sample_rate}
   n_segments: ${val_n_segments}
   max_duration: ${val_max_duration}

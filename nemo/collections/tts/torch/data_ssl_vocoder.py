@@ -25,6 +25,7 @@ class SSLVocoderDataset(Dataset):
         sample_rate: int,
         ssl_model_type: str,
         ssl_model_ckpt_path: Union[str, Path],
+        ssl_content_emb_type: str,
         n_segments: Optional[int] = None,
         max_duration: Optional[float] = None,
         min_duration: Optional[float] = None,
@@ -57,6 +58,8 @@ class SSLVocoderDataset(Dataset):
         assert ssl_model_type in ["conformer", "conformer_multitask"]
         self.ssl_model_type = ssl_model_type
 
+        assert ssl_content_emb_type in ["probs", "embedding", "log_probs"]
+        self.ssl_content_emb_type = ssl_content_emb_type
         # Initialize and read manifest file(s), filter out data by duration and ignore_file
         if isinstance(manifest_filepath, str):
             manifest_filepath = [manifest_filepath]
@@ -199,15 +202,24 @@ class SSLVocoderDataset(Dataset):
 
         elif self.ssl_model_type == "conformer_multitask":
             with torch.no_grad():
-                _, speaker_embedding_normalized, content_embedding, _, encoded_len = self.ssl_model.forward_for_export(input_signal=audio_ssl[None], input_signal_length=audio_ssl_length[None])
+                _, speaker_embedding_normalized, content_embedding, content_log_probs, encoded_len = self.ssl_model.forward_for_export(input_signal=audio_ssl[None], input_signal_length=audio_ssl_length[None])
                 speaker_embedding_normalized = speaker_embedding_normalized[0].detach()
                 content_embedding = content_embedding[0].detach()
+                content_log_probs = content_log_probs[:,0,:].detach() # (content lob prob is (t, b, c))
                 encoded_len = encoded_len[0].detach()
                 content_embedding = content_embedding[:encoded_len.item()]
                 content_embedding = content_embedding.t()
+                content_log_probs = content_log_probs[:encoded_len.item()]
+                content_log_probs = content_log_probs.t()
+                content_probs = torch.exp(content_log_probs)
+                if self.ssl_content_emb_type == "probs":
+                    final_content_embedding = content_probs
+                elif self.ssl_content_emb_type == "embedding":
+                    final_content_embedding = content_embedding
+                elif self.ssl_content_emb_type == "log_probs":
+                    final_content_embedding = content_log_probs
                 
-        
-            return audio, audio_length, content_embedding, encoded_len, speaker_embedding_normalized
+            return audio, audio_length, final_content_embedding, encoded_len, speaker_embedding_normalized
 
     def __len__(self):
         return len(self.data)

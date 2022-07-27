@@ -26,7 +26,8 @@ val_max_duration: null
 val_min_duration: 3
 
 ssl_model_type: conformer_multitask
-ssl_model_ckpt_path: "/home/pneekhara/NeMo2022/SSLCheckPoints/2022-07-24_05-45-13/checkpoints/Conformer-SSL--val_loss=3.9643-epoch=11-last.ckpt"
+ssl_model_ckpt_path: "/home/pneekhara/NeMo2022/SSLCheckPoints/Epoch31.ckpt"
+ssl_content_emb_type: 'probs'
 
 defaults:
   - model/generator: v_ssl
@@ -71,6 +72,10 @@ model:
   l1_loss_factor: 45
   denoise_strength: 0.0025
   ssl_model_type: ${ssl_model_type}
+  content_emb_indim: 46
+  content_emb_outdim: 256
+  speaker_emb_indim: 256
+  speaker_emb_outdim: 256
 
 trainer:
   num_nodes: 1

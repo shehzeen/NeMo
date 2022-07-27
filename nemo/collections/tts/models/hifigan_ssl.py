@@ -71,6 +71,9 @@ class HifiGanModel(Vocoder, Exportable):
 
         self.automatic_optimization = False
         self.ssl_model_type = self._cfg.ssl_model_type
+        if self.ssl_model_type == "conformer_multitask":
+            self.content_projection_layer = torch.nn.Linear(self._cfg.content_emb_indim, self._cfg.content_emb_outdim)
+            self.speaker_projection_layer = torch.nn.Linear(self._cfg.speaker_emb_indim, self._cfg.speaker_emb_outdim)
 
     def _get_max_steps(self):
         return compute_max_steps(
@@ -153,14 +156,24 @@ class HifiGanModel(Vocoder, Exportable):
     def convert_spectrogram_to_audio(self, spec: 'torch.tensor') -> 'torch.tensor':
         return self(spec=spec).squeeze(1)
 
+    def compute_generator_input(self, content_embedding, speaker_embedding):
+        # content embedding is (B, C, T)
+        # speaker embedding is (B, C)
+        content_embedding = content_embedding.permute(0, 2, 1) # (B, C, T) -> (B, T, C)
+        content_embedding_projected = self.content_projection_layer(content_embedding)
+        content_embedding_projected = content_embedding_projected.permute(0, 2, 1)
+        speaker_embedding_projected = self.speaker_projection_layer(speaker_embedding)
+        speaker_embedding_repeated = speaker_embedding_projected[:,:,None].repeat(1, 1, content_embedding_projected.shape[2])
+        encoded = torch.cat([content_embedding_projected, speaker_embedding_repeated], dim=1)
+
+        return encoded
+
     def training_step(self, batch, batch_idx):
         if self.ssl_model_type == "conformer":
             audio, audio_len, encoded, _ = batch
         elif self.ssl_model_type == "conformer_multitask":
             audio, audio_len, content_embedding, encoded_len, speaker_embedding = batch
-            # repeat speaker embedding
-            speaker_embedding = speaker_embedding[:,:,None].repeat(1, 1, content_embedding.shape[2])
-            encoded = torch.cat([content_embedding, speaker_embedding], dim=1)            
+            encoded = self.compute_generator_input(content_embedding, speaker_embedding)
         audio_trg_mel, _len_mel = self.trg_melspec_fn(audio, audio_len)
         
 
@@ -227,8 +240,7 @@ class HifiGanModel(Vocoder, Exportable):
         elif self.ssl_model_type == "conformer_multitask":
             audio, audio_len, content_embedding, encoded_len, speaker_embedding = batch
             # repeat speaker embedding
-            speaker_embedding = speaker_embedding[:,:,None].repeat(1, 1, content_embedding.shape[2])
-            encoded = torch.cat([content_embedding, speaker_embedding], dim=1)
+            encoded = self.compute_generator_input(content_embedding, speaker_embedding)
 
         audio_trg_mel, _len_mel = self.trg_melspec_fn(audio, audio_len)
         audio_pred = self(spec=encoded)
@@ -246,11 +258,9 @@ class HifiGanModel(Vocoder, Exportable):
         self.log_dict({"val_loss": loss_mel}, on_epoch=True, sync_dist=True)
 
         # Plot audio once per epoch
-        print("Creating tensorboard logs")
         
-
         if batch_idx == 0:
-
+            print("Creating tensorboard logs")
             self.logger.experiment.add_audio(
                 "Real audio",
                 audio[0, :audio_len[0]].data.cpu().numpy(),
