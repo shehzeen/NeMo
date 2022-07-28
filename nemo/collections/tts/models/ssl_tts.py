@@ -317,6 +317,7 @@ class SSLDisentangler(ModelPT):
                 acc_val = torch.as_tensor(acc)
 
             if key == 'content':
+                content_loss = 0
                 signal = batch[key]['audio']
                 signal_len = batch[key]['audio_lens']
                 target = batch[key]['text'] # (B, T)
