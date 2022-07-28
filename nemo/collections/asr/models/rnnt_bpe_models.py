@@ -196,7 +196,7 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
             location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_rw_conformer_transducer_large/versions/1.11.0/files/stt_rw_conformer_transducer_large.nemo",
         )
         results.append(model)
-
+        
         return results
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):

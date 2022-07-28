@@ -21,16 +21,19 @@
 # With weight_decay=0.0, learning rate may need to get reduced to 2.0.
 
 name: "Conformer-SSL"
+phoneme_dict_path: "scripts/tts_dataset_files/cmudict-0.7b_nv22.01"
+heteronyms_path: "scripts/tts_dataset_files/heteronyms-030921"
+init_from_pretrained_model: "ssl_en_conformer_large"
 
 model:
   sample_rate: 16000
-
+  combined_loss: true
   train_ds:
-    manifest_filepath: ???
-    manifest_speaker_verification_fp: ???
-    manifest_content_fp: ???
+    manifest_filepath: "/home/shehzeenh/datasets/speaker_verification_full/vox1/train_formatted.json"
+    manifest_speaker_verification_fp: "/home/shehzeenh/datasets/speaker_verification_full/vox1/train_formatted.json"
+    manifest_content_fp: "/home/shehzeenh/datasets/All_LibriSpeech/train_clean_100.json"
     sample_rate: ${model.sample_rate}
-    batch_size: 32 # you may increase batch_size if your memory allows
+    batch_size: 16 # you may increase batch_size if your memory allows
     shuffle: true
     num_workers: 8
     pin_memory: false
@@ -47,7 +50,9 @@ model:
     bucketing_batch_size: null
 
   validation_ds:
-    manifest_filepath: ???
+    manifest_filepath: "/home/shehzeenh/datasets/speaker_verification_full/vox1/dev_formatted.json"
+    manifest_speaker_verification_fp: "/home/shehzeenh/datasets/speaker_verification_full/vox1/dev_formatted.json"
+    manifest_content_fp: "/home/shehzeenh/datasets/All_LibriSpeech/dev_clean.json"
     sample_rate: ${model.sample_rate}
     batch_size: 16 # you may increase batch_size if your memory allows
     shuffle: false
@@ -56,6 +61,18 @@ model:
     use_start_end_token: false
     min_duration: 8.0
 
+  # text_tokenizer:
+  #   _target_: nemo.collections.tts.torch.tts_tokenizers.EnglishPhonemesTokenizer
+  #   punct: true
+  #   stresses: true
+  #   chars: true
+  #   apostrophe: true
+  #   pad_with_space: true
+  #   g2p:
+  #     _target_: nemo.collections.tts.torch.g2ps.EnglishG2p
+  #     phoneme_dict: ${phoneme_dict_path}
+  #     heteronyms: ${heteronyms_path}
+  #     phoneme_probability: 0.5
 
   preprocessor:
     _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
@@ -78,6 +95,12 @@ model:
     freq_width: 20
     patch_size: 48
     mask_patches: 0.5
+
+  downstream_heads:
+    task_names: ['speaker_verification', 'content']
+    speaker_embed_size: 256
+    num_speakers: 1211
+    content_embed_size: 256
 
   encoder:
     _target_: nemo.collections.asr.modules.ConformerEncoder
@@ -114,70 +137,23 @@ model:
 
   decoder_out: 128
 
-  loss_list:
-    contrastive:
-      decoder:
-        _target_: nemo.collections.asr.modules.ConvASRDecoderReconstruction
-        feat_in: ${model.encoder.d_model}
-        feat_hidden: 128
-        # features in hidden layer of decoder
-        feat_out: ${model.decoder_out}
-        stride_layers: 0
-        # if loss.combine_time_steps is less than the encoder stride, then a corresponding amount of stride_layers needs to
-        # be added to the decoder (here stride and combine_time_steps are both 4)
-        non_stride_layers: 0
-      loss:
-        _target_: nemo.collections.asr.losses.ContrastiveLoss
-        in_dim: ${model.preprocessor.features}
-        proj_dim: ${model.decoder_out}
-        combine_time_steps: 4 # how many spectrogram time steps are used for one target/representation for contrastive task
-        quantized_targets: true # should quantizer or linear layer be used
-        # (quantizer is required to extract pseudo-labels for other losses)
-        codebook_size: 300 # number of vectors in the quantization codebook per group
-        num_groups: 2 # number of groups in the quantizer codebook
-        num_negatives: 100 # number of sampled negatives for each target
-        sample_from_same_utterance_only: true # should negatives be sampled only from the same utterance
-        sample_from_non_masked: false # should negatives be sampled from non-masked steps
 
-    mlm:
-      decoder:
-        _target_: nemo.collections.asr.modules.ConvASRDecoder
-        feat_in: ${model.encoder.d_model}
-        num_classes: 90000
-        # set this to be equal to codebook_size^groups in the contrastive loss
-      loss:
-        _target_: nemo.collections.asr.losses.MLMLoss
-        combine_time_steps: 4
-      targets_from_loss: "contrastive"
-      # since this loss requires targets, we can either get them from a manifest or from a quantized contrastive loss
-      loss_alpha: 1000.
-      # multiplier applied to this loss relative to others
-      transpose_encoded: false
-      # transposing input may be necessary depending on which layer is used as input to decoder
-      start_step: 0
-      # determines what global step this loss starts being used at;
-      # this can be set to a higher number if your training is long enough,
-      # which may increase early training stability
-      output_from_layer: null
-      # if we wanted to use outputs from non-final encoder layer as input to this decoder,
-      # the layer name should be specified here
-
-
-  optim:
-    name: adamw
-    lr: 5.0
+  optim_backbone:
+    _target_: torch.optim.Adam
+    lr: 1e-5
     # optimizer arguments
-    betas: [0.9, 0.98]
-    weight_decay: 1e-3
-
-    # scheduler setup
+    # betas: [0.9, 0.98]
     sched:
-      name: NoamAnnealing
-      d_model: ${model.encoder.d_model}
-      # scheduler config override
-      warmup_steps: 25000
-      warmup_ratio: null
       min_lr: 1e-6
+      warmup_steps: 1000
+  
+  optim_downstream:
+    _target_: torch.optim.Adam
+    lr: 1e-4
+    sched:
+      min_lr: 1e-6
+      warmup_steps: 1000
+
 
 trainer:
   devices: -1 # number of GPUs, -1 would use all available GPUs
@@ -188,7 +164,7 @@ trainer:
   accelerator: auto
   strategy: ddp
   accumulate_grad_batches: 1
-  gradient_clip_val: 1.0
+  # gradient_clip_val: 1.0
   precision: 32 # Should be set to 16 for O1 and O2 to enable the AMP.
   log_every_n_steps: 10  # Interval of logging.
   progress_bar_refresh_rate: 10

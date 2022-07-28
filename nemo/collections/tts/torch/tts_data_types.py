@@ -67,6 +67,10 @@ class LMTokens(TTSDataType):
     name = "lm_tokens"
 
 
+class SSLFeatures(TTSDataType):
+    name = "ssl_features"
+
+
 MAIN_DATA_TYPES = [Audio, Text]
 VALID_SUPPLEMENTARY_DATA_TYPES = [
     LogMel,
@@ -78,5 +82,6 @@ VALID_SUPPLEMENTARY_DATA_TYPES = [
     LMTokens,
     Voiced_mask,
     P_voiced,
+    SSLFeatures
 ]
 DATA_STR2DATA_CLASS = {d.name: d for d in MAIN_DATA_TYPES + VALID_SUPPLEMENTARY_DATA_TYPES}
