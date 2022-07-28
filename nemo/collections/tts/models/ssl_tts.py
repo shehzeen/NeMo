@@ -47,6 +47,10 @@ class SSLDisentangler(ModelPT):
                 self.downstream_nets[task] = nn.Linear(in_dim,out_dim)
                 self.content_linear = nn.Linear(out_dim,num_chars)
                 self.ctc_loss = nn.CTCLoss(blank=self._text_tokenizer.blank)
+                self.pitch_augment = self._cfg.pitch_augment
+                if self.pitch_augment:
+                    self.mse_loss = nn.MSELoss()
+
                 
         self.automatic_optimization = False
            
@@ -115,7 +119,8 @@ class SSLDisentangler(ModelPT):
                     manifest_filepath=data_config['manifest_content_fp'],
                     sample_rate=16000,
                     text_tokenizer=_text_tokenizer,
-                    max_duration=16.7
+                    max_duration=16.7,
+                    pitch_augment=data_config['pitch_augment']
                     )
                 content_loader = torch.utils.data.DataLoader(
                     content_dataset, 
@@ -191,12 +196,14 @@ class SSLDisentangler(ModelPT):
             elif task == "content":
                 encoded_btc = encoded.permute(0, 2, 1)
                 content_embedding = self.downstream_nets['content'](encoded_btc)
-                content_logits = self.content_linear(content_embedding)
+                l2_norm_content = torch.norm(content_embedding, p=2,dim=-1, keepdim=True)
+                content_embedding_normalized = content_embedding/l2_norm_content
+                content_logits = self.content_linear(content_embedding_normalized)
                 content_log_probs = content_logits.log_softmax(dim=2)
                 content_log_probs = content_log_probs.permute(1, 0, 2) #t,b,c for ctc
                 
                 
-        return speaker_logits, speaker_embedding_normalized, content_embedding, content_log_probs, encoded_len
+        return speaker_logits, speaker_embedding_normalized, content_embedding_normalized, content_log_probs, encoded_len
         
 
     def training_step(self, batch, batch_idx):
@@ -232,26 +239,39 @@ class SSLDisentangler(ModelPT):
                 self.log("t_sv_accuracy", acc)
             
             elif key == "content":
+                content_loss = 0
                 signal = batch[key]['audio']
                 signal_len = batch[key]['audio_lens']
                 target = batch[key]['text'] # (B, T)
                 target_len = batch[key]['text_lens']
-                
+                # wav1 = signal[0].cpu().detach().numpy()
+
                 _, _, content_embedding, content_log_probs, encoded_len = self.forward(
                     input_signal=signal, input_signal_length=signal_len
                 )
 
                 ctc_loss = self.ctc_loss(content_log_probs, target, encoded_len, target_len)
-                loss += ctc_loss
+                content_loss += ctc_loss
+
+                if self.pitch_augment:
+                    augmented_signal = batch[key]['audio_shifted']
+                    # wav2= augmented_signal[0].cpu().detach().numpy()
+                    _, _, content_embedding_aug, content_log_probs_aug, _ = self.forward(
+                    input_signal=augmented_signal, input_signal_length=signal_len )
+                    mse_loss = self.mse_loss(content_embedding, content_embedding_aug)
+                    content_loss += self._cfg.augment_mse_alpha * mse_loss
+                    self.log("t_mse_loss", mse_loss.item())
+
+                loss += content_loss
 
                 if not self._cfg.combined_loss:
                     optim_backbone.zero_grad()
                     optim_downstream.zero_grad()
-                    self.manual_backward(ctc_loss)
+                    self.manual_backward(content_loss)
                     optim_backbone.step()
                     optim_downstream.step()
 
-                self.log("t_content_loss", ctc_loss.item())
+                self.log("t_content_loss", content_loss.item())
 
 
         if self._cfg.combined_loss:
@@ -307,7 +327,17 @@ class SSLDisentangler(ModelPT):
                 )
 
                 ctc_loss = self.ctc_loss(content_log_probs, target, encoded_len, target_len)
-                loss_total +=  ctc_loss
+                content_loss += ctc_loss
+
+                if self.pitch_augment:
+                    augmented_signal = batch[key]['audio_shifted']
+                    _, _, content_embedding_aug, content_log_probs_aug, _ = self.forward(
+                    input_signal=augmented_signal, input_signal_length=signal_len )
+                    mse_loss = self.mse_loss(content_embedding, content_embedding_aug)
+                    content_loss += self._cfg.augment_mse_alpha * mse_loss
+
+
+                loss_total +=  content_loss
                 pred_char_batch = torch.argmax(content_log_probs, dim=2)
                 pred_char_batch = pred_char_batch.permute(1,0)
                 pred_char = decode(self._text_tokenizer, pred_char_batch[0].tolist() )
@@ -317,7 +347,8 @@ class SSLDisentangler(ModelPT):
         return {
             'val_loss': loss_total.cpu(),
             'sv_loss' : sv_loss.cpu(),
-            'ctc_loss' : ctc_loss.cpu(),
+            'ctc_loss': ctc_loss.cpu(),
+            'content_loss' : content_loss.cpu(),
             'accuracy_sv': acc_val.cpu()
         }
 
@@ -326,10 +357,12 @@ class SSLDisentangler(ModelPT):
         val_loss = collect("val_loss")
         val_sv_loss = collect("sv_loss")
         val_ctc_loss = collect("ctc_loss")
+        val_content_loss = collect("content_loss")
         accuracy_sv = collect("accuracy_sv")
         self.log("val_loss", val_loss)
         self.log("sv_loss", val_sv_loss)
-        self.log("ctc_loss", val_ctc_loss)
+        self.log("val_ctc_loss", val_ctc_loss)
+        self.log("val_content_loss", val_content_loss)
         self.log("accuracy_sv", accuracy_sv)
 
         
