@@ -1,9 +1,9 @@
 import evaluate_synthesizer
 
-ssl_model_ckpt_path = "/home/pneekhara/NeMo2022/SSLCheckPoints/SSLConformer22050_Epoch37.ckpt"
+ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/Conformer22050_Epoch37.ckpt"
 # ssl_model_ckpt_path = "/home/pneekhara/NeMo2022/tensorboards/ConformerModels/BaseLine/ConformerBaseline.ckpt"
 # ssl_model_ckpt_path = "/home/pneekhara/NeMo2022/tensorboards/ConformerModels/ConformerCompatibleTry3/ConformerCompatible_Epoch3.ckpt"
-hifi_ckpt_path = "/home/pneekhara/NeMo2022/HiFiCKPTS/hifigan_libritts/HiFiLibriEpoch334.ckpt"
+hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 
 fastpitch_model_ckpts = [
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/SegMeanEpoch404.ckpt",
@@ -20,12 +20,12 @@ fastpitch_model_ckpts = [
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/SegDurInterp674.ckpt",
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/SegDurPerSampleEpoch604.ckpt",
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/LibriAllDataId174.ckpt",
-    "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/LibriAllOldEpoch224.ckpt"
+    "/data/shehzeen/SSLTTS/gdrive/FastPitch_Checkpoints_All/SegDurPerSampleEpoch604.ckpt"
 ]
 
 manifest_paths = [
-    "/home/pneekhara/Datasets/LibriDev/libri_dev_clean_local.json",
-    "/home/pneekhara/NeMo2022/libri_train_formatted.json",
+    # "/data/shehzeen/SSLTTS/manifests/libri_test.json",
+    "/data/shehzeen/SSLTTS/manifests/train_clean_360_corrected.json",
 ]
 # manifest_paths = ["/home/pneekhara/Datasets/vctk/vctk_test_local.json"]
 pitch_stats_jsons = [None, None]
@@ -33,16 +33,16 @@ pitch_stats_jsons = [None, None]
 # sv_model_names = ["speakerverification_speakernet", "ecapa_tdnn"]
 sv_model_names = ["speakerverification_speakernet"]
 evaluation_types = ["swapping", "reconstructed"]
-base_out_dir = "/home/pneekhara/NeMo2022/Evaluations/ForPresentation"
-n_speakers = 10
-min_samples_per_spk = 15
-max_samples_per_spk = 15
+base_out_dir = "/data/shehzeen/SSLTTS/Experiments/SpeakerSelection"
+n_speakers = 40
+min_samples_per_spk = 10
+max_samples_per_spk = 10
 # precomputed_stats_fps = ["/home/pneekhara/NeMo2022/Evaluations/UpdatedEvaluation/stats_seen.pkl", "/home/pneekhara/NeMo2022/Evaluations/UpdatedEvaluation/stats_unseen.pkl"]
 precomputed_stats_fps = [None, None]
 compute_pitch = 1
-compute_duration = 0
-use_unique_tokens = 0
-durations_per_speaker = [2, 4, 8, 16, 32]
+compute_duration = 1
+use_unique_tokens = 1
+durations_per_speaker = [10]
 
 dataset_ids = [0]
 

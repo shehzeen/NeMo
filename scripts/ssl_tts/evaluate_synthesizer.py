@@ -23,7 +23,7 @@ from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
 from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
-from nemo.collections.tts.models import fastpitch_ssl, hifigan, hifigan_ssl, ssl_tts
+from nemo.collections.tts.models import fastpitch_ssl, hifigan, ssl_tts
 
 plt.rcParams["figure.figsize"] = (10, 10)
 device = "cpu"
@@ -264,6 +264,7 @@ def visualize_embeddings(embedding_dict_np, title="TSNE", out_dir=".", out_file=
         marker_shape += _marker_shape
         _label = key
         handle_list.append(mpatches.Patch(color=id_color, label=_label))
+
     speaker_embeddings = TSNE(n_components=2, random_state=0).fit_transform(universal_embed_list)
     mscatter(speaker_embeddings[:, 0], speaker_embeddings[:, 1], m=marker_shape, c=color, s=20)
     plt.legend(handles=handle_list, title="Type")
@@ -427,7 +428,9 @@ def calculate_eer(speaker_embeddings, mode="generated"):
     else:
         anchor_embeddings = real_embeddings
 
+    speaker_similarities = {}
     for key in anchor_embeddings:
+        speaker_sim_score = []
         alternate_keys = [k for k in real_embeddings if k != key]
         for aidx, anchor_embedding in enumerate(anchor_embeddings[key]):
             for ridx, real_same_embedding in enumerate(real_embeddings[key]):
@@ -435,7 +438,9 @@ def calculate_eer(speaker_embeddings, mode="generated"):
                     # skip if same speaker and same utterance
                     continue
 
-                y_score.append(get_similarity(anchor_embedding, real_same_embedding))
+                same_score = get_similarity(anchor_embedding, real_same_embedding)
+                y_score.append(same_score)
+                speaker_sim_score.append(same_score)
                 y_true.append(1)
 
                 alternate_speaker = random.choice(alternate_keys)
@@ -443,6 +448,9 @@ def calculate_eer(speaker_embeddings, mode="generated"):
                 alternate_embedding = real_embeddings[alternate_speaker][alternate_audio_idx]
                 y_score.append(get_similarity(anchor_embedding, alternate_embedding))
                 y_true.append(0)
+
+        speaker_sim_score = np.mean(speaker_sim_score)
+        speaker_similarities[key] = float(speaker_sim_score)
 
     fpr, tpr, thresholds = roc_curve(y_true, y_score)
     _auc = auc(fpr, tpr)
@@ -454,6 +462,7 @@ def calculate_eer(speaker_embeddings, mode="generated"):
     assert abs(eer - eer_verify) < 1.0
 
     return {
+        'speaker_similarities': speaker_similarities,
         'eer': eer,
         'auc': _auc,
     }
@@ -674,12 +683,13 @@ def evaluate(
     print("Metrics", metrics)
     # print("Real Metrics", sv_metrics_real)
     eer_str = "EER: {:.3f}".format(sv_metrics['eer'])
-    visualize_embeddings(
-        speaker_embeddings,
-        out_dir=out_dir,
-        title="TSNE {} {}".format(evaluation_type, eer_str),
-        out_file="tsne_{}_{}".format(evaluation_type, sv_model_name),
-    )
+
+    # visualize_embeddings(
+    #     speaker_embeddings,
+    #     out_dir=out_dir,
+    #     title="TSNE {} {}".format(evaluation_type, eer_str),
+    #     out_file="tsne_{}_{}".format(evaluation_type, sv_model_name),
+    # )
 
 
 def main():
