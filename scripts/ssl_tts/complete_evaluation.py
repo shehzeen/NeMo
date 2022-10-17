@@ -24,8 +24,8 @@ fastpitch_model_ckpts = [
 ]
 
 manifest_paths = [
-    # "/data/shehzeen/SSLTTS/manifests/libri_test.json",
-    "/data/shehzeen/SSLTTS/manifests/train_clean_360_corrected.json",
+    "/data/shehzeen/SSLTTS/manifests/libri_unseen_selected.json",
+    # "/data/shehzeen/SSLTTS/manifests/train_clean_360_corrected.json",
 ]
 # manifest_paths = ["/home/pneekhara/Datasets/vctk/vctk_test_local.json"]
 pitch_stats_jsons = [None, None]
@@ -34,7 +34,7 @@ pitch_stats_jsons = [None, None]
 sv_model_names = ["speakerverification_speakernet"]
 evaluation_types = ["swapping", "reconstructed"]
 base_out_dir = "/data/shehzeen/SSLTTS/Experiments/SpeakerSelection"
-n_speakers = 40
+n_speakers = 20
 min_samples_per_spk = 10
 max_samples_per_spk = 10
 # precomputed_stats_fps = ["/home/pneekhara/NeMo2022/Evaluations/UpdatedEvaluation/stats_seen.pkl", "/home/pneekhara/NeMo2022/Evaluations/UpdatedEvaluation/stats_unseen.pkl"]

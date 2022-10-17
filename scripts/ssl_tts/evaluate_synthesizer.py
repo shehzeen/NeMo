@@ -42,7 +42,7 @@ def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
     return wav
 
 
-def get_pitch_contour(wav, pitch_mean=None, pitch_std=None):
+def get_pitch_contour(wav, pitch_mean=None, pitch_std=None, compute_mean_std=False):
     f0, _, _ = librosa.pyin(
         wav.numpy(),
         fmin=librosa.note_to_hz('C2'),
@@ -54,6 +54,11 @@ def get_pitch_contour(wav, pitch_mean=None, pitch_std=None):
         fill_na=0.0,
     )
     pitch_contour = torch.tensor(f0, dtype=torch.float32)
+    _pitch_mean = pitch_contour.mean().item()
+    _pitch_std = pitch_contour.std().item()
+    if compute_mean_std:
+        pitch_mean = _pitch_mean
+        pitch_std = _pitch_std
     if (pitch_mean is not None) and (pitch_std is not None):
         pitch_contour = pitch_contour - pitch_mean
         pitch_contour[pitch_contour == -pitch_mean] = 0.0
@@ -310,11 +315,17 @@ def swap_speakers(
             ssl_model, wav_featurizer, wav_path1, emb_type="embedding_and_probs", use_unique_tokens=use_unique_tokens
         )
 
-        pitch_contour1 = get_pitch_contour(
-            load_wav(wav_path1, wav_featurizer),
-            pitch_mean=speaker_stats[spk1]["pitch_mean"],
-            pitch_std=speaker_stats[spk1]["pitch_std"],
-        )[None]
+        if spk1 == "source":
+            pitch_contour1 = get_pitch_contour(
+                load_wav(wav_path1, wav_featurizer),
+                compute_mean_std=True
+            )[None]
+        else:
+            pitch_contour1 = get_pitch_contour(
+                load_wav(wav_path1, wav_featurizer),
+                pitch_mean=speaker_stats[spk1]["pitch_mean"],
+                pitch_std=speaker_stats[spk1]["pitch_std"],
+            )[None]
 
         wav_generated = fastpitch_model.synthesize_wav(
             content_embedding1,
@@ -581,7 +592,7 @@ def evaluate(
     spk_count = 0
     sorted_keys = sorted(speaker_wise_audio_paths.keys())
     for key in sorted_keys:
-        if len(speaker_wise_audio_paths[key]) >= min_samples_per_spk:
+        if (key != "source") and len(speaker_wise_audio_paths[key]) >= min_samples_per_spk:
             filtered_paths[key] = speaker_wise_audio_paths[key][:max_samples_per_spk]
             spk_count += 1
             if spk_count >= n_speakers:
@@ -624,9 +635,19 @@ def evaluate(
     elif evaluation_type == "swapping":
         generated_file_paths = {}
         speakers = list(filtered_paths.keys())
+        speakers = [s for s in speakers if s != "source"]
+        
+        if 'source' in speaker_wise_audio_paths:
+            filtered_paths['source'] = speaker_wise_audio_paths['source']
+
         for tidx, target_speaker in enumerate(speakers):
             source_speaker_idx = tidx + 1 if tidx + 1 < len(speakers) else 0
-            source_speaker = speakers[source_speaker_idx]
+            
+            if 'source' in filtered_paths:
+                source_speaker = 'source'
+            else:
+                source_speaker = speakers[source_speaker_idx]
+
             generated_file_paths[target_speaker] = swap_speakers(
                 fastpitch_model,
                 ssl_model,
@@ -642,6 +663,9 @@ def evaluate(
                 use_unique_tokens=use_unique_tokens,
                 dataset_id=dataset_id,
             )
+        
+        if 'source' in filtered_paths:
+            del filtered_paths['source']
 
     speaker_embeddings = {}
     original_filepaths = filtered_paths
