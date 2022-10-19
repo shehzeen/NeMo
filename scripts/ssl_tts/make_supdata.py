@@ -259,15 +259,15 @@ def main():
     parser.add_argument(
         '--ssl_model_ckpt_path',
         type=str,
-        default="/home/pneekhara/NeMo2022/tensorboards/ConformerModels/ConformerCompatibleTry3/ConformerCompatible_Epoch3.ckpt",
+        default="/data/shehzeen/SSLTTS/Conformer22050_Epoch37.ckpt",
     )
-    parser.add_argument('--manifest_path', type=str, default="/home/pneekhara/NeMo2022/libri_val_formatted.json")
+    parser.add_argument('--manifest_path', type=str, default="/data/shehzeen/SSLTTS/manifests/libri_test.json")
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--ssl_content_emb_type', type=str, default="embedding_and_probs")
     parser.add_argument('--use_unique_tokens', type=int, default=1)
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--pool_workers', type=int, default=30)
-    parser.add_argument('--compute_pitch_contours', type=int, default=1)
+    parser.add_argument('--compute_pitch_contours', type=int, default=0)
     parser.add_argument('--num_pitch_per_speaker', type=int, default=None)  # saves time.
 
     args = parser.parse_args()
@@ -276,7 +276,7 @@ def main():
     manifest_path = args.manifest_path
     ssl_model_ckpt_path = args.ssl_model_ckpt_path
 
-    dataset = AudioDataset(manifest_path)
+    dataset = AudioDataset(manifest_path, min_duration=0, max_duration=1000)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,

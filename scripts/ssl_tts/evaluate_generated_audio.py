@@ -124,8 +124,11 @@ def calculate_eer(speaker_embeddings, mode="generated"):
 
 
 def main():
-    generated_audio_dir = '/data/shehzeen/SSLTTS/ADAVC_try1'
-    gt_audio_dir = '/data/shehzeen/SSLTTS/EVALDATA'
+    generated_audio_dir = '/data/shehzeen/AutoVC/autovc_converted'
+    # gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_ALL/'
+    gt_audio_dir = "/data/shehzeen/SSLTTS/EVALDATA"
+    # gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK'
+    gt_source_audio_dir = '/data/shehzeen/SSLTTS/EVALDATA/'
     base_exp_dir = '/data/shehzeen/SSLTTS/'
     exp_name = generated_audio_dir.split('/')[-1]
     device = "cpu"
@@ -140,7 +143,7 @@ def main():
                 generated_audio_files[speaker] = []
                 source_audio_files[speaker] = []
             source_fname = "source_{}.wav".format(f.split('_')[1])
-            source_path = os.path.join(gt_audio_dir, source_fname)
+            source_path = os.path.join(gt_source_audio_dir, source_fname)
             assert os.path.exists(source_path), "{} does not exist".format(source_path)
 
             generated_audio_files[speaker].append(os.path.join(generated_audio_dir, f))
@@ -206,8 +209,8 @@ def main():
         print (key, len(transcriptions[key]))
     print("results real")
 
-    real_eer = calculate_eer(speaker_embeddings, mode="real")
-    print(real_eer)
+    # real_eer = calculate_eer(speaker_embeddings, mode="real")
+    # print(real_eer)
     print("---------------------------------------------------------------------------------")
     print("results generated")
     generated_metrics = calculate_eer(speaker_embeddings, mode="generated")

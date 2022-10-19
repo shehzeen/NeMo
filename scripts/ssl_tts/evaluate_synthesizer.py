@@ -24,6 +24,8 @@ from transformers import Wav2Vec2Model, Wav2Vec2Processor
 from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.tts.models import fastpitch_ssl, hifigan, ssl_tts
+import nemo.collections.asr as nemo_asr
+import editdistance
 
 plt.rcParams["figure.figsize"] = (10, 10)
 device = "cpu"
@@ -277,6 +279,27 @@ def visualize_embeddings(embedding_dict_np, title="TSNE", out_dir=".", out_file=
 
     plt.savefig(os.path.join(out_dir, out_file))
 
+def calculate_cer(speaker_transcriptions, source_transcriptions):
+    mean_cer = 0.0
+    ctr = 0
+    generated_transcriptions = []
+    real_transcriptions = []
+    for speaker in speaker_transcriptions:
+        generated_transcriptions += speaker_transcriptions[speaker]
+        real_transcriptions += source_transcriptions
+
+    for idx in range(len(generated_transcriptions)):
+        t1 = generated_transcriptions[idx]
+        t2 = real_transcriptions[idx]
+        if len(t1) > 0 and len(t2) > 0:
+            cer = (1.0*editdistance.eval(t1, t2)) / max(len(t1), len(t2))
+        else:
+            cer = 1.0
+        ctr += 1 
+        mean_cer += cer
+    mean_cer /= ctr
+
+    return mean_cer
 
 def swap_speakers(
     fastpitch_model,
@@ -577,6 +600,11 @@ def evaluate(
     nemo_sv_model = nemo_sv_model.to(device)
     nemo_sv_model.eval()
 
+    asr_model_name = "stt_en_quartznet15x5"
+    asr_model = nemo_asr.models.EncDecCTCModel.from_pretrained(model_name=asr_model_name)
+    asr_model = asr_model.to(device)
+    asr_model.eval()
+
     wav_featurizer = WaveformFeaturizer(sample_rate=22050, int_values=False, augmentor=None)
 
     speaker_wise_audio_paths = {}
@@ -588,9 +616,14 @@ def evaluate(
                 speaker_wise_audio_paths[record['speaker']] = []
             speaker_wise_audio_paths[record['speaker']].append(record['audio_filepath'])
 
+    for key in speaker_wise_audio_paths:
+        # sort fps by name for each speaker
+        speaker_wise_audio_paths[key] = sorted(speaker_wise_audio_paths[key])
+
     filtered_paths = {}
     spk_count = 0
-    sorted_keys = sorted(speaker_wise_audio_paths.keys())
+    # sorted_keys = sorted(speaker_wise_audio_paths.keys())
+    sorted_keys = speaker_wise_audio_paths.keys()
     for key in sorted_keys:
         if (key != "source") and len(speaker_wise_audio_paths[key]) >= min_samples_per_spk:
             filtered_paths[key] = speaker_wise_audio_paths[key][:max_samples_per_spk]
@@ -618,6 +651,8 @@ def evaluate(
     pitch_conditioning = True
     use_unique_tokens = use_unique_tokens == 1
 
+    source_transcripts = []
+
     if evaluation_type == "reconstructed":
         generated_file_paths = reconstruct_audio(
             fastpitch_model,
@@ -639,7 +674,11 @@ def evaluate(
         
         if 'source' in speaker_wise_audio_paths:
             filtered_paths['source'] = speaker_wise_audio_paths['source']
+            for path in filtered_paths['source']:
+                trancription = asr_model.transcribe([path])[0]
+                source_transcripts.append(trancription)
 
+        speaker_transcriptions = {}
         for tidx, target_speaker in enumerate(speakers):
             source_speaker_idx = tidx + 1 if tidx + 1 < len(speakers) else 0
             
@@ -663,15 +702,25 @@ def evaluate(
                 use_unique_tokens=use_unique_tokens,
                 dataset_id=dataset_id,
             )
-        
+            
+            speaker_transcriptions[target_speaker] = []
+            for path in generated_file_paths[target_speaker]:
+                trancription = asr_model.transcribe([path])[0]
+                speaker_transcriptions[target_speaker].append(trancription)
+
         if 'source' in filtered_paths:
             del filtered_paths['source']
+    
+    cer = None
+    if len(source_transcripts) > 0:
+        cer = calculate_cer(speaker_transcriptions, source_transcripts)
 
     speaker_embeddings = {}
     original_filepaths = filtered_paths
 
     generated_fp_list = []
     original_fp_list = []
+    transcriptions = {} 
     for key in generated_file_paths:
         speaker_embeddings["generated_{}".format(key)] = []
         speaker_embeddings["original_{}".format(key)] = []
@@ -702,18 +751,19 @@ def evaluate(
     sv_metrics = calculate_eer(speaker_embeddings)
     sv_metrics_real = calculate_eer(speaker_embeddings, mode="real")
     metrics = {'generated': sv_metrics, 'real': sv_metrics_real, 'fid': fid}
+    metrics['cer'] = cer
     with open(os.path.join(out_dir, "sv_metrics_{}_{}.json".format(evaluation_type, sv_model_name)), "w") as f:
         json.dump(metrics, f)
     print("Metrics", metrics)
     # print("Real Metrics", sv_metrics_real)
     eer_str = "EER: {:.3f}".format(sv_metrics['eer'])
 
-    # visualize_embeddings(
-    #     speaker_embeddings,
-    #     out_dir=out_dir,
-    #     title="TSNE {} {}".format(evaluation_type, eer_str),
-    #     out_file="tsne_{}_{}".format(evaluation_type, sv_model_name),
-    # )
+    visualize_embeddings(
+        speaker_embeddings,
+        out_dir=out_dir,
+        title="TSNE {} {}".format(evaluation_type, eer_str),
+        out_file="tsne_{}_{}".format(evaluation_type, sv_model_name),
+    )
 
 
 def main():

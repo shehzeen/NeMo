@@ -20,11 +20,13 @@ fastpitch_model_ckpts = [
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/SegDurInterp674.ckpt",
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/SegDurPerSampleEpoch604.ckpt",
     # "/home/pneekhara/NeMo2022/tensorboards/FastPitch/DurationPredictor/LibriAllDataId174.ckpt",
-    "/data/shehzeen/SSLTTS/gdrive/FastPitch_Checkpoints_All/SegDurPerSampleEpoch604.ckpt"
+    # "/data/shehzeen/SSLTTS/gdrive/FastPitch_Checkpoints_All/SegDurPerSampleEpoch604.ckpt"
+    "/data/shehzeen/SSLTTS/gdrive/FastPitch_Checkpoints_All/FastPitch_3337577_epoch224.ckpt"
 ]
 
 manifest_paths = [
     "/data/shehzeen/SSLTTS/manifests/libri_unseen_selected.json",
+    "/data/shehzeen/SSLTTS/manifests/libri_seen_selected.json",
     # "/data/shehzeen/SSLTTS/manifests/train_clean_360_corrected.json",
 ]
 # manifest_paths = ["/home/pneekhara/Datasets/vctk/vctk_test_local.json"]
@@ -32,16 +34,18 @@ pitch_stats_jsons = [None, None]
 # pitch_stats_jsons = [None]
 # sv_model_names = ["speakerverification_speakernet", "ecapa_tdnn"]
 sv_model_names = ["speakerverification_speakernet"]
-evaluation_types = ["swapping", "reconstructed"]
-base_out_dir = "/data/shehzeen/SSLTTS/Experiments/SpeakerSelection"
-n_speakers = 20
+evaluation_types = ["swapping"
+#, "reconstructed"
+]
+base_out_dir = "/data/shehzeen/SSLTTS/Experiments/SpeakerSelection_pred_pitch_gtdur_corrected"
+n_speakers = 30
 min_samples_per_spk = 10
 max_samples_per_spk = 10
 # precomputed_stats_fps = ["/home/pneekhara/NeMo2022/Evaluations/UpdatedEvaluation/stats_seen.pkl", "/home/pneekhara/NeMo2022/Evaluations/UpdatedEvaluation/stats_unseen.pkl"]
 precomputed_stats_fps = [None, None]
 compute_pitch = 1
-compute_duration = 1
-use_unique_tokens = 1
+compute_duration = 0
+use_unique_tokens = 0
 durations_per_speaker = [10]
 
 dataset_ids = [0]
