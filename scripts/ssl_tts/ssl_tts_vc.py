@@ -158,12 +158,12 @@ def main():
         '--hifi_ckpt_path', type=str, default="/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
     )
     parser.add_argument('--fastpitch_ckpt_path', type=str, default="/data/shehzeen/SSLTTS/gdrive/FastPitch_Checkpoints_All/FastPitch_3337577_epoch224.ckpt")
-    parser.add_argument('--source_audio_path', type=str, default="/data/shehzeen/SSLTTS/EVALDATA/source_0.wav")
-    parser.add_argument('--target_audio_path', type=str, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS/targetspeaker_168_0.wav")
+    parser.add_argument('--source_audio_path', type=str)
+    parser.add_argument('--target_audio_path', type=str) # can be a list seperated by comma
     parser.add_argument('--out_path', type=str)
     parser.add_argument('--source_target_out_pairs', type=str)
     parser.add_argument('--use_unique_tokens', type=int, default=0)
-    parser.add_argument('--compute_pitch', type=int, default=1)
+    parser.add_argument('--compute_pitch', type=int, default=0)
     parser.add_argument('--compute_duration', type=int, default=0)
     args = parser.parse_args()
 
@@ -175,7 +175,7 @@ def main():
         assert args.out_path is None, "out_path and source_target_out_pairs are mutually exclusive"
         with open(args.source_target_out_pairs, "r") as f:
             lines = f.readlines()
-            source_target_out_pairs = [line.strip().split(",") for line in lines]
+            source_target_out_pairs = [line.strip().split(";") for line in lines]
     else:
         assert args.source_audio_path is not None, "source_audio_path is required"
         assert args.target_audio_path is not None, "target_audio_path is required"
@@ -183,6 +183,7 @@ def main():
             source_name = os.path.basename(args.source_audio_path).split(".")[0]
             target_name = os.path.basename(args.target_audio_path).split(".")[0]
             args.out_path = "swapped_{}_{}.wav".format(source_name, target_name)
+            
         source_target_out_pairs = [(args.source_audio_path, args.target_audio_path, args.out_path)]
     
     out_paths = [r[2] for r in source_target_out_pairs]
@@ -210,7 +211,7 @@ def main():
 
     for source_target_out in source_target_out_pairs:
         source_audio_path = source_target_out[0]
-        target_audio_path = source_target_out[1]
+        target_audio_paths = source_target_out[1].split(",")
         out_path = source_target_out[2]
 
         with torch.no_grad():
@@ -218,7 +219,7 @@ def main():
                 ssl_model, wav_featurizer, source_audio_path, emb_type="embedding_and_probs", use_unique_tokens=use_unique_tokens, device=device
             )
 
-            speaker_embedding2 = get_speaker_embedding(ssl_model, wav_featurizer, [target_audio_path], duration=None, device=device)
+            speaker_embedding2 = get_speaker_embedding(ssl_model, wav_featurizer, target_audio_paths, duration=None, device=device)
 
             pitch_contour1 = None
             if not compute_pitch:
@@ -226,6 +227,7 @@ def main():
                     load_wav(source_audio_path, wav_featurizer),
                     compute_mean_std=True
                 )[None]
+                pitch_contour1 = pitch_contour1.to(device)
 
             wav_generated = fastpitch_model.synthesize_wav(
                 content_embedding1,

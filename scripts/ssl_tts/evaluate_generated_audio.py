@@ -49,6 +49,8 @@ def calculate_cer(transcriptions):
     for idx in range(len(generated_transcriptions)):
         t1 = generated_transcriptions[idx]
         t2 = real_transcriptions[idx]
+        print("gen", t1)
+        print("real", t2)
         if len(t1) > 0 and len(t2) > 0:
             cer = (1.0*editdistance.eval(t1, t2)) / max(len(t1), len(t2))
         else:
@@ -124,11 +126,13 @@ def calculate_eer(speaker_embeddings, mode="generated"):
 
 
 def main():
-    generated_audio_dir = '/data/shehzeen/AutoVC/autovc_converted'
+    # generated_audio_dir = '/data/shehzeen/AutoVC/autovc_converted'
+    generated_audio_dir = '/data/shehzeen/SSLTTS/s2vc_generated_vctk'
     # gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_ALL/'
-    gt_audio_dir = "/data/shehzeen/SSLTTS/EVALDATA"
-    # gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK'
-    gt_source_audio_dir = '/data/shehzeen/SSLTTS/EVALDATA/'
+    # gt_audio_dir = "/data/shehzeen/SSLTTS/EVALDATA"
+    gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK'
+    gt_source_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE'
+    # gt_source_audio_dir = "/data/shehzeen/SSLTTS/EVALDATA"
     base_exp_dir = '/data/shehzeen/SSLTTS/'
     exp_name = generated_audio_dir.split('/')[-1]
     device = "cpu"
@@ -139,10 +143,15 @@ def main():
         if 'targetspeaker' in f and f.endswith('.wav'):
             # f = source_1_targetspeaker_6_0.wav
             speaker = f.split('_')[3]
+            if "TO" in f:
+                speaker = f.split('_')[2]
             if speaker not in generated_audio_files:
                 generated_audio_files[speaker] = []
                 source_audio_files[speaker] = []
             source_fname = "source_{}.wav".format(f.split('_')[1])
+            if "TO" in f:
+                source_num = f.split('_')[1].split("TO")[0]
+                source_fname = "source_{}.wav".format(source_num)
             source_path = os.path.join(gt_source_audio_dir, source_fname)
             assert os.path.exists(source_path), "{} does not exist".format(source_path)
 
@@ -182,21 +191,21 @@ def main():
         transcriptions["original_{}".format(key)] = []
 
         for fp in generated_audio_files[key]:
-            print("getting embedding for {}".format(fp))
+            # print("getting embedding for {}".format(fp))
             embedding = nemo_sv_model.get_embedding(fp)
             embedding = embedding.cpu().detach().numpy().flatten()
             speaker_embeddings["generated_{}".format(key)].append(embedding)
             trancription = asr_model.transcribe([fp])[0]
-            print("Transcription generated: {}".format(trancription))
+            # print("Transcription generated: {}".format(trancription))
             transcriptions["generated_{}".format(key)].append(trancription)
 
         for fp in source_audio_files[key]:
             trancription = asr_model.transcribe([fp])[0]
-            print("Transcription original: {}".format(trancription))
+            # print("Transcription original: {}".format(trancription))
             transcriptions["original_{}".format(key)].append(trancription)
 
         for fp in gt_audio_files[key]:
-            print("getting embedding for {}".format(fp))
+            # print("getting embedding for {}".format(fp))
             embedding = nemo_sv_model.get_embedding(fp)
             embedding = embedding.cpu().detach().numpy().flatten()
             speaker_embeddings["original_{}".format(key)].append(embedding)
