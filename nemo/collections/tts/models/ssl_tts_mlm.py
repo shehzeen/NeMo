@@ -318,7 +318,37 @@ class SSLDisentanglerMLM(ModelPT):
 
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
 
-        return spectrograms, spec_masks, encoded, encoded_len
+        for task in self._cfg.downstream_heads.task_names:
+            if task == "speaker_verification":
+                speaker_embedding = self.downstream_nets['speaker_verification'](encoded[:, :, 0])
+                l2_norm = torch.norm(speaker_embedding, p=2, dim=-1, keepdim=True)
+                speaker_embedding_normalized = speaker_embedding / l2_norm
+                speaker_logits = self.sv_linear(speaker_embedding_normalized)
+
+            elif task == "content":
+                encoded_btc = encoded.permute(0, 2, 1)
+                content_embedding = self.downstream_nets['content'](encoded_btc)
+                if normalize_content:
+                    l2_norm_content = torch.norm(content_embedding, p=2, dim=-1, keepdim=True)
+                    content_embedding = content_embedding / l2_norm_content
+
+                content_logits = self.content_linear(content_embedding)
+                content_log_probs = content_logits.log_softmax(dim=2)
+                content_log_probs = content_log_probs.permute(1, 0, 2)  # t,b,c for ctc
+
+            else:
+                raise ValueError(f"{task} is not a valid task. Task must be speaker_verification or content.")
+
+        return (
+            spectrograms, 
+            spec_masks, 
+            encoded,
+            speaker_logits,
+            speaker_embedding_normalized,
+            content_embedding,
+            content_log_probs,
+            encoded_len,
+        )
 
     def forward(self, input_signal=None, input_signal_length=None, normalize_content=True):
 
@@ -364,6 +394,85 @@ class SSLDisentanglerMLM(ModelPT):
             input_signal=input_signal, input_signal_length=input_signal_length, normalize_content=normalize_content,
         )
 
+    def decoder_loss_step(self, spectrograms, spec_masks, encoded, encoded_len, targets=None, target_lengths=None):
+        """
+        Forward pass through all decoders and calculate corresponding losses.
+        Args:
+            spectrograms: Processed spectrograms of shape [B, D, T].
+            spec_masks: Masks applied to spectrograms of shape [B, D, T].
+            encoded: The encoded features tensor of shape [B, D, T].
+            encoded_len: The lengths of the acoustic sequence after propagation through the encoder, of shape [B].
+            targets: Optional target labels of shape [B, T]
+            target_lengths: Optional target label lengths of shape [B]
+
+        Returns:
+            A tuple of 2 elements -
+            1) Total sum of losses weighted by corresponding loss_alphas
+            2) Dictionary of unweighted losses
+        """
+        loss_val_dict = {}
+
+        loss_value = encoded.new_zeros(1)
+        outputs = {}
+        # registry = self.get_module_registry(self.encoder)
+
+        for dec_loss_name, dec_loss in self.decoder_losses.items():
+            print("dec_loss_name", dec_loss_name)
+            # loop through decoders and corresponding losses
+            if not self.decoder_losses_active[dec_loss_name]:
+                continue
+
+            if self.output_from_layer[dec_loss_name] is None:
+                dec_input = encoded
+            else:
+                # extract output from specified layer using AccessMixin registry
+                # dec_input = registry[self.output_from_layer[dec_loss_name]]['encoder'][-1]
+                raise NotImplementedError("registry is not implemented yet.")
+
+            if self.transpose_encoded[dec_loss_name]:
+                dec_input = dec_input.transpose(-2, -1)
+
+            if self.targets_from_loss[dec_loss_name] is not None:
+                # extract targets from specified loss
+                target_loss = self.targets_from_loss[dec_loss_name]
+                targets = self.decoder_losses[target_loss]['loss'].target_ids
+                target_lengths = self.decoder_losses[target_loss]['loss'].target_lengths
+                if target_lengths is None:
+                    target_lengths = encoded_len
+
+            if hasattr(dec_loss['decoder'], "needs_labels") and dec_loss['decoder'].needs_labels:
+                # if we are using a decoder which needs labels, provide them
+                outputs[dec_loss_name] = dec_loss['decoder'](
+                    encoder_output=dec_input, targets=targets, target_lengths=target_lengths
+                )
+            else:
+                outputs[dec_loss_name] = dec_loss['decoder'](encoder_output=dec_input)
+
+            current_loss = dec_loss['loss']
+            if current_loss.needs_labels:
+                # if we are using a loss which needs labels, provide them
+                current_loss_value = current_loss(
+                    spec_masks=spec_masks,
+                    decoder_outputs=outputs[dec_loss_name],
+                    targets=targets,
+                    decoder_lengths=encoded_len,
+                    target_lengths=target_lengths,
+                )
+            else:
+                current_loss_value = current_loss(
+                    spectrograms=spectrograms,
+                    spec_masks=spec_masks,
+                    decoder_outputs=outputs[dec_loss_name],
+                    decoder_lengths=encoded_len,
+                )
+                print("current_loss_value", current_loss_value)
+            loss_value = loss_value + current_loss_value * self.loss_alphas[dec_loss_name]
+            loss_val_dict[dec_loss_name] = current_loss_value
+
+        return loss_value, loss_val_dict
+
+
+
     def training_step(self, batch, batch_idx):
         loss = 0.0
         optim_backbone, optim_downstream = self.optimizers()
@@ -400,18 +509,26 @@ class SSLDisentanglerMLM(ModelPT):
                 target = batch[key]['text']  # (B, T)
                 target_len = batch[key]['text_lens']
 
-                _, _, content_embedding, content_log_probs, encoded_len = self.forward(
+                #updated these
+                spectrograms, spec_masks, encoded, _, _, content_embedding, content_log_probs, encoded_len = self.forward_with_masking(
                     input_signal=signal, input_signal_length=signal_len
                 )
 
                 ctc_loss = self.ctc_loss(content_log_probs, target, encoded_len, target_len)
+
+                #added new loss here
+                decoder_loss_value, loss_val_dict = self.decoder_loss_step(
+                    spectrograms, spec_masks, encoded, encoded_len, target, target_len
+                )
+                print("decoder_loss_value", decoder_loss_value)
+                print("loss_val_dict", loss_val_dict)
                 # check if ctc loss is nan
                 if torch.isfinite(ctc_loss):
                     self.log("t_ctc_loss", ctc_loss.item())
                     content_loss += ctc_loss
                 else:
                     logging.warning(f"ctc_loss is not finite")
-
+                content_loss += decoder_loss_value[0]
                 if self.pitch_augment:
                     augmented_signal = batch[key]['audio_shifted']
                     if self.stop_gradient:

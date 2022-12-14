@@ -155,7 +155,7 @@ model:
         # (quantizer is required to extract pseudo-labels for other losses)
         codebook_size: 300 # number of vectors in the quantization codebook per group
         num_groups: 2 # number of groups in the quantizer codebook
-        num_negatives: 100 # number of sampled negatives for each target
+        num_negatives: 50 # number of sampled negatives for each target
         sample_from_same_utterance_only: true # should negatives be sampled only from the same utterance
         sample_from_non_masked: false # should negatives be sampled from non-masked steps
 
