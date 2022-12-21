@@ -324,6 +324,7 @@ class FastPitchModel_SSL(ModelPT):
         compute_duration=False,
         durs_gt=None,
         dataset_id=0,
+        pace=1.0
     ):
         """
         Args:
@@ -369,7 +370,7 @@ class FastPitchModel_SSL(ModelPT):
         else:
             pitch = None
 
-        mels_pred, *_ = self(enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=pitch, pace=1.0)
+        mels_pred, *_ = self(enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=pitch, pace=pace)
 
         wavs = []
         for idx in range(_bs):

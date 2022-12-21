@@ -209,6 +209,8 @@ def main():
     parser.add_argument('--use_unique_tokens', type=int, default=0)
     parser.add_argument('--compute_pitch', type=int, default=0)
     parser.add_argument('--compute_duration', type=int, default=0)
+    parser.add_argument('--pitch_scale', type=float, default=1.0)
+    parser.add_argument('--pace', type=float, default=1.0)
     args = parser.parse_args()
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -269,6 +271,9 @@ def main():
                 device=device,
             )
 
+            print("duration1", duration1)
+            duration1 = duration1
+            print("duration1 scaled", duration1)
             speaker_embedding2 = get_speaker_embedding(
                 ssl_model, wav_featurizer, target_audio_paths, duration=None, device=device
             )
@@ -279,6 +284,7 @@ def main():
                     load_wav(source_audio_path, wav_featurizer), compute_mean_std=True, sample_rate=fpssl_sample_rate
                 )[None]
                 pitch_contour1 = pitch_contour1.to(device)
+                pitch_contour1 = pitch_contour1 * args.pitch_scale
 
             wav_generated = fastpitch_model.generate_wav(
                 content_embedding1,
@@ -288,6 +294,7 @@ def main():
                 compute_duration=compute_duration,
                 durs_gt=duration1,
                 dataset_id=0,
+                pace=args.pace
             )
             wav_generated = wav_generated[0][0]
             soundfile.write(out_path, wav_generated, fpssl_sample_rate)
