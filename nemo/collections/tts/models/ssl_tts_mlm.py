@@ -466,6 +466,7 @@ class SSLDisentanglerMLM(ModelPT):
                     decoder_lengths=encoded_len,
                 )
                 print("current_loss_value", current_loss_value)
+                print(xxx)
             loss_value = loss_value + current_loss_value * self.loss_alphas[dec_loss_name]
             loss_val_dict[dec_loss_name] = current_loss_value
 
@@ -514,11 +515,15 @@ class SSLDisentanglerMLM(ModelPT):
                     input_signal=signal, input_signal_length=signal_len
                 )
 
+                print("encoded", encoded.shape)
+                print("content", content_embedding.shape)
+                content_embedding_bct = content_embedding.permute(0, 2, 1)
+                print("content_embedding_bct", content_embedding_bct.shape)
                 ctc_loss = self.ctc_loss(content_log_probs, target, encoded_len, target_len)
 
                 #added new loss here
                 decoder_loss_value, loss_val_dict = self.decoder_loss_step(
-                    spectrograms, spec_masks, encoded, encoded_len, target, target_len
+                    spectrograms, spec_masks, content_embedding_bct, encoded_len, target, target_len
                 )
                 print("decoder_loss_value", decoder_loss_value)
                 print("loss_val_dict", loss_val_dict)

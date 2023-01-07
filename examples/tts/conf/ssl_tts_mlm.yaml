@@ -21,7 +21,10 @@
 # With weight_decay=0.0, learning rate may need to get reduced to 2.0.
 
 name: "Conformer-SSL"
-init_from_pretrained_model: "ssl_en_conformer_large"
+init_from_pretrained_model:
+  model0:
+    name: "ssl_en_conformer_large"
+    exclude: "decoder_losses"
 
 model:
   sample_rate: 22050
@@ -138,7 +141,8 @@ model:
     contrastive:
       decoder:
         _target_: nemo.collections.asr.modules.ConvASRDecoderReconstruction
-        feat_in: ${model.encoder.d_model}
+        # feat_in: ${model.encoder.d_model}
+        feat_in: ${model.downstream_heads.content_embed_size}
         feat_hidden: 128
         # features in hidden layer of decoder
         feat_out: ${model.decoder_out}
@@ -162,7 +166,7 @@ model:
     mlm:
       decoder:
         _target_: nemo.collections.asr.modules.ConvASRDecoder
-        feat_in: ${model.encoder.d_model}
+        feat_in: ${model.downstream_heads.content_embed_size}
         num_classes: 90000
         # set this to be equal to codebook_size^groups in the contrastive loss
       loss:
