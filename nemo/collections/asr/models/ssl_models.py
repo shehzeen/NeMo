@@ -420,6 +420,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             registry = self.get_module_registry(self.encoder)
 
             for dec_loss_name, dec_loss in self.decoder_losses.items():
+                print("dec_loss_name", dec_loss_name)
                 # loop through decoders and corresponding losses
                 if not self.decoder_losses_active[dec_loss_name]:
                     continue
@@ -465,6 +466,8 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
                         decoder_outputs=outputs[dec_loss_name],
                         decoder_lengths=encoded_len,
                     )
+                    
+                print("current_loss_value", current_loss_value)
                 loss_value = loss_value + current_loss_value * self.loss_alphas[dec_loss_name]
                 loss_val_dict[dec_loss_name] = current_loss_value
 
@@ -495,6 +498,9 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
         loss_value, loss_val_dict = self.decoder_loss_step(
             spectrograms, spec_masks, encoded, encoded_len, targets, target_lengths
         )
+
+        print("decoder_loss_value", loss_value)
+        print("loss_val_dict", loss_val_dict)
 
         tensorboard_logs = {
             'learning_rate': self._optimizer.param_groups[0]['lr'],

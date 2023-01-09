@@ -21,6 +21,7 @@
 # With weight_decay=0.0, learning rate may need to get reduced to 2.0.
 
 name: "Conformer-SSL"
+init_from_pretrained_model: "ssl_en_conformer_large"
 
 model:
   sample_rate: 16000

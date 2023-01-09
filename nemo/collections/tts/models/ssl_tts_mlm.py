@@ -97,6 +97,8 @@ class SSLDisentanglerMLM(ModelPT):
                 self.downstream_nets[task] = nn.Linear(in_dim, out_dim)
                 self.content_linear = nn.Linear(out_dim, num_chars)
                 self.ctc_loss = nn.CTCLoss(blank=self._text_tokenizer.blank, zero_infinity=True)
+                self.ctc_loss_alpha = self._cfg.get('ctc_loss_alpha', 0.0)
+                print(f"ctc_loss_alpha: {self.ctc_loss_alpha}")
                 self.pitch_augment = self._cfg.get('pitch_augment', False)
                 self.augment_ctc = self._cfg.get('augment_ctc', False)
                 self.aug_loss_type = self._cfg.get('aug_loss_type', 'mse')
@@ -417,7 +419,7 @@ class SSLDisentanglerMLM(ModelPT):
         # registry = self.get_module_registry(self.encoder)
 
         for dec_loss_name, dec_loss in self.decoder_losses.items():
-            print("dec_loss_name", dec_loss_name)
+            # print("dec_loss_name", dec_loss_name)
             # loop through decoders and corresponding losses
             if not self.decoder_losses_active[dec_loss_name]:
                 continue
@@ -465,8 +467,8 @@ class SSLDisentanglerMLM(ModelPT):
                     decoder_outputs=outputs[dec_loss_name],
                     decoder_lengths=encoded_len,
                 )
-                print("current_loss_value", current_loss_value)
-                print(xxx)
+                # print("current_loss_value", current_loss_value)
+
             loss_value = loss_value + current_loss_value * self.loss_alphas[dec_loss_name]
             loss_val_dict[dec_loss_name] = current_loss_value
 
@@ -515,18 +517,19 @@ class SSLDisentanglerMLM(ModelPT):
                     input_signal=signal, input_signal_length=signal_len
                 )
 
-                print("encoded", encoded.shape)
-                print("content", content_embedding.shape)
                 content_embedding_bct = content_embedding.permute(0, 2, 1)
-                print("content_embedding_bct", content_embedding_bct.shape)
-                ctc_loss = self.ctc_loss(content_log_probs, target, encoded_len, target_len)
+                
+                if self.ctc_loss_alpha > 0:
+                    ctc_loss = self.ctc_loss_alpha * self.ctc_loss(content_log_probs, target, encoded_len, target_len)
+                else:
+                    ctc_loss = torch.tensor(0.0).to(self.device)
 
                 #added new loss here
                 decoder_loss_value, loss_val_dict = self.decoder_loss_step(
                     spectrograms, spec_masks, content_embedding_bct, encoded_len, target, target_len
                 )
-                print("decoder_loss_value", decoder_loss_value)
-                print("loss_val_dict", loss_val_dict)
+                # print("decoder_loss_value", decoder_loss_value)
+                # print("loss_val_dict", loss_val_dict)
                 # check if ctc loss is nan
                 if torch.isfinite(ctc_loss):
                     self.log("t_ctc_loss", ctc_loss.item())
