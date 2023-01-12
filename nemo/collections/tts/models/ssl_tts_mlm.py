@@ -536,6 +536,10 @@ class SSLDisentanglerMLM(ModelPT):
                 # print("decoder_loss_value", decoder_loss_value)
                 # print("loss_val_dict", loss_val_dict)
                 # check if ctc loss is nan
+                for lkey in loss_val_dict:
+                    if torch.isfinite(loss_val_dict[lkey]):
+                        self.log(f"t_{lkey}_loss", loss_val_dict[lkey].item())
+
                 if torch.isfinite(ctc_loss):
                     self.log("t_ctc_loss", ctc_loss.item())
                     content_loss += ctc_loss
