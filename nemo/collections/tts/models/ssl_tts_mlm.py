@@ -545,7 +545,7 @@ class SSLDisentanglerMLM(ModelPT):
                     content_loss += ctc_loss
                 else:
                     logging.warning(f"ctc_loss is not finite")
-                content_loss += decoder_loss_value[0]
+                content_loss += 0.0001 * decoder_loss_value[0]
                 if self.pitch_augment:
                     augmented_signal = batch[key]['audio_shifted']
                     if self.stop_gradient:
