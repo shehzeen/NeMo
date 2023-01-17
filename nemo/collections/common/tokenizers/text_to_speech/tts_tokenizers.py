@@ -147,7 +147,7 @@ class BaseCharsTokenizer(BaseTokenizer):
             if c == space and len(cs) > 0 and cs[-1] != space:
                 cs.append(c)
             # Add the current char that is an alphanumeric or an apostrophe.
-            elif (c.isalnum() or c == "'") and c in tokens:
+            elif c in tokens:
                 cs.append(c)
             # Add a punctuation that has a single char.
             elif (c in self.PUNCT_LIST) and self.punct:
@@ -166,6 +166,40 @@ class BaseCharsTokenizer(BaseTokenizer):
 
         return [self._token2id[p] for p in cs]
 
+class EnglishSpanishBengaliTokenizer(BaseCharsTokenizer):
+    def __init__(
+        self,
+        punct=True,
+        apostrophe=True,
+        add_blank_at=None,
+        pad_with_space=False,
+        non_default_punct_list=None
+    ):
+        """English char-based tokenizer.
+        Args:
+            punct: Whether to reserve grapheme for basic punctuation or not.
+            apostrophe: Whether to use apostrophe or not.
+            add_blank_at: Add blank to labels in the specified order ("last") or after tokens (any non None),
+             if None then no blank in labels.
+            pad_with_space: Whether to pad text with spaces at the beginning and at the end or not.
+            non_default_punct_list: List of punctuation marks which will be used instead default.
+            text_preprocessing_func: Text preprocessing function for correct execution of the tokenizer.
+             Basically, it replaces all non-unicode characters with unicode ones and apply lower() function.
+        """
+        char_list = []
+        char_list.extend(string.ascii_lowercase)
+        non_english_charlist = ["\u0080", "\u0081", "\u0082", "\u0083", "\u0084", "\u0085", "\u0086", "\u0087", "\u0088", "\u0089", "\u008a", "\u008b", "\u008c", "\u008d", "\u008e", "\u008f", "\u0090", "\u0091", "\u0092", "\u0093", "\u0094", "\u0095", "\u0096", "\u0097", "\u0098", "\u0099", "\u009a", "\u009b", "\u009c", "\u009d", "\u009e", "\u009f", "\u00a0", "\u00a1", "\u00a2", "\u00a3", "\u00a4", "\u00a5", "\u00a6", "\u00a7", "\u00a8", "\u00a9", "\u00aa", "\u00ab", "\u00ac", "\u00ad", "\u00ae", "\u00af", "\u00b0", "\u00b1", "\u00b2", "\u00b3", "\u00b4", "\u00b5", "\u00b6", "\u00b7", "\u00b8", "\u00b9", "\u00ba", "\u00bb", "\u00bc", "\u00bd", "\u00be", "\u00bf", "\u00c0", "\u00c1", "\u00c2", "\u00c3", "\u00c4", "\u00c5", "\u00c6", "\u00c7", "\u00c8", "\u00c9", "\u00ca", "\u00cb", "\u00cc", "\u00cd", "\u00ce", "\u00cf", "\u00d0", "\u00d1", "\u00d2", "\u00d3", "\u00d4", "\u00d5", "\u00d6", "\u00d7", "\u00d8", "\u00d9", "\u00da", "\u00db", "\u00dc", "\u00dd", "\u00de", "\u00df", "\u00e0", "\u00e1", "\u00e2", "\u00e3", "\u00e4", "\u00e5", "\u00e6", "\u00e7", "\u00e8", "\u00e9", "\u00ea", "\u00eb", "\u00ec", "\u00ed", "\u00ee", "\u00ef", "\u00f0", "\u00f1", "\u00f2", "\u00f3", "\u00f4", "\u00f5", "\u00f6", "\u00f7", "\u00f8", "\u00f9", "\u00fa", "\u00fb", "\u00fc", "\u00fd", "\u00fe", "\u00ff", "\u0100", "\u0101", "\u0102", "\u0103", "\u0104", "\u0105", "\u0106", "\u0107", "\u0108", "\u0109", "\u010a", "\u010b", "\u010c", "\u010d", "\u010e", "\u010f", "\u0110", "\u0111", "\u0112", "\u0113", "\u0114", "\u0115", "\u0116", "\u0117", "\u0118"]
+        char_list.extend(non_english_charlist)
+        
+        super().__init__(
+            chars=char_list,
+            punct=punct,
+            apostrophe=apostrophe,
+            add_blank_at=add_blank_at,
+            pad_with_space=pad_with_space,
+            non_default_punct_list=non_default_punct_list,
+            text_preprocessing_func=lambda x: x,
+        )
 
 class EnglishCharsTokenizer(BaseCharsTokenizer):
     def __init__(

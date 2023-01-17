@@ -18,6 +18,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import (
     BaseCharsTokenizer,
     BaseTokenizer,
     EnglishCharsTokenizer,
+    EnglishSpanishBengaliTokenizer,
     EnglishPhonemesTokenizer,
     GermanCharsTokenizer,
     GermanPhonemesTokenizer,

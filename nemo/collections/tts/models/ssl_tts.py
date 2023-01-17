@@ -27,7 +27,7 @@ from pytorch_lightning.trainer.supporters import CombinedLoader
 
 import nemo.collections.tts.torch.data as TTSData
 from nemo.collections.asr.losses.angularloss import AngularSoftmaxLoss
-from nemo.collections.tts.torch.tts_tokenizers import BaseTokenizer, EnglishCharsTokenizer
+from nemo.collections.tts.torch.tts_tokenizers import BaseTokenizer, EnglishCharsTokenizer, EnglishSpanishBengaliTokenizer
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.optim.lr_scheduler import WarmupPolicy
@@ -71,7 +71,7 @@ class SSLDisentangler(ModelPT):
         super().__init__(cfg=cfg, trainer=trainer)
         self.preprocessor_disentangler = SSLDisentangler.from_config_dict(self._cfg.preprocessor)
         self.encoder = SSLDisentangler.from_config_dict(self._cfg.encoder)
-        self._text_tokenizer = EnglishCharsTokenizer(add_blank_at="last")
+        self._text_tokenizer = EnglishSpanishBengaliTokenizer(add_blank_at="last")
         self._tb_logger = None
 
         self.downstream_nets = nn.ModuleDict()
@@ -167,7 +167,7 @@ class SSLDisentangler(ModelPT):
             if hasattr(self, '_text_tokenizer') and not isinstance(self._text_tokenizer, BaseTokenizer):
                 logging.warning(f"test_tokenizer is set but not a BaseTokenizer. Will be set to EnglishCharsTokenizer")
 
-            _text_tokenizer = self._text_tokenizer = EnglishCharsTokenizer(add_blank_at="last")
+            _text_tokenizer = self._text_tokenizer = EnglishSpanishBengaliTokenizer(add_blank_at="last")
 
         for task in self._cfg.downstream_heads.task_names:
             if task == 'speaker_verification':
