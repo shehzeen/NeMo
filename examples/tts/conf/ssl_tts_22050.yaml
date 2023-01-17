@@ -21,10 +21,11 @@
 # With weight_decay=0.0, learning rate may need to get reduced to 2.0.
 
 name: "Conformer-SSL"
-init_from_ptl_ckpt:
-  model0:
-    path: "/data/shehzeen/SSLTTS/Conformer22050_Epoch37.ckpt"
-    exclude: "content_linear"
+init_from_pretrained_model: "ssl_en_conformer_large"
+# init_from_ptl_ckpt:
+#   model0:
+#     path: "/data/shehzeen/SSLTTS/Conformer22050_Epoch37.ckpt"
+#     exclude: "content_linear"
 
 model:
   sample_rate: 22050
