@@ -36,6 +36,9 @@ from nemo.core.neural_types import (
     SpectrogramType,
 )
 from nemo.utils import logging
+import torchaudio
+import random
+import soundfile as sf
 
 __all__ = ['SpeechEncDecSelfSupervisedModel']
 
@@ -135,6 +138,14 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             set_access_cfg(self._cfg.access)
 
         self.apply_masking = True
+
+        self.use_aug_loss = False
+        if self._cfg.get("aug_loss", None):
+            self.use_aug_loss = True
+            self.aug_loss_weight = self._cfg.aug_loss.aug_loss_alpha
+            self.pitch_transforms = []
+            for _n_steps in [-4, 4]:
+                self.pitch_transforms.append(torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=self._cfg.sample_rate).to(self._device))
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
         if 'augmentor' in config:
@@ -378,7 +389,33 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
 
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
 
+        print("encoded shape: ", encoded.shape)
+
         return spectrograms, spec_masks, encoded, encoded_len
+
+    def compute_aug_loss(self, input_signal, input_signal_length):
+        transform = random.choice(self.pitch_transforms)
+        transform.to(self._device)
+        pitch_shifted_signal = transform(input_signal)
+        # write original and shifted audio to file
+        
+        processed_signal_original, processed_signal_length_original = self.preprocessor(
+            input_signal=input_signal, length=input_signal_length,
+        )
+
+        processed_signal_pitch_shifted, processed_signal_length_pitch_shifted = self.preprocessor(
+            input_signal=pitch_shifted_signal, length=input_signal_length,
+        )
+
+        encoded_original, encoded_len_original = self.encoder(audio_signal=processed_signal_original, length=processed_signal_length_original)
+        encoded_pitch_shifted, encoded_len_pitch_shifted = self.encoder(audio_signal=processed_signal_pitch_shifted, length=processed_signal_length_pitch_shifted)
+
+        # encoding shape is [B, D, T]
+        cosine_similarity = torch.nn.functional.cosine_similarity(encoded_original, encoded_pitch_shifted, dim=1).mean()
+        aug_loss = 1 - cosine_similarity
+
+        return aug_loss
+
 
     def decoder_loss_step(self, spectrograms, spec_masks, encoded, encoded_len, targets=None, target_lengths=None):
         """
@@ -413,6 +450,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
                 )
             else:
                 loss_value = self.loss(spectrograms=spectrograms, spec_masks=spec_masks, decoder_outputs=outputs)
+                print("loss_value: ", loss_value)
         else:
 
             loss_value = encoded.new_zeros(1)
@@ -420,6 +458,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             registry = self.get_module_registry(self.encoder)
 
             for dec_loss_name, dec_loss in self.decoder_losses.items():
+                print("dec_loss_name: ", dec_loss_name)
                 # loop through decoders and corresponding losses
                 if not self.decoder_losses_active[dec_loss_name]:
                     continue
@@ -465,6 +504,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
                         decoder_outputs=outputs[dec_loss_name],
                         decoder_lengths=encoded_len,
                     )
+                print("current_loss_value: ", current_loss_value)
                 loss_value = loss_value + current_loss_value * self.loss_alphas[dec_loss_name]
                 loss_val_dict[dec_loss_name] = current_loss_value
 
@@ -495,6 +535,12 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
         loss_value, loss_val_dict = self.decoder_loss_step(
             spectrograms, spec_masks, encoded, encoded_len, targets, target_lengths
         )
+
+        if self.use_aug_loss:
+            aug_loss = self.compute_aug_loss(input_signal=signal, input_signal_length=signal_len)
+            print("loss before aug loss: ", loss_value)
+            loss_value += self.aug_loss_weight * aug_loss
+            print("loss after aug loss: ", loss_value)
 
         tensorboard_logs = {
             'learning_rate': self._optimizer.param_groups[0]['lr'],
