@@ -143,8 +143,10 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
         if self._cfg.get("aug_loss", None):
             self.use_aug_loss = True
             self.aug_loss_weight = self._cfg.aug_loss.aug_loss_alpha
+            self.aug_loss_after_n_steps = self._cfg.aug_loss.aug_loss_after_n_steps
+            self.aug_loss_shift_amounts = self._cfg.aug_loss.aug_loss_shift_amounts
             self.pitch_transforms = []
-            for _n_steps in [-4, 4]:
+            for _n_steps in self.aug_loss_shift_amounts:
                 self.pitch_transforms.append(torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=self._cfg.sample_rate).to(self._device))
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
@@ -387,9 +389,16 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
         for idx, proc_len in enumerate(processed_signal_length):
             spec_masks[idx, :, proc_len:] = 0.0
 
-        encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
-
-        print("encoded shape: ", encoded.shape)
+        encoded_bct, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        encoded = None
+        if self._cfg.get('normalize_encoding', False):
+            # encoded shape (b, c, t)
+            encoded_btc = encoded_bct.permute(0, 2, 1)
+            encoded_l2_norm = torch.norm(encoded_btc, p=2, dim=-1, keepdim=True)
+            encoded = encoded_btc / encoded_l2_norm
+            encoded = encoded.permute(0, 2, 1)
+        else:
+            encoded = encoded_bct
 
         return spectrograms, spec_masks, encoded, encoded_len
 
@@ -407,8 +416,8 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             input_signal=pitch_shifted_signal, length=input_signal_length,
         )
 
-        encoded_original, encoded_len_original = self.encoder(audio_signal=processed_signal_original, length=processed_signal_length_original)
-        encoded_pitch_shifted, encoded_len_pitch_shifted = self.encoder(audio_signal=processed_signal_pitch_shifted, length=processed_signal_length_pitch_shifted)
+        encoded_original, _ = self.encoder(audio_signal=processed_signal_original, length=processed_signal_length_original)
+        encoded_pitch_shifted, _ = self.encoder(audio_signal=processed_signal_pitch_shifted, length=processed_signal_length_pitch_shifted)
 
         # encoding shape is [B, D, T]
         cosine_similarity = torch.nn.functional.cosine_similarity(encoded_original, encoded_pitch_shifted, dim=1).mean()
@@ -450,7 +459,6 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
                 )
             else:
                 loss_value = self.loss(spectrograms=spectrograms, spec_masks=spec_masks, decoder_outputs=outputs)
-                print("loss_value: ", loss_value)
         else:
 
             loss_value = encoded.new_zeros(1)
@@ -458,7 +466,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             registry = self.get_module_registry(self.encoder)
 
             for dec_loss_name, dec_loss in self.decoder_losses.items():
-                print("dec_loss_name: ", dec_loss_name)
+                
                 # loop through decoders and corresponding losses
                 if not self.decoder_losses_active[dec_loss_name]:
                     continue
@@ -504,7 +512,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
                         decoder_outputs=outputs[dec_loss_name],
                         decoder_lengths=encoded_len,
                     )
-                print("current_loss_value: ", current_loss_value)
+                
                 loss_value = loss_value + current_loss_value * self.loss_alphas[dec_loss_name]
                 loss_val_dict[dec_loss_name] = current_loss_value
 
@@ -513,7 +521,15 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
         signal, signal_len, targets, target_lengths = batch
+
+        tensorboard_logs = {
+            'learning_rate': self._optimizer.param_groups[0]['lr'],
+            'global_step': self.trainer.global_step,
+        }
+
+        signal_is_waveform = True
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+            signal_is_waveform = False
             spectrograms, spec_masks, encoded, encoded_len = self.forward(
                 processed_signal=signal, processed_signal_length=signal_len,
             )
@@ -536,16 +552,12 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             spectrograms, spec_masks, encoded, encoded_len, targets, target_lengths
         )
 
-        if self.use_aug_loss:
+        if self.use_aug_loss and self.trainer.global_step >= self.aug_loss_after_n_steps:
+            assert signal_is_waveform, "Augmentation loss can only be used with waveform input"
             aug_loss = self.compute_aug_loss(input_signal=signal, input_signal_length=signal_len)
-            print("loss before aug loss: ", loss_value)
+            tensorboard_logs['train_aug_loss'] = aug_loss
             loss_value += self.aug_loss_weight * aug_loss
-            print("loss after aug loss: ", loss_value)
-
-        tensorboard_logs = {
-            'learning_rate': self._optimizer.param_groups[0]['lr'],
-            'global_step': self.trainer.global_step,
-        }
+        
 
         for loss_name, loss_val in loss_val_dict.items():
             tensorboard_logs['train_' + loss_name] = loss_val
@@ -563,7 +575,9 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
         self._in_validation_step = True
 
         signal, signal_len, targets, target_lengths = batch
+        signal_is_waveform = True
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+            signal_is_waveform = False
             spectrograms, spec_masks, encoded, encoded_len = self.forward(
                 processed_signal=signal, processed_signal_length=signal_len,
             )
@@ -578,6 +592,12 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
 
         loss_value, _ = self.decoder_loss_step(spectrograms, spec_masks, encoded, encoded_len, targets, target_lengths)
 
+        aug_loss = torch.tensor(0.0)
+        if self.use_aug_loss and self.trainer.global_step >= self.aug_loss_after_n_steps:
+            assert signal_is_waveform, "Augmentation loss can only be used with waveform input"
+            aug_loss = self.compute_aug_loss(input_signal=signal, input_signal_length=signal_len)
+            loss_value += self.aug_loss_weight * aug_loss
+
         if self.feat_pen:
             loss_value += self.feat_pen
 
@@ -587,6 +607,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
 
         return {
             'val_loss': loss_value,
+            'aug_loss': aug_loss,
         }
 
     def multi_validation_epoch_end(self, outputs, dataloader_idx: int = 0):
