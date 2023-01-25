@@ -101,13 +101,21 @@ class AudioDataset(Dataset):
                 final_batch[key].append(row[key])
 
         max_audio_len = max([_audio_len.item() for _audio_len in final_batch["audio_len"]])
+        max_audio_len_sv = max([_audio_len.item() for _audio_len in final_batch["audio_len_sv"]])
 
         audios_padded = []
         for audio in final_batch["audio"]:
             audio_padded = torch.nn.functional.pad(audio, (0, max_audio_len - audio.size(0)), value=0)
             audios_padded.append(audio_padded)
 
+        audios_padded_sv = []
+        for audio_sv in final_batch["audio_sv"]:
+            audio_padded_sv = torch.nn.functional.pad(audio_sv, (0, max_audio_len_sv - audio_sv.size(0)), value=0)
+            audios_padded_sv.append(audio_padded_sv)
+
         final_batch["audio"] = audios_padded
+        final_batch["audio_sv"] = audios_padded_sv
+
         for key in final_batch:
             if key not in ["rel_audio_path_as_text_id", "wav_path"]:
                 final_batch[key] = torch.stack(final_batch[key])
@@ -328,7 +336,7 @@ def main():
     ssl_model.eval()
     ssl_model.to(device)
 
-    nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
+    nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("speakerverification_speakernet")
     nemo_sv_model = nemo_sv_model.to(device)
     nemo_sv_model.eval()
 
@@ -367,16 +375,12 @@ def main():
     for batch in tqdm(dataloader):
         bidx += 1
         with torch.no_grad():
-            (
-                _,
-                _,
-                batch_content_embedding,
-                batch_encoded_len,
-            ) = ssl_model.forward(
-                input_signal=batch['audio'].to(device),
-                input_signal_length=batch['audio_len'].to(device)
-            )
 
+            processed_signal, processed_signal_length = ssl_model.preprocessor(
+                input_signal=batch['audio'].to(device), length=batch['audio_len'].to(device),
+            )
+            batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+            
             batch_mel_specs = get_mel_spectrogram(fb, batch['audio'][:, :-1].to(device), stft_params)
             audio_sv_segmented, segment_indices = segment_batch(
                 batch, args.segment_length, args.segment_hop_size, args.min_segment_length
