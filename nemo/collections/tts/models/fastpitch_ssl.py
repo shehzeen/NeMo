@@ -106,6 +106,7 @@ class FastPitchModel_SSL(ModelPT):
 
         self.non_trainable_models = {}
         self.non_trainable_models['vocoder'] = vocoder
+        self.content_aug_types = cfg.get("content_aug_types", [])
 
     def vocode_spectrogram(self, spectrogram):
         # spectrogram [C, T] numpy
@@ -161,7 +162,11 @@ class FastPitchModel_SSL(ModelPT):
         return encoded
 
     def training_step(self, batch, batch_idx):
-        content_embedding = batch["content_embedding"]
+        content_emb_keys = ["content_embedding"]
+        if len(self.content_aug_types) > 0:
+            content_emb_keys += ["content_embedding_{}".format(aug_type) for aug_type in self.content_aug_types]
+        content_emb_key = random.choice(content_emb_keys)
+        content_embedding = batch[content_emb_key]
         encoded_len = batch["encoded_len"]
         speaker_embedding = batch["speaker_embedding"]
         mels = batch["mel_spectrogram"]

@@ -1122,6 +1122,7 @@ class FastPitchSSLDataset(Dataset):
         sup_data_dir: Optional[Union[str, Path]] = None,
         speaker_stats_pitch_fp: Optional[Union[str, Path]] = None,
         speaker_conditioning_type: Optional[str] = "per_sample",  # per_sample, mean, interpolate,
+        content_aug_types: Optional[List[str]] = [],
     ):
 
         """Dataset used for training FastPitchModel_SSL model.
@@ -1217,7 +1218,7 @@ class FastPitchSSLDataset(Dataset):
         if sup_data_dir is None:
             sup_data_dir = os.path.join(self.base_data_dir, "sup_data")
         self.sup_data_dir = sup_data_dir
-
+        self.content_aug_types = content_aug_types
         if self.pitch_normalization == "speaker_wise":
             self.speaker_stats = {}
             if speaker_stats_pitch_fp is None:
@@ -1265,6 +1266,19 @@ class FastPitchSSLDataset(Dataset):
             raise ValueError(
                 f"Content embedding file {content_emb_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
             )
+        
+        aug_embeddings = {}
+        if len(self.content_aug_types) > 0:
+            for aug_type in self.content_aug_types:
+                aug_emb_fn = f"{self.ssl_content_emb_type}_{aug_type}_content_embedding_{wav_text_id}.pt"
+                aug_emb_fp = os.path.join(self.sup_data_dir, aug_emb_fn)
+                if os.path.exists(aug_emb_fp):
+                    aug_embeddings[aug_type] = torch.load(aug_emb_fp)
+                else:
+                    raise ValueError(
+                        f"Augmented content embedding file {aug_emb_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
+                    )
+                    
 
         if os.path.exists(speaker_emb_fp):
             speaker_embedding = torch.load(speaker_emb_fp)
@@ -1282,7 +1296,7 @@ class FastPitchSSLDataset(Dataset):
 
         encoded_len = torch.tensor(content_embedding.shape[1]).long()
 
-        return content_embedding, speaker_embedding, encoded_len, duration
+        return content_embedding, speaker_embedding, encoded_len, duration, aug_embeddings
 
     def get_pitch_contour(self, wav_text_id):
         pitch_contour_fn = f"pitch_contour_{wav_text_id}.pt"
@@ -1340,7 +1354,7 @@ class FastPitchSSLDataset(Dataset):
         for encoded in final_batch["content_embedding"]:
             encoded_padded = torch.nn.functional.pad(encoded, (0, max_encoded_len - encoded.size(1)), value=0)
             content_embeddings_padded.append(encoded_padded)
-
+        
         durations_padded = []
         for duration in final_batch["duration"]:
             duration_padded = torch.nn.functional.pad(duration, (0, max_encoded_len - duration.size(0)), value=0.0)
@@ -1351,6 +1365,14 @@ class FastPitchSSLDataset(Dataset):
         final_batch["pitch_contour"] = pitch_contours_padded
         final_batch["content_embedding"] = content_embeddings_padded
         final_batch["duration"] = durations_padded
+
+        other_content_embedding_keys = [k for k in final_batch if k.startswith("content_embedding_")]
+        for key in other_content_embedding_keys:
+            other_content_embeddings_padded = []
+            for encoded in final_batch[key]:
+                encoded_padded = torch.nn.functional.pad(encoded, (0, max_encoded_len - encoded.size(1)), value=0)
+                other_content_embeddings_padded.append(encoded_padded)
+            final_batch[key] = other_content_embeddings_padded
 
         for key in final_batch:
             final_batch[key] = torch.stack(final_batch[key])
@@ -1370,7 +1392,7 @@ class FastPitchSSLDataset(Dataset):
         if self.pitch_conditioning:
             pitch_contour = self.get_pitch_contour(rel_audio_path_as_text_id)
 
-        content_embedding, speaker_embedding, encoded_len, duration = self.get_ssl_features(rel_audio_path_as_text_id)
+        content_embedding, speaker_embedding, encoded_len, duration, aug_embeddings = self.get_ssl_features(rel_audio_path_as_text_id)
 
         if self.speaker_conditioning_type == "mean":
             assert sample["speaker"] in self.mean_speaker_embeddings, "{} not in speaker emb".format(sample['speaker'])
@@ -1427,6 +1449,9 @@ class FastPitchSSLDataset(Dataset):
             'dataset_id': dataset_id,
             'duration': duration,
         }
+
+        for aug_type in aug_embeddings:
+            item["content_embedding_{}".format(aug_type)] = aug_embeddings[aug_type]
 
         return item
 

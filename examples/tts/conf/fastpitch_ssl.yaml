@@ -33,6 +33,7 @@ use_unique_tokens: true
 speaker_conditioning_type: per_sample
 segment_speaker_embedding: true
 ssl_downsampling_factor: 4 # How many mel-spectrogram frames map to one content embedding in the SSL model
+content_aug_types: ["positive", "negative"]
 
 model:
   ssl_model_ckpt_path: ${ssl_model_ckpt_path}
@@ -64,6 +65,8 @@ model:
   content_emb_outdim: 192
   speaker_emb_outdim: 192
   
+  content_aug_types: ${content_aug_types}
+
   train_ds:
     dataset:
       _target_: nemo.collections.tts.torch.data.FastPitchSSLDataset
@@ -80,6 +83,7 @@ model:
       pad_multiple: 1024
       speaker_conditioning_type: ${speaker_conditioning_type}
       sup_data_dir: ${sup_data_dir}
+      content_aug_types: ${content_aug_types}
 
     dataloader_params:
       drop_last: false
@@ -104,6 +108,7 @@ model:
       pad_multiple: 1024
       speaker_conditioning_type: ${speaker_conditioning_type}
       sup_data_dir: ${sup_data_dir}
+      content_aug_types: ${content_aug_types}
 
     dataloader_params:
       drop_last: false
@@ -155,7 +160,7 @@ model:
 
   optim:
     _target_: torch.optim.AdamW
-    lr: 0.0002
+    lr: 0.00025
     betas: [0.8, 0.99]
 
 trainer:
