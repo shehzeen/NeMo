@@ -344,8 +344,8 @@ def main():
     nemo_sv_model = nemo_sv_model.to(device)
     nemo_sv_model.eval()
 
-    nsteps_positive = [2, 2.5, 3, 3.5, 4, 4.5, 5]
-    nsteps_negative = [-2, -2.5, -3, -3.5, -4, -4.5, -5]
+    nsteps_positive = [2, 2.2, 2.5, 2.8, 3, 3.2, 3.5, 3.7, 4]
+    nsteps_negative = [-2, -2.2, -2.5, -2.8,  -3, -3.2, -3.5, -3.7 -4]
     pitch_transforms_positive = []
     pitch_transforms_negative = []
     for _n_steps in nsteps_positive:

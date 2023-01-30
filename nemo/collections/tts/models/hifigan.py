@@ -30,6 +30,13 @@ from nemo.core.neural_types.elements import AudioSignal, MelSpectrogramType
 from nemo.core.neural_types.neural_type import NeuralType
 from nemo.core.optim.lr_scheduler import CosineAnnealing, compute_max_steps
 from nemo.utils import logging, model_utils
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import label_models
+from nemo.collections.tts.models import fastpitch_ssl
+import torchaudio
+import random
+from nemo.collections.tts.helpers.helpers import plot_spectrogram_to_numpy
+from PIL import Image
 
 HAVE_WANDB = True
 try:
@@ -70,6 +77,60 @@ class HifiGanModel(Vocoder, Exportable):
             self.input_as_mel = self._train_dl.dataset.load_precomputed_mel
 
         self.automatic_optimization = False
+
+        if self._cfg.get("use_ssl_fastpitch_spec", False):
+            self.use_ssl_fastpitch_spec = True
+            ssl_model_ckpt_path = self._cfg.ssl_model_ckpt_path
+            fastpitch_model_ckpt_path = self._cfg.fastpitch_model_ckpt_path
+
+            ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(ssl_model_ckpt_path)
+            ssl_model.eval()
+
+            fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_model_ckpt_path, strict=False)
+            fastpitch_model.eval()
+
+            nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
+            nemo_sv_model.eval()
+
+            self.non_trainable_models = {
+                "ssl_model": ssl_model,
+                "fastpitch_model": fastpitch_model,
+                "nemo_sv_model": nemo_sv_model,
+            }
+
+
+    def get_synthetic_melspec(self, audio, audio_len):
+        for key in self.non_trainable_models:
+            self.non_trainable_models[key] = self.non_trainable_models[key].to(audio.device)
+
+        with torch.no_grad():
+            audio16 = torchaudio.functional.resample(audio, 22050, 16000)
+            audio16len = (audio_len * 16000 // 22050).long() - 1
+            _, speaker_embeddings = self.non_trainable_models["nemo_sv_model"](
+                input_signal=audio16, input_signal_length=audio16len
+            )
+            
+            processed_signal, processed_signal_length = self.non_trainable_models['ssl_model'].preprocessor(
+                input_signal=audio, length=audio_len-1,
+            )
+            batch_content_embedding, batch_encoded_len = self.non_trainable_models['ssl_model'].encoder(audio_signal=processed_signal, length=processed_signal_length)
+            final_content_embedding = batch_content_embedding[:,:,:batch_encoded_len[0]]
+            duration = torch.ones( [final_content_embedding.shape[0],final_content_embedding.shape[2]] ) * 4
+            duration = duration.to(audio.device)
+            synthetic_spec = self.non_trainable_models['fastpitch_model'].generate_wav(
+                final_content_embedding,
+                speaker_embeddings,
+                pitch_contour=None,
+                compute_pitch=True,
+                compute_duration=False,
+                durs_gt=duration,
+                dataset_id=0,
+                only_mel=True,
+            )
+
+            synthetic_spec = synthetic_spec.detach()
+            return synthetic_spec
+
 
     def _get_max_steps(self):
         return compute_max_steps(
@@ -159,6 +220,18 @@ class HifiGanModel(Vocoder, Exportable):
         else:
             audio, audio_len = batch
             audio_mel, _ = self.audio_to_melspec_precessor(audio, audio_len)
+            if self.use_ssl_fastpitch_spec:
+                audio_mel_synthetic = self.get_synthetic_melspec(audio, audio_len)
+                # save audio_mel_synthetic as a png image
+                assert audio_mel_synthetic.shape == audio_mel.shape
+                
+                if random.random() < 0.5:
+                    # randomly choose between real and synthetic mel spec as input
+                    print("Choosing synthetic mel spec as input")
+                    audio_mel = audio_mel_synthetic
+                else:
+                    print("Choosing real mel spec as input")
+                
 
         # Mel as input for L1 mel loss
         audio_trg_mel, _ = self.trg_melspec_fn(audio, audio_len)
@@ -304,8 +377,10 @@ class HifiGanModel(Vocoder, Exportable):
             self.stft_bias, _ = stft(audio_bias)
             self.stft_bias = self.stft_bias[:, :, 0][:, :, None]
 
+        denoise_strength = self.cfg.get("denoise_strength", 0.0025)
+        denoise_strength = 0.0025
         audio_mags, audio_phase = stft(audio)
-        audio_mags = audio_mags - self.cfg.get("denoise_strength", 0.0025) * self.stft_bias
+        audio_mags = audio_mags - denoise_strength * self.stft_bias
         audio_mags = torch.clamp(audio_mags, 0.0)
         audio_denoised = istft(audio_mags, audio_phase).unsqueeze(1)
 
