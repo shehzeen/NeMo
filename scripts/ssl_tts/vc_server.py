@@ -47,13 +47,45 @@ target_audio_paths = {
         "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_152.wav",
         "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_153.wav",
         "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_154.wav",
+    ],
+    'emma' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_2.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_5.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_8.wav",
+    ],
+    'priyanka' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_2.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_8.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_11.wav",
+    ],
+    'miley' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_2.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_5.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_11.wav",
+    ],
+    'aubrey' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_5.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_8.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_11.wav",
+    ],
+    'sundar' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_5.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_8.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_11.wav",
+    ],
+    'ahmad' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmad_1_5.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmad_1_8.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmad_1_11.wav",
     ]
 }
 
-fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityLexOprah/2023-01-29_16-31-54/checkpoints/Epoch167.ckpt"
+# fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityLexOprah/2023-01-29_16-31-54/checkpoints/Epoch167.ckpt"
+fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityFemailSpeakers/2023-01-30_14-41-11/checkpoints/Epoch300.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANObama/HifiGan/2023-01-28_19-02-46/checkpoints/Epoch909.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANCelebrity/HifiGan/2023-01-29_16-23-01/checkpoints/Epoch69.ckpt"
-hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynth/HifiGan/2023-01-29_21-35-32/checkpoints/Epoch69.ckpt"
+# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynth/HifiGan/2023-01-29_21-35-32/checkpoints/Epoch799.ckpt"
+hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynthNewCelebs/HifiGan/2023-01-30_18-23-17/checkpoints/Epoch1019.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
