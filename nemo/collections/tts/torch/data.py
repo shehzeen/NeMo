@@ -1123,6 +1123,7 @@ class FastPitchSSLDataset(Dataset):
         speaker_stats_pitch_fp: Optional[Union[str, Path]] = None,
         speaker_conditioning_type: Optional[str] = "per_sample",  # per_sample, mean, interpolate,
         content_aug_types: Optional[List[str]] = [],
+        load_content_embedding: Optional[bool] = True,
     ):
 
         """Dataset used for training FastPitchModel_SSL model.
@@ -1214,6 +1215,7 @@ class FastPitchSSLDataset(Dataset):
         self.pitch_conditioning = pitch_conditioning
         self.speaker_conditioning_type = speaker_conditioning_type
         self.ssl_content_emb_type = ssl_content_emb_type
+        self.load_content_embedding = load_content_embedding
 
         if sup_data_dir is None:
             sup_data_dir = os.path.join(self.base_data_dir, "sup_data")
@@ -1260,8 +1262,11 @@ class FastPitchSSLDataset(Dataset):
         speaker_emb_fp = os.path.join(self.sup_data_dir, speaker_emb_fn)
         duration_fp = os.path.join(self.sup_data_dir, duration_fn)
 
-        if os.path.exists(content_emb_fp):
+        if os.path.exists(content_emb_fp) and self.load_content_embedding:
             content_embedding = torch.load(content_emb_fp)
+        elif not self.load_content_embedding:
+            content_embedding = torch.zeros(2, 2)
+            # dummy content embedding
         else:
             raise ValueError(
                 f"Content embedding file {content_emb_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
@@ -1287,8 +1292,11 @@ class FastPitchSSLDataset(Dataset):
                 f"Speaker embedding file {speaker_emb_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
             )
 
-        if os.path.exists(duration_fp):
+        if os.path.exists(duration_fp) and self.load_content_embedding:
             duration = torch.load(duration_fp)
+        elif not self.load_content_embedding:
+            duration = torch.ones(2)
+            # dummy duration
         else:
             raise ValueError(
                 f"Duration file {duration_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
@@ -1412,6 +1420,9 @@ class FastPitchSSLDataset(Dataset):
 
         mel_spectrogram = self.get_mel_spectrogram(rel_audio_path_as_text_id)
         mel_len = torch.tensor(mel_spectrogram.shape[1]).long()
+
+        if not self.load_content_embedding:
+            duration = torch.ones(mel_spectrogram.shape[1])
 
         if pitch_contour is not None:
             if self.pitch_normalization in ["speaker_wise", "global"]:
