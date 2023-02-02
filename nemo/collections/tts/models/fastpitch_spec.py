@@ -187,9 +187,7 @@ class FastPitchModel_SSL(ModelPT):
         dataset_id = batch["dataset_id"]
 
         content_embedding, aug_len = self.compute_augmented_spectrogram(audios, audio_len, mels, mel_len)
-        print("aug_len", aug_len)
-        print("mel_len", mel_len)
-
+        
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
         if self.use_encoder:
             enc_out, _ = self.encoder(input=enc_out, seq_lens=encoded_len)
@@ -227,6 +225,12 @@ class FastPitchModel_SSL(ModelPT):
                 self.global_step,
                 dataformats="HWC",
             )
+            self.tb_logger.add_image(
+                "train_aug_spec",
+                plot_spectrogram_to_numpy(content_embedding[0].data.cpu().float().numpy()),
+                self.global_step,
+                dataformats="HWC",
+            )
             spec_predict = mels_pred[0].data.cpu().float().numpy()
             self.tb_logger.add_image(
                 "train_mel_predicted", plot_spectrogram_to_numpy(spec_predict), self.global_step, dataformats="HWC",
@@ -249,6 +253,7 @@ class FastPitchModel_SSL(ModelPT):
 
         content_embedding, _ = self.compute_augmented_spectrogram(audios, audio_len, mels, spec_len)
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
+        
         if self.use_encoder:
             enc_out, _ = self.encoder(input=enc_out, seq_lens=encoded_len)
 

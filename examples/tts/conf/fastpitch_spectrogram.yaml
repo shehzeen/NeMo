@@ -6,7 +6,6 @@ name: FastPitch
 
 train_dataset: ???
 validation_datasets: ???
-ssl_model_ckpt_path: ???
 hifi_ckpt_path: ???
 sup_data_dir: null
 
@@ -26,14 +25,14 @@ highfreq: 8000
 window: hann
 
 
-ssl_content_emb_type: "embedding_and_probs"
+ssl_content_emb_type: "embedding"
 speaker_stats_pitch_fp: null
 pitch_normalization: speaker_wise
 use_unique_tokens: true
 speaker_conditioning_type: per_sample
 segment_speaker_embedding: true
-ssl_downsampling_factor: 4 # How many mel-spectrogram frames map to one content embedding in the SSL model
-content_aug_types: ["positive", "negative"]
+ssl_downsampling_factor: 1 # How many mel-spectrogram frames map to one content embedding in the SSL model
+content_aug_types: []
 
 model:
   preprocessor:
@@ -59,7 +58,6 @@ model:
     use_grads: false
     exact_pad: true
 
-  ssl_model_ckpt_path: ${ssl_model_ckpt_path}
   ssl_downsampling_factor: ${ssl_downsampling_factor}
   use_encoder: true
   use_duration_predictor: ${use_unique_tokens}
@@ -83,8 +81,8 @@ model:
   highfreq: ${highfreq}
   window: ${window}
   
-  content_emb_indim: 174
-  speaker_emb_indim: 256
+  content_emb_indim: 80
+  speaker_emb_indim: 192
   content_emb_outdim: 192
   speaker_emb_outdim: 192
   

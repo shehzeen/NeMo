@@ -1423,6 +1423,7 @@ class FastPitchSSLDataset(Dataset):
 
         if not self.load_content_embedding:
             duration = torch.ones(mel_spectrogram.shape[1])
+            encoded_len = mel_len
 
         if pitch_contour is not None:
             if self.pitch_normalization in ["speaker_wise", "global"]:
