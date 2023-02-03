@@ -1236,6 +1236,8 @@ class FastPitchSSLDataset(Dataset):
                 speaker_stats_raw = json.load(f)
                 for key in speaker_stats_raw:
                     self.speaker_stats[int(key)] = speaker_stats_raw[key]
+        
+        self.compute_mean_speaker_embeddings()
 
     def _get_wav_from_filepath(self, audio_filepath):
         features = AudioSegment.segment_from_file(
@@ -1325,6 +1327,35 @@ class FastPitchSSLDataset(Dataset):
             raise ValueError(
                 f"Mel spectrogram file {mel_spec_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
             )
+
+    def compute_mean_speaker_embeddings(self, n_embeddings_per_speaker=100):
+        mean_speaker_embeddings = {}
+        speaker_counts = {}
+        for idx in range(len(self.data)):
+            sample = self.data[idx]
+            speaker = sample["speaker"]
+            if speaker in speaker_counts and speaker_counts[speaker] >= n_embeddings_per_speaker:
+                continue
+
+            rel_audio_path = Path(sample["audio_filepath"]).relative_to(self.base_data_dir).with_suffix("")
+            rel_audio_path_as_text_id = str(rel_audio_path).replace("/", "_")
+            speaker_emb_fn = f"speaker_embedding_{rel_audio_path_as_text_id}.pt"
+            speaker_emb_fp = os.path.join(self.sup_data_dir, speaker_emb_fn)
+            if os.path.exists(speaker_emb_fp):
+                embedding = torch.load(speaker_emb_fp)
+                if speaker not in mean_speaker_embeddings:
+                    mean_speaker_embeddings[speaker] = embedding
+                    speaker_counts[speaker] = 1
+                else:
+                    mean_speaker_embeddings[speaker] += embedding
+                    speaker_counts[speaker] += 1
+
+        for speaker in mean_speaker_embeddings:
+            mean_speaker_embeddings[speaker] /= speaker_counts[speaker]
+            l2_norm = torch.norm(mean_speaker_embeddings[speaker], p=2)
+            mean_speaker_embeddings[speaker] /= l2_norm
+
+        self.mean_speaker_embeddings = mean_speaker_embeddings
 
     def pad_collate_fn(self, batch):
         """
@@ -1424,6 +1455,15 @@ class FastPitchSSLDataset(Dataset):
         if not self.load_content_embedding:
             duration = torch.ones(mel_spectrogram.shape[1])
             encoded_len = mel_len
+        
+        alternate_speakers = [spk for spk in self.mean_speaker_embeddings if spk != sample["speaker"]]
+        if len(alternate_speakers) == 0:
+            alternate_speaker = sample["speaker"]
+        else:
+            # choosing alternate speaker randomly
+            alternate_speaker = random.choice(alternate_speakers)
+        
+        alternate_speaker_embedding = self.mean_speaker_embeddings[alternate_speaker]
 
         if pitch_contour is not None:
             if self.pitch_normalization in ["speaker_wise", "global"]:
@@ -1453,6 +1493,7 @@ class FastPitchSSLDataset(Dataset):
             'audio_len': audio_length,
             'content_embedding': content_embedding,
             'speaker_embedding': speaker_embedding,
+            'alternate_speaker_embedding': alternate_speaker_embedding,
             'encoded_len': encoded_len,
             'pitch_contour': pitch_contour,
             'speaker': speaker,

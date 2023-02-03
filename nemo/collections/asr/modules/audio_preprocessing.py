@@ -605,8 +605,12 @@ class MaskedPatchAugmentation(NeuralModule):
         for idx in range(input_spec.shape[0]):
             cur_len = length[idx]
             patches = range(cur_len // self.patch_size - 1)
-            masked_patches = random.sample(patches, mask_patches)
+            
+            if len(patches) < mask_patches:
+                continue
 
+            masked_patches = random.sample(patches, mask_patches)
+            
             for mp in masked_patches:
                 augmented_spec[idx, :, mp * self.patch_size : (mp + 1) * self.patch_size] = 0.0
 

@@ -105,11 +105,17 @@ class FastPitchModel_SSL(ModelPT):
             cfg.n_mel_channels,
         )
 
+        self.spec_augmentation = instantiate(self._cfg.spec_augment)
+        self.apply_masking = cfg.get("apply_masking", False)
+        self.self_augment_after_steps = cfg.get("self_augment_after_steps", 1000)
+
         self.non_trainable_models = {}
         self.non_trainable_models['vocoder'] = vocoder
         self.content_aug_types = cfg.get("content_aug_types", [])
         self.aug_loss_shift_amounts = [-5 + 0.2 * i for i in range(50)] #get values from -5 to 5 in 0.2 intervals 
+        self.aug_loss_shift_amounts = [v for v in self.aug_loss_shift_amounts if v > 2 or v < -2]
         self.pitch_transforms = []
+        
         for _n_steps in self.aug_loss_shift_amounts:
                 self.pitch_transforms.append(torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=self._cfg.sample_rate).to(self._device))
 
@@ -123,7 +129,6 @@ class FastPitchModel_SSL(ModelPT):
             _spec = torch.from_numpy(spectrogram).unsqueeze(0).to(torch.float32).to(vocoder_device)
             wav_generated = self.non_trainable_models['vocoder'].generator(x=_spec)
             pred_denoised = self.non_trainable_models['vocoder']._bias_denoise(wav_generated, _spec).squeeze(1)
-            print("pred denoise", pred_denoised.shape)
             return pred_denoised.cpu().numpy()
 
     @property
@@ -168,11 +173,47 @@ class FastPitchModel_SSL(ModelPT):
 
         return encoded
 
-    def compute_augmented_spectrogram(self, audios, audio_len, mels, mel_len):
-        transform = random.choice(self.pitch_transforms)
-        transform.to(self._device)
-        pitch_shifted_audios = transform(audios)
-        aug_mels, aug_mel_lens = self.audio_to_melspec_precessor(pitch_shifted_audios, audio_len)
+    def self_voice_convert(self, mels, mel_len, alternate_speaker_embedding, durs, dataset_id):
+        print("self voice convert at step", self.global_step)
+        with torch.no_grad():
+            old_mode = self.training
+            self.eval()
+            enc_out = self.compute_encoding(mels, alternate_speaker_embedding, dataset_id)
+            if self.use_encoder:
+                enc_out, _ = self.encoder(input=enc_out, seq_lens=mel_len)
+
+            enc_mask = mask_from_lens(mel_len)
+            enc_mask = enc_mask[:, :, None]
+            mels_pred, _, _, _, _, _ = self(
+                enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=None, pace=1.0,
+            )
+            self.train(old_mode)
+            return mels_pred
+
+    def compute_augmented_spectrogram(self, audios, audio_len, mels, mel_len, alternate_speaker_embedding, durs, dataset_id, is_val=False):
+        possible_transforms = ["pitch_shift"]
+        if self.global_step > self.self_augment_after_steps:
+            possible_transforms = ["pitch_shift", "self_voice_convert"]
+        transform_type = random.choice(possible_transforms)
+        if transform_type == "pitch_shift":
+            with torch.no_grad():
+                transform = random.choice(self.pitch_transforms)
+                transform.to(self._device)
+                pitch_shifted_audios = transform(audios)
+                aug_mels, aug_mel_lens = self.audio_to_melspec_precessor(pitch_shifted_audios, audio_len)
+                
+        elif transform_type == "self_voice_convert":
+            aug_mels = self.self_voice_convert(mels, mel_len, alternate_speaker_embedding, durs, dataset_id)
+            aug_mel_lens = mel_len
+
+        if (not is_val) and self.apply_masking and random.random() < 0.5:
+            # apply masking 50% of the time during training.
+            aug_mels = self.spec_augmentation(input_spec=aug_mels, length=mel_len)
+
+        mel_mask = mask_from_lens(mel_len)
+        aug_mels = aug_mels * mel_mask[:, None, :]
+        aug_mels = aug_mels.detach()
+
         return aug_mels, aug_mel_lens
 
     def training_step(self, batch, batch_idx):
@@ -185,8 +226,9 @@ class FastPitchModel_SSL(ModelPT):
         speaker_embedding = batch["speaker_embedding"]
         pitch = batch["pitch_contour"]
         dataset_id = batch["dataset_id"]
+        alternate_speaker_embedding = batch["alternate_speaker_embedding"]
 
-        content_embedding, aug_len = self.compute_augmented_spectrogram(audios, audio_len, mels, mel_len)
+        content_embedding, aug_len = self.compute_augmented_spectrogram(audios, audio_len, mels, mel_len, alternate_speaker_embedding, durs, dataset_id)
         
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
         if self.use_encoder:
@@ -216,8 +258,8 @@ class FastPitchModel_SSL(ModelPT):
         self.log("t_mel_loss", mel_loss)
 
         # Log images to tensorboard
-        if self.log_train_images and isinstance(self.logger, TensorBoardLogger):
-            self.log_train_images = False
+        if self.log_train_images and isinstance(self.logger, TensorBoardLogger) and self.global_step % 16 == 0:
+            # self.log_train_images = False
 
             self.tb_logger.add_image(
                 "train_mel_target",
@@ -251,7 +293,11 @@ class FastPitchModel_SSL(ModelPT):
         spec_len = batch["mel_len"]
         durs = batch["duration"]
 
-        content_embedding, _ = self.compute_augmented_spectrogram(audios, audio_len, mels, spec_len)
+        alternate_speaker_embedding = batch["alternate_speaker_embedding"]
+        
+
+        content_embedding, aug_len = self.compute_augmented_spectrogram(audios, audio_len, mels, spec_len, alternate_speaker_embedding, durs, dataset_id, is_val=True)
+
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
         
         if self.use_encoder:
