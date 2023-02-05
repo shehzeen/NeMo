@@ -38,7 +38,7 @@ class FastPitchModel_SSL(ModelPT):
     of a given source utterance, with the speaker embedding of a target speaker.
     """
 
-    def __init__(self, cfg: DictConfig, trainer: Trainer = None, vocoder=None):
+    def __init__(self, cfg: DictConfig, trainer: Trainer = None, vocoder=None, ssl_model=None):
         # Convert to Hydra 1.0 compatible DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
@@ -64,7 +64,7 @@ class FastPitchModel_SSL(ModelPT):
         self.mel_loss = MelLoss()
         self.pitch_loss = PitchLoss(loss_scale=pitch_loss_scale)
         self.duration_loss = DurationLoss(loss_scale=dur_loss_scale)
-
+        
         input_fft = None
         self.use_encoder = use_encoder = cfg.get("use_encoder", False)
         if use_encoder:
@@ -106,7 +106,9 @@ class FastPitchModel_SSL(ModelPT):
 
         self.non_trainable_models = {}
         self.non_trainable_models['vocoder'] = vocoder
+        self.non_trainable_models['ssl_model'] = ssl_model
         self.content_aug_types = cfg.get("content_aug_types", [])
+        self.self_converted_aug_start_step = cfg.get("self_converted_aug_start_step", float("inf"))
 
     def vocode_spectrogram(self, spectrogram):
         # spectrogram [C, T] numpy
@@ -116,10 +118,11 @@ class FastPitchModel_SSL(ModelPT):
         with torch.no_grad():
             vocoder_device = self.non_trainable_models['vocoder'].device
             _spec = torch.from_numpy(spectrogram).unsqueeze(0).to(torch.float32).to(vocoder_device)
-            wav_generated = self.non_trainable_models['vocoder'].generator(x=_spec)
-            pred_denoised = self.non_trainable_models['vocoder']._bias_denoise(wav_generated, _spec).squeeze(1)
-            print("pred denoise", pred_denoised.shape)
-            return pred_denoised.cpu().numpy()
+            wav_generated = self.non_trainable_models['vocoder'].generator(x=_spec)[0]
+            return wav_generated.cpu().numpy()
+            # pred_denoised = self.non_trainable_models['vocoder']._bias_denoise(wav_generated, _spec).squeeze(1)
+            # print("pred denoise", pred_denoised.shape)
+            # return pred_denoised.cpu().numpy()
 
     @property
     def tb_logger(self):
@@ -163,6 +166,55 @@ class FastPitchModel_SSL(ModelPT):
 
         return encoded
 
+    def get_content_embedding_self_converted(self, batch):
+        self.non_trainable_models['ssl_model'].to(batch['content_embedding'].device)
+        self.non_trainable_models['vocoder'].to(batch['content_embedding'].device)
+        old_mode = self.training
+        self.eval()
+        with torch.no_grad():
+            orig_content_embedding = batch["content_embedding"]
+            encoded_len = batch["encoded_len"]
+            alternate_speaker_embedding = batch["alternate_speaker_embedding"]
+            dataset_id = batch["dataset_id"]
+            durs = batch["duration"]
+            mel_len = batch["mel_len"]
+            audio_len = batch["audio_len"]
+
+            enc_out = self.compute_encoding(orig_content_embedding, alternate_speaker_embedding, dataset_id)
+            if self.use_encoder:
+                enc_out, _ = self.encoder(input=enc_out, seq_lens=encoded_len)
+            
+            enc_mask = mask_from_lens(encoded_len)
+            enc_mask = enc_mask[:, :, None]
+
+            mels_pred, _, _, _, _, _ = self(
+                enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=None, pace=1.0,
+            )
+            
+            mels_for_embedding = mels_pred
+            if self.non_trainable_models['ssl_model']._cfg.preprocessor.normalize == "per_feature":
+                audio_pred = self.non_trainable_models['vocoder'].generator(x=mels_pred)[:,0,:]
+                audio_mask = mask_from_lens(audio_len)
+                audio_pred = audio_pred * audio_mask
+                mels_pred_for_ssl, mel_lens_ssl = self.non_trainable_models['ssl_model'].preprocessor(input_signal=audio_pred, length=audio_len-1)
+                mels_pred_for_ssl = mels_pred_for_ssl[:,:,:mels_pred.shape[2]]
+                mel_mask = mask_from_lens(mel_lens_ssl)
+                mels_pred_for_ssl = mels_pred_for_ssl * mel_mask[:,None,:]
+                mels_for_embedding = mels_pred_for_ssl
+
+                if self.global_step % 128 == 0:
+                    self.tb_logger.add_audio("Aug Audio VC", audio_pred[0], self.global_step, 22050)
+                    self.tb_logger.add_audio("Aug Audio Orig", batch['audio'][0], self.global_step, 22050)
+
+            new_content_embedding, new_encoded_len = self.non_trainable_models['ssl_model'].encoder(audio_signal=mels_for_embedding, length=mel_len)
+            if self.non_trainable_models['ssl_model']._cfg.get("normalize_content_encoding", False):
+                new_content_embedding = self.non_trainable_models['ssl_model']._normalize_encoding(new_content_embedding)
+                
+            new_content_embedding = new_content_embedding.detach()
+
+        self.train(old_mode)
+        return new_content_embedding
+
     def training_step(self, batch, batch_idx):
         content_emb_keys = ["content_embedding"]
         if len(self.content_aug_types) > 0:
@@ -175,6 +227,12 @@ class FastPitchModel_SSL(ModelPT):
         pitch = batch["pitch_contour"]
         dataset_id = batch["dataset_id"]
         durs = batch["duration"]
+
+        self_conv = False
+        if (self.global_step > self.self_converted_aug_start_step) and (random.random() < 0.8):
+            print("Using self converted content embedding")
+            content_embedding = self.get_content_embedding_self_converted(batch)
+            self_conv = True
 
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
         if self.use_encoder:

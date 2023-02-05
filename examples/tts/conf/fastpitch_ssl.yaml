@@ -67,6 +67,29 @@ model:
   
   content_aug_types: ${content_aug_types}
 
+  preprocessor:
+    _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+    features: 80
+    lowfreq: 0
+    highfreq: 8000
+    n_fft: 1024
+    n_window_size: 1024
+    window_size: false
+    n_window_stride: 256
+    window_stride: false
+    pad_to: 16
+    pad_value: 0
+    sample_rate: ${model.sample_rate}
+    window: "hann"
+    normalize: null
+    preemph: null
+    dither: 0.0
+    frame_splicing: 1
+    log: true
+    log_zero_guard_type: add
+    log_zero_guard_value: 1e-05
+    mag_power: 1.0
+    
   train_ds:
     dataset:
       _target_: nemo.collections.tts.torch.data.FastPitchSSLDataset

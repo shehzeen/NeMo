@@ -137,6 +137,9 @@ def get_ssl_features_disentangled(
     )
     
     batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+    if ssl_model._cfg.get("normalize_content_encoding", False):
+        batch_content_embedding = ssl_model._normalize_encoding(batch_content_embedding)
+        
     final_content_embedding = batch_content_embedding[0,:,:batch_encoded_len[0]]
     ssl_downsampling_factor = ssl_model._cfg.encoder.subsampling_factor
     duration = torch.ones(final_content_embedding.shape[1]) * ssl_downsampling_factor

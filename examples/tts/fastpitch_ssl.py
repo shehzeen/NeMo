@@ -18,7 +18,7 @@ from nemo.collections.common.callbacks import LogEpochTimeCallback
 from nemo.collections.tts.models import fastpitch_ssl, hifigan
 from nemo.core.config import hydra_runner
 from nemo.utils.exp_manager import exp_manager
-
+import nemo.collections.asr as nemo_asr
 
 @hydra_runner(config_path="conf", config_name="fastpitch_ssl")
 def main(cfg):
@@ -26,7 +26,13 @@ def main(cfg):
     exp_manager(trainer, cfg.get("exp_manager", None))
     vocoder = hifigan.HifiGanModel.load_from_checkpoint(cfg.hifi_ckpt_path).cpu()
     vocoder.eval()
-    model = fastpitch_ssl.FastPitchModel_SSL(cfg=cfg.model, trainer=trainer, vocoder=vocoder)
+
+    ssl_model = None
+    if cfg.get("ssl_model_ckpt_path", None):
+        ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(cfg.ssl_model_ckpt_path)
+        ssl_model.eval()
+
+    model = fastpitch_ssl.FastPitchModel_SSL(cfg=cfg.model, trainer=trainer, vocoder=vocoder, ssl_model=ssl_model)
     if cfg.get("finetune", False):
         model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
     lr_logger = pl.callbacks.LearningRateMonitor()

@@ -125,14 +125,19 @@ def calculate_eer(speaker_embeddings, mode="generated"):
 
 
 def main():
-    # generated_audio_dir = '/data/shehzeen/AutoVC/autovc_converted'
-    generated_audio_dir = '/data/shehzeen/SSLTTS/ACEVCTRIALS/'
-    # gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_ALL/'
-    gt_audio_dir = "/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK"
-    # gt_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK'
-    # gt_source_audio_dir = '/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE'
-    gt_source_audio_dir = "/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE"
-    base_exp_dir = '/data/shehzeen/SSLTTS/'
+    parser = argparse.ArgumentParser(description='Evaluate the model')
+    parser.add_argument("--generated_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/ACEVCTRIALS/")
+    parser.add_argument("--gt_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK")
+    parser.add_argument("--gt_source_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE")
+    parser.add_argument("--base_exp_dir", type=str, required=False, default="/data/shehzeen/SSLTTS/GENDER_EXP/RESULTS")
+
+    args = parser.parse_args()
+    
+    generated_audio_dir = args.generated_audio_dir
+    gt_audio_dir = args.gt_audio_dir
+    gt_source_audio_dir = args.gt_source_audio_dir
+    base_exp_dir = args.base_exp_dir
+
     exp_name = generated_audio_dir.split('/')[-1]
     device = "cpu"
 

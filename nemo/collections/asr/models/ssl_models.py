@@ -39,6 +39,7 @@ from nemo.utils import logging
 import torchaudio
 import random
 import soundfile as sf
+from hydra.utils import instantiate
 
 __all__ = ['SpeechEncDecSelfSupervisedModel']
 
@@ -80,7 +81,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             self.world_size = trainer.world_size
 
         super().__init__(cfg=cfg, trainer=trainer)
-        self.preprocessor = SpeechEncDecSelfSupervisedModel.from_config_dict(self._cfg.preprocessor)
+        self.preprocessor = instantiate(self._cfg.preprocessor)
         self.encoder = SpeechEncDecSelfSupervisedModel.from_config_dict(self._cfg.encoder)
 
         self.decoder_losses = None
@@ -393,15 +394,19 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
         encoded = None
         if self._cfg.get('normalize_encoding', False):
             # encoded shape (b, c, t)
-            encoded_btc = encoded_bct.permute(0, 2, 1)
-            encoded_l2_norm = torch.norm(encoded_btc, p=2, dim=-1, keepdim=True)
-            encoded = encoded_btc / encoded_l2_norm
-            encoded = encoded.permute(0, 2, 1)
+            encoded = self._normalize_encoding(encoded_bct)
         else:
             encoded = encoded_bct
 
         return spectrograms, spec_masks, encoded, encoded_len
 
+    def _normalize_encoding(self, encoded_bct):
+        encoded_btc = encoded_bct.permute(0, 2, 1)
+        encoded_l2_norm = torch.norm(encoded_btc, p=2, dim=-1, keepdim=True)
+        encoded = encoded_btc / encoded_l2_norm
+        encoded = encoded.permute(0, 2, 1)
+        return encoded
+    
     def compute_aug_loss(self, input_signal, input_signal_length):
         transform = random.choice(self.pitch_transforms)
         transform.to(self._device)
@@ -418,6 +423,11 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
 
         encoded_original, _ = self.encoder(audio_signal=processed_signal_original, length=processed_signal_length_original)
         encoded_pitch_shifted, _ = self.encoder(audio_signal=processed_signal_pitch_shifted, length=processed_signal_length_pitch_shifted)
+
+        if self._cfg.get('normalize_content_encoding', False):
+            # encoded shape (b, c, t)
+            encoded_original = self._normalize_encoding(encoded_original)
+            encoded_pitch_shifted = self._normalize_encoding(encoded_pitch_shifted)
 
         # encoding shape is [B, D, T]
         cosine_similarity = torch.nn.functional.cosine_similarity(encoded_original, encoded_pitch_shifted, dim=1).mean()
