@@ -12,7 +12,8 @@ import soundfile as sf
 import librosa
 import json
 
-ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
+# ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
+ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/Conformer-SSL/2023-01-29_21-22-11/checkpoints/Epoch39.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments/AugmentedTraining/2023-01-26_14-00-48/checkpoints/Epoch89.ckpt"
 # target_audio_paths = ["/data/shehzeen/SSLTTS/EVALDATA/source_2.wav"]
@@ -73,19 +74,21 @@ target_audio_paths = {
         "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_8.wav",
         "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_11.wav",
     ],
-    'ahmad' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmad_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmad_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmad_1_11.wav",
+    'ahmadCorrect' : [
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_5.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_8.wav",
+        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_11.wav",
     ]
 }
 
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityLexOprah/2023-01-29_16-31-54/checkpoints/Epoch167.ckpt"
-fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityFemailSpeakers/2023-01-30_14-41-11/checkpoints/Epoch300.ckpt"
+# fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityFemailSpeakers/2023-01-30_14-41-11/checkpoints/Epoch300.ckpt"
+fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityAhmad/2023-02-05_17-13-10/checkpoints/Epoch31.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANObama/HifiGan/2023-01-28_19-02-46/checkpoints/Epoch909.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANCelebrity/HifiGan/2023-01-29_16-23-01/checkpoints/Epoch69.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynth/HifiGan/2023-01-29_21-35-32/checkpoints/Epoch799.ckpt"
-hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynthNewCelebs/HifiGan/2023-01-30_18-23-17/checkpoints/Epoch1019.ckpt"
+# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynthNewCelebs/HifiGan/2023-01-30_18-23-17/checkpoints/Epoch1019.ckpt"
+hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnCelebAhmad/HifiGan/2023-02-05_17-57-10/checkpoints/Epoch479.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 

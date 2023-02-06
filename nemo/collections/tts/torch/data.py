@@ -1328,7 +1328,8 @@ class FastPitchSSLDataset(Dataset):
                 f"Mel spectrogram file {mel_spec_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
             )
 
-    def compute_mean_speaker_embeddings(self, n_embeddings_per_speaker=100):
+    def compute_mean_speaker_embeddings(self, n_embeddings_per_speaker=50):
+        print("computing mean speaker embeddings...")
         mean_speaker_embeddings = {}
         speaker_counts = {}
         for idx in range(len(self.data)):
@@ -1355,6 +1356,7 @@ class FastPitchSSLDataset(Dataset):
             l2_norm = torch.norm(mean_speaker_embeddings[speaker], p=2)
             mean_speaker_embeddings[speaker] /= l2_norm
 
+        print("mean speaker embeddings computed")
         self.mean_speaker_embeddings = mean_speaker_embeddings
 
     def pad_collate_fn(self, batch):

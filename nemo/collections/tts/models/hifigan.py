@@ -114,6 +114,9 @@ class HifiGanModel(Vocoder, Exportable):
                 input_signal=audio, length=audio_len-1,
             )
             batch_content_embedding, batch_encoded_len = self.non_trainable_models['ssl_model'].encoder(audio_signal=processed_signal, length=processed_signal_length)
+            if self.non_trainable_models['ssl_model']._cfg.get("normalize_content_encoding", False):
+                batch_content_embedding = self.non_trainable_models['ssl_model']._normalize_encoding(batch_content_embedding)
+
             final_content_embedding = batch_content_embedding[:,:,:batch_encoded_len[0]]
             duration = torch.ones( [final_content_embedding.shape[0],final_content_embedding.shape[2]] ) * 4
             duration = duration.to(audio.device)

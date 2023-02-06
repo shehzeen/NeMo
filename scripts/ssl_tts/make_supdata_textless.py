@@ -396,7 +396,8 @@ def main():
                 input_signal=batch['audio'].to(device), length=batch['audio_len'].to(device),
             )
             batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
-            if ssl_model._cfg.get('normalize_content_embedding', False):
+            if ssl_model._cfg.get('normalize_content_encoding', False):
+                print("normalizing embeddings")
                 batch_content_embedding = ssl_model._normalize_encoding(batch_content_embedding)
 
             transforms = {}
@@ -415,7 +416,8 @@ def main():
                         input_signal=audio_transformed, length=batch['audio_len'].to(device),
                     )
                     transformed_batch_embeddings[transform_type], _ = ssl_model.encoder(audio_signal=_processed_signal, length=_processed_signal_length)
-                    if ssl_model._cfg.get('normalize_content_embedding', False):
+                    if ssl_model._cfg.get('normalize_content_encoding', False):
+                        print("normalizing embeddings")
                         transformed_batch_embeddings[transform_type] = ssl_model._normalize_encoding(transformed_batch_embeddings[transform_type])
 
             batch_mel_specs = get_mel_spectrogram(fb, batch['audio'][:, :-1].to(device), stft_params)
