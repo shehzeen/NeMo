@@ -230,7 +230,7 @@ class FastPitchModel_SSL(ModelPT):
         durs = batch["duration"]
 
         self_conv = False
-        if (self.global_step > self.self_converted_aug_start_step) and (random.random() < 0.8):
+        if (self.global_step > self.self_converted_aug_start_step) and (random.random() < 0.5):
             print("Using self converted content embedding")
             content_embedding = self.get_content_embedding_self_converted(batch)
             self_conv = True
@@ -280,7 +280,12 @@ class FastPitchModel_SSL(ModelPT):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        content_embedding = batch["content_embedding"]
+        if self.self_converted_aug_start_step < float("inf"):
+            print("using self converted content embedding")
+            content_embedding = self.get_content_embedding_self_converted(batch)
+        else:
+            content_embedding = batch["content_embedding"]
+        
         encoded_len = batch["encoded_len"]
         speaker_embedding = batch["speaker_embedding"]
         mels = batch["mel_spectrogram"]

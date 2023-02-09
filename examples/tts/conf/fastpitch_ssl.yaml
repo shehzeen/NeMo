@@ -132,6 +132,7 @@ model:
       speaker_conditioning_type: ${speaker_conditioning_type}
       sup_data_dir: ${sup_data_dir}
       content_aug_types: ${content_aug_types}
+      alternate_speaker_conditioning: "fixed"
 
     dataloader_params:
       drop_last: false

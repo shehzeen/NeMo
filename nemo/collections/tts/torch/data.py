@@ -1124,6 +1124,7 @@ class FastPitchSSLDataset(Dataset):
         speaker_conditioning_type: Optional[str] = "per_sample",  # per_sample, mean, interpolate,
         content_aug_types: Optional[List[str]] = [],
         load_content_embedding: Optional[bool] = True,
+        alternate_speaker_conditioning: Optional[str] = "random",
     ):
 
         """Dataset used for training FastPitchModel_SSL model.
@@ -1237,7 +1238,9 @@ class FastPitchSSLDataset(Dataset):
                 for key in speaker_stats_raw:
                     self.speaker_stats[int(key)] = speaker_stats_raw[key]
         
+        self.alternate_speaker_conditioning = alternate_speaker_conditioning
         self.compute_mean_speaker_embeddings()
+        
 
     def _get_wav_from_filepath(self, audio_filepath):
         features = AudioSegment.segment_from_file(
@@ -1333,6 +1336,8 @@ class FastPitchSSLDataset(Dataset):
         mean_speaker_embeddings = {}
         speaker_counts = {}
         for idx in range(len(self.data)):
+            if idx % 1000 == 0:
+                print("processed", idx, len(self.data), "files")
             sample = self.data[idx]
             speaker = sample["speaker"]
             if speaker in speaker_counts and speaker_counts[speaker] >= n_embeddings_per_speaker:
@@ -1345,6 +1350,7 @@ class FastPitchSSLDataset(Dataset):
             if os.path.exists(speaker_emb_fp):
                 embedding = torch.load(speaker_emb_fp)
                 if speaker not in mean_speaker_embeddings:
+                    print("adding speaker", len(mean_speaker_embeddings), speaker, speaker_emb_fp)
                     mean_speaker_embeddings[speaker] = embedding
                     speaker_counts[speaker] = 1
                 else:
@@ -1462,8 +1468,10 @@ class FastPitchSSLDataset(Dataset):
         if len(alternate_speakers) == 0:
             alternate_speaker = sample["speaker"]
         else:
-            # choosing alternate speaker randomly
-            alternate_speaker = random.choice(alternate_speakers)
+            if self.alternate_speaker_conditioning == "random":
+                alternate_speaker = random.choice(alternate_speakers)
+            elif self.alternate_speaker_conditioning == "fixed":
+                alternate_speaker = min(alternate_speakers)
         
         alternate_speaker_embedding = self.mean_speaker_embeddings[alternate_speaker]
 
