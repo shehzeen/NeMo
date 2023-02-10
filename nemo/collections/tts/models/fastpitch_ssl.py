@@ -119,10 +119,10 @@ class FastPitchModel_SSL(ModelPT):
             vocoder_device = self.non_trainable_models['vocoder'].device
             _spec = torch.from_numpy(spectrogram).unsqueeze(0).to(torch.float32).to(vocoder_device)
             wav_generated = self.non_trainable_models['vocoder'].generator(x=_spec)[0]
-            # return wav_generated.cpu().numpy()
-            pred_denoised = self.non_trainable_models['vocoder']._bias_denoise(wav_generated, _spec).squeeze(1)
-            print("pred denoise", pred_denoised.shape)
-            return pred_denoised.cpu().numpy()
+            return wav_generated.cpu().numpy()
+            # pred_denoised = self.non_trainable_models['vocoder']._bias_denoise(wav_generated, _spec).squeeze(1)
+            # print("pred denoise", pred_denoised.shape)
+            # return pred_denoised.cpu().numpy()
 
     @property
     def tb_logger(self):
