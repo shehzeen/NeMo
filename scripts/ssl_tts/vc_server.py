@@ -11,7 +11,8 @@ import numpy as np
 import soundfile as sf
 import librosa
 import json
-
+import wav2lip_infer
+import time
 # ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
 ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/Conformer-SSL/2023-01-29_21-22-11/checkpoints/Epoch39.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
@@ -225,17 +226,17 @@ def convert_voice():
     if len(speech_timestamps) == 0:
         # no voiced frames, return the same audio
         silence = audio_np * 0
+        video_path = wav2lip_infer.get_lipsynced_video(audio_np_16000, speaker, silence=True)
+        video_base64 = base64.b64encode(open(video_path, 'rb').read()).decode('utf-8')
         return json.dumps({
             'audio_converted': base64.b64encode(silence).decode('utf-8'),
+            'video': video_base64
         })
-        pass
     
+    st = time.time()
     with torch.no_grad():
         audio_np = audio_np[:-1]
         audio_signal = torch.from_numpy(audio_np).to(device)[None]
-        print("audio signal ", audio_signal.shape)
-        print("***")
-        print("***\n***\n***\n***\n***\n***\n")
 
         audio_signal_length = torch.tensor([audio_signal.shape[1]]).to(device)
 
@@ -264,10 +265,21 @@ def convert_voice():
         print("wav generated ", wav_generated.shape, wav_generated.dtype)
         print("***\n***\n***\n***\n***\n***\n")
         # wav_pitch_shifted = librosa.effects.pitch_shift(audio_np, 22050, n_steps=-2)
-        
-        return json.dumps({
-            'audio_converted': base64.b64encode(wav_generated).decode('utf-8'),
-        })
+    audio_time = time.time() - st
+    print("audio time ", audio_time)
+
+    video_start_time = time.time()
+    video_path = wav2lip_infer.get_lipsynced_video(audio_np_16000, speaker)
+    video_time = time.time() - video_start_time
+    print("video time ", video_time)
+    # load video path and convert to base64
+
+    video_base64 = base64.b64encode(open(video_path, 'rb').read()).decode('utf-8')
+
+    return json.dumps({
+        'audio_converted': base64.b64encode(wav_generated).decode('utf-8'),
+        'video': video_base64,
+    })
     
 
 if __name__ == '__main__':

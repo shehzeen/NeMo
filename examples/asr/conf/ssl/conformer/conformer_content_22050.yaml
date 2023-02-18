@@ -28,6 +28,7 @@ init_from_pretrained_model:
 model:
   sample_rate: 22050
   normalize_encoding: true
+  normalize_content_encoding: false
   aug_loss:
     augmentations: "pitch_shift"
     aug_loss_after_n_steps: 10 #after how many steps we start optimizing the loss

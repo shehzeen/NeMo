@@ -28,7 +28,7 @@ from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging, model_utils
 from nemo.utils.decorators import experimental
-
+from nemo.collections.asr.parts.preprocessing import features as asr_features
 
 @experimental
 class FastPitchModel_SSL(ModelPT):
@@ -192,7 +192,9 @@ class FastPitchModel_SSL(ModelPT):
             )
             
             mels_for_embedding = mels_pred
-            if self.non_trainable_models['ssl_model']._cfg.preprocessor.normalize == "per_feature":
+            if self.non_trainable_models['ssl_model']._cfg.preprocessor.get("mag_power", 2) == 2:
+                # old models.
+                print("self converted using old method")
                 audio_pred = self.non_trainable_models['vocoder'].generator(x=mels_pred)[:,0,:]
                 audio_mask = mask_from_lens(audio_len)
                 audio_pred = audio_pred * audio_mask
@@ -205,6 +207,11 @@ class FastPitchModel_SSL(ModelPT):
                 if self.global_step % 128 == 0:
                     self.tb_logger.add_audio("Aug Audio VC", audio_pred[0], self.global_step, 22050)
                     self.tb_logger.add_audio("Aug Audio Orig", batch['audio'][0], self.global_step, 22050)
+            elif self.non_trainable_models['ssl_model']._cfg.preprocessor.get("mag_power", 2) == 1:
+                print("new model normalizing mel specs")
+                mels_for_embedding, _, _ = asr_features.normalize_batch(
+                    mels_for_embedding, mel_len, "per_feature"
+                )
 
             new_content_embedding, new_encoded_len = self.non_trainable_models['ssl_model'].encoder(audio_signal=mels_for_embedding, length=mel_len)
             if self.non_trainable_models['ssl_model']._cfg.get("normalize_content_encoding", False):

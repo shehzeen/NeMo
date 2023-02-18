@@ -77,7 +77,7 @@ model:
     pad_value: 0
     sample_rate: ${model.sample_rate}
     window: "hann"
-    normalize: null
+    normalize: "per_feature"
     preemph: null
     dither: 0.0
     frame_splicing: 1

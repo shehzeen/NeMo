@@ -138,7 +138,7 @@ model:
       drop_last: false
       shuffle: false
       batch_size: 2
-      num_workers: 0
+      num_workers: 4
       pin_memory: true
 
   # both encoder and decoder have same architecture, FFTransformerDecoder 

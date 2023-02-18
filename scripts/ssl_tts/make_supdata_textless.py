@@ -322,6 +322,7 @@ def main():
     manifest_paths = args.manifest_paths.split(",")
     ssl_model_ckpt_path = args.ssl_model_ckpt_path
 
+    print("loafing dataset")
     dataset = AudioDataset(
         manifest_paths, pad_multiple=args.pad_multiple, sample_rate=args.sample_rate, sup_data_dir=args.sup_data_dir
     )
@@ -333,6 +334,7 @@ def main():
         num_workers=args.num_workers,
     )
 
+    print("loading ssl model")
     ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(ssl_model_ckpt_path)
     with open_dict(ssl_model.cfg):
         ssl_model.cfg.preprocessor.exact_pad = True
@@ -340,6 +342,7 @@ def main():
     ssl_model.eval()
     ssl_model.to(device)
 
+    print("nemo sv model")
     nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
     nemo_sv_model = nemo_sv_model.to(device)
     nemo_sv_model.eval()
