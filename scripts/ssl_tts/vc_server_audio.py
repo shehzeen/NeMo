@@ -11,16 +11,14 @@ import numpy as np
 import soundfile as sf
 import librosa
 import json
-# import wav2lip_infer
 import time
+
 # ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
 ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/Conformer-SSL/2023-01-29_21-22-11/checkpoints/Epoch39.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments/AugmentedTraining/2023-01-26_14-00-48/checkpoints/Epoch89.ckpt"
 # target_audio_paths = ["/data/shehzeen/SSLTTS/EVALDATA/source_2.wav"]
 
-with open('/home/shehzeen/SimSwap/faceswap_status.txt', 'w') as f:
-    f.write("not ready")
 
 target_audio_paths = {
     'obama' : [
@@ -131,14 +129,6 @@ vad_model, vad_utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
 
 vad_model = vad_model.to("cpu")
 
-facial_image_paths = {
-    'obama' : "/home/shehzeen/first-order-model/obama.jpg",
-    'ahmadCorrect' : "/home/shehzeen/ahmad.png",
-    'sundar' : "/home/shehzeen/sundar.png",
-    'modi' : "/home/shehzeen/modi.png",
-    'emma' : "/home/shehzeen/emma.png",
-    'priyanka' : "/home/shehzeen/priyanka.png",
-}
 def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
     wav = wav_featurizer.process(wav_path)
     if (wav.shape[0] % pad_multiple) != 0:
@@ -211,20 +201,6 @@ def test_connection():
     return 'works!'
 
 
-def get_output_video_fromsimswap():
-    status = "not ready"
-    while status != "output ready":
-        time.sleep(0.1)
-        with open("/home/shehzeen/SimSwap/faceswap_status.txt") as f:
-            status = f.read()
-        print("waiting for output video")
-    
-    output_video_path = "/home/shehzeen/SimSwap/demo_file/result.mp4"
-    with open(output_video_path, 'rb') as f:
-        video_bytes = f.read()
-        video_base64 = base64.b64encode(video_bytes).decode('utf-8')
-        return video_base64
-
 # Write a POST view to accept audio base64 and process it through the vc model
 @app.route('/convert_voice', methods=['POST'])
 def convert_voice():
@@ -234,23 +210,8 @@ def convert_voice():
     # run vc model
 
     audio_base64 = request.values.get('audio')
-    inputvideo_base64 = request.values.get('video')
+    
     speaker = request.values.get('speaker')
-
-    input_video_decoded = base64.b64decode(inputvideo_base64)
-    
-    video_path = "/home/shehzeen/SimSwap/demo_file/source.mp4"
-    with open(video_path, 'wb') as f:
-        f.write(input_video_decoded)
-
-    if speaker in facial_image_paths:
-        with open("/home/shehzeen/SimSwap/demo_files/source_image_fp.txt", 'w') as f:
-            f.write(facial_image_paths[speaker])
-
-    with open('/home/shehzeen/SimSwap/faceswap_status.txt', 'w') as f:
-        f.write("input ready")
-
-    
     if speaker not in speaker_embeddings:
         print("speaker not found, using default speaker")
         speaker = speaker_embeddings.keys()[0]
@@ -266,15 +227,9 @@ def convert_voice():
     speech_timestamps = vad_get_speech_timestamps(audio_torch_16000, vad_model, sampling_rate=16000)
     print("speech timestamps ", speech_timestamps)
     if len(speech_timestamps) == 0:
-        # no voiced frames, return the same audio
         silence = audio_np * 0
-        # video_path = wav2lip_infer.get_lipsynced_video(audio_np_16000, speaker, silence=True)
-        # video_base64 = base64.b64encode(open(video_path, 'rb').read()).decode('utf-8')
-        # video_base64 = inputvideo_base64
-        video_base64 = get_output_video_fromsimswap()
         return json.dumps({
             'audio_converted': base64.b64encode(silence).decode('utf-8'),
-            'video': video_base64
         })
     
     st = time.time()
@@ -312,19 +267,8 @@ def convert_voice():
     audio_time = time.time() - st
     print("audio time ", audio_time)
 
-    video_start_time = time.time()
-    # video_path = wav2lip_infer.get_lipsynced_video(audio_np_16000, speaker)
-    video_time = time.time() - video_start_time
-    print("video time ", video_time)
-    # load video path and convert to base64
-
-    # video_base64 = base64.b64encode(open(video_path, 'rb').read()).decode('utf-8')
-    # video_base64 = inputvideo_base64
-    video_base64 = get_output_video_fromsimswap()
-
     return json.dumps({
         'audio_converted': base64.b64encode(wav_generated).decode('utf-8'),
-        'video': video_base64,
     })
     
 
