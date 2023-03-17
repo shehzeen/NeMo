@@ -31,6 +31,10 @@ from nemo.collections.asr.models import label_models
 
 def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
     wav = wav_featurizer.process(wav_path)
+    # if wav is multi-channel, take the mean
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+
     if (wav.shape[0] % pad_multiple) != 0:
         wav = torch.cat([wav, torch.zeros(pad_multiple - wav.shape[0] % pad_multiple, dtype=torch.float)])
     wav = wav[:-1]
@@ -161,10 +165,13 @@ def main():
     parser.add_argument('--source_target_out_pairs', type=str)
     parser.add_argument('--compute_pitch', type=int, default=1)
     parser.add_argument('--compute_duration', type=int, default=1)
+    parser.add_argument('--max_input_length_sec', type=int, default=20)
+    parser.add_argument('--segment_length_seconds', type=int, default=16)
     args = parser.parse_args()
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+    combine_outpaths = False
     if args.source_target_out_pairs is not None:
         assert args.source_audio_path is None, "source_audio_path and source_target_out_pairs are mutually exclusive"
         assert args.target_audio_path is None, "target_audio_path and source_target_out_pairs are mutually exclusive"
@@ -180,8 +187,34 @@ def main():
             target_name = os.path.basename(args.target_audio_path).split(".")[0]
             args.out_path = "swapped_{}_{}.wav".format(source_name, target_name)
 
-        source_target_out_pairs = [(args.source_audio_path, args.target_audio_path, args.out_path)]
+        wav_featurizer_22050 = WaveformFeaturizer(sample_rate=22050, int_values=False, augmentor=None)
+        source_audio_wav = wav_featurizer_22050.process(args.source_audio_path)
+        source_audio_length = source_audio_wav.shape[0]
+        if source_audio_length > args.max_input_length_sec * 22050:
+            print("Segmenting audio into 16s chunks")
+            # break audio into segments
+            source_audio_basedir = os.path.dirname(args.source_audio_path)
+            temp_dir = os.path.join(source_audio_basedir, "temp")
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir)
+            
+            segment_length = int(16*20480) # around 
+            si = 0
+            seg_num = 0
+            source_target_out_pairs = []
+            combine_outpaths = True
+            while si < source_audio_length:
+                segment = source_audio_wav[si:si+segment_length]
+                segment_path = os.path.join(temp_dir, "source_{}.wav".format(seg_num))
+                segment_outpath = os.path.join(temp_dir, "out_{}.wav".format(seg_num))
+                soundfile.write(segment_path, segment, 22050)
+                si += segment_length
+                source_target_out_pairs.append((segment_path, args.target_audio_path, segment_outpath))
+                seg_num += 1
+        else:                
+            source_target_out_pairs = [(args.source_audio_path, args.target_audio_path, args.out_path)]
 
+    print(source_target_out_pairs)
     out_paths = [r[2] for r in source_target_out_pairs]
     out_dir = get_base_dir(out_paths)
     if not os.path.exists(out_dir):
@@ -213,6 +246,7 @@ def main():
 
     for source_target_out in source_target_out_pairs:
         source_audio_path = source_target_out[0]
+        source_audio_length = wav_featurizer.process(source_audio_path).shape[0]
         target_audio_paths = source_target_out[1].split(",")
         out_path = source_target_out[2]
 
@@ -244,8 +278,16 @@ def main():
                 durs_gt=duration1,
                 dataset_id=0,
             )
-            wav_generated = wav_generated[0][0]
+            wav_generated = wav_generated[0][0][:source_audio_length]
             soundfile.write(out_path, wav_generated, fpssl_sample_rate)
+    
+    if combine_outpaths:
+        print("Combining segments into one file")
+        out_paths = [r[2] for r in source_target_out_pairs]
+        out_wavs = [ wav_featurizer.process(out_path) for out_path in out_paths ]
+        out_wav = torch.cat(out_wavs, dim=0).cpu().numpy()
+        soundfile.write(args.out_path, out_wav, fpssl_sample_rate)
+
 
 
 if __name__ == "__main__":
