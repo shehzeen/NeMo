@@ -12,13 +12,17 @@ import soundfile as sf
 import librosa
 import json
 import time
-
+import os
+import io
 # ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
-ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/Conformer-SSL/2023-01-29_21-22-11/checkpoints/Epoch39.ckpt"
+ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/FPMEL_AllFixed_Unnorm/2023-02-19_20-59-04/checkpoints/Epoch43_8915.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments/AugmentedTraining/2023-01-26_14-00-48/checkpoints/Epoch89.ckpt"
 # target_audio_paths = ["/data/shehzeen/SSLTTS/EVALDATA/source_2.wav"]
 
+temp_dir = "/data/shehzeen/temp_vc_audio/"
+if not os.path.exists(temp_dir):
+    os.makedirs(temp_dir)
 
 target_audio_paths = {
     'obama' : [
@@ -85,27 +89,31 @@ target_audio_paths = {
 
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityLexOprah/2023-01-29_16-31-54/checkpoints/Epoch167.ckpt"
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityFemailSpeakers/2023-01-30_14-41-11/checkpoints/Epoch300.ckpt"
-fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityAhmad/2023-02-05_17-13-10/checkpoints/Epoch31.ckpt"
+fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments2/FPCompNew_MLM_Auh100_NoNorm/2023-02-23_12-51-14/checkpoints/Epoch500_5797.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANObama/HifiGan/2023-01-28_19-02-46/checkpoints/Epoch909.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANCelebrity/HifiGan/2023-01-29_16-23-01/checkpoints/Epoch69.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynth/HifiGan/2023-01-29_21-35-32/checkpoints/Epoch799.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynthNewCelebs/HifiGan/2023-01-30_18-23-17/checkpoints/Epoch1019.ckpt"
-hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnCelebAhmad/HifiGan/2023-02-05_17-57-10/checkpoints/Epoch479.ckpt"
+hifi_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperimentsCeleb/HifiGAN_finetuned/HifiGan/2023-03-07_08-58-05/checkpoints/Epoch7659_3494.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+print("Loading SSL Model")
 ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(ssl_model_ckpt_path)
 ssl_model.eval()
 ssl_model.to(device)
 
+print("Loading SV Model")
 nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
 nemo_sv_model = nemo_sv_model.to(device)
 nemo_sv_model.eval()
 sv_sample_rate = nemo_sv_model._cfg.preprocessor.sample_rate
 
+print("Loading Vocoder Model")
 vocoder = hifigan.HifiGanModel.load_from_checkpoint(hifi_ckpt_path).to(device)
 vocoder.eval()
 
+print("Loading FP Model")
 fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_ckpt_path, strict=False)
 fastpitch_model = fastpitch_model.to(device)
 fastpitch_model.eval()
@@ -115,7 +123,7 @@ fpssl_sample_rate = fastpitch_model._cfg.sample_rate
 wav_featurizer_sv = WaveformFeaturizer(sample_rate=sv_sample_rate, int_values=False, augmentor=None)
 wav_featurizer_fp = WaveformFeaturizer(sample_rate=fpssl_sample_rate, int_values=False, augmentor=None)
 
-
+print("Loading VAD Model")
 vad_model, vad_utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
                               model='silero_vad',
                               force_reload=True,
@@ -202,6 +210,94 @@ def test_connection():
 
 
 # Write a POST view to accept audio base64 and process it through the vc model
+@app.route('/convert_recordings', methods=['POST'])
+def convert_recordings():
+    total_wavs = int(request.values.get('total_wavs'))
+
+
+    results = []
+    for wav_no in range(total_wavs):
+        with torch.no_grad():
+            source_type = request.values.get('input_type_{}'.format(wav_no))
+            if source_type == "recording":
+                audio_data = request.files['audio_data_{}'.format(wav_no)]
+            else:
+                audio_data = request.files['custom_source_audio_{}'.format(wav_no)]
+            
+            # source_audio_path = os.path.join(temp_dir, 'source_audio_{}.wav'.format(wav_no))
+            # print("Audio Saved to: {}".format(source_audio_path))
+            # audio_data.save(source_audio_path)
+            source_wav = load_wav(audio_data, wav_featurizer_fp)
+            audio_np = source_wav.cpu().numpy()
+
+            speaker = request.values.get('speaker_{}'.format(wav_no))
+            if speaker == "custom":
+                target_audio_data = request.files['target_speaker_audio_{}'.format(wav_no)]
+                # target_audio_path = os.path.join(temp_dir, 'target_speaker_audio_{}.wav'.format(wav_no))
+                # target_audio_data.save(target_audio_path)
+                # print("Audio Saved to: {}".format(target_audio_path))
+                target_speaker_embedding = get_speaker_embedding(
+                    nemo_sv_model, wav_featurizer_sv, [target_audio_data], duration=None, device=device
+                )
+            else:
+                target_speaker_embedding = speaker_embeddings[speaker]
+
+            # audio_np, _ = librosa.load(audio_data, sr=22050)
+            segment_length = int(16*20480)
+            seg_num = 0
+            num_segments = int(np.ceil(len(audio_np) / segment_length))
+            generated_wavs = []
+            for seg_num in range(num_segments):
+                print("segment {}/{}".format(seg_num, num_segments))
+                start = seg_num * segment_length
+                end = min((seg_num + 1) * segment_length, len(audio_np))
+                audio_signal = torch.from_numpy(audio_np[start:end]).to(device)[None]
+                audio_signal_length = torch.tensor([audio_signal.shape[1]]).to(device)
+                processed_signal, processed_signal_length = ssl_model.preprocessor(
+                    input_signal=audio_signal, length=audio_signal_length,
+                )
+
+                batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+                final_content_embedding = batch_content_embedding[0,:,:batch_encoded_len[0]]
+                ssl_downsampling_factor = ssl_model._cfg.encoder.subsampling_factor
+                duration = torch.ones(final_content_embedding.shape[1]) * ssl_downsampling_factor
+                duration = duration.to(device)
+                final_content_embedding = final_content_embedding[None]
+                duration = duration[None]
+
+                wav_generated = fastpitch_model.generate_wav(
+                    final_content_embedding,
+                    target_speaker_embedding,
+                    pitch_contour=None,
+                    compute_pitch=True,
+                    compute_duration=False,
+                    durs_gt=duration,
+                    dataset_id=0,
+                )
+
+                wav_generated = wav_generated[0][0]
+                generated_wavs.append(wav_generated)
+            
+            wav_generated = np.concatenate(generated_wavs)
+            # temp_wav_path = os.path.join(temp_dir, 'temp.wav')
+            temp_buffer = io.BytesIO()
+            # sf.write(temp_wav_path, wav_generated, 22050)
+            sf.write(temp_buffer, wav_generated, 22050, format='WAV')
+            # print("Converted", temp_wav_path)
+            # with open(temp_wav_path, 'rb') as f:
+            #     audio_base64_converted = base64.b64encode(f.read())
+            audio_base64_converted = base64.b64encode(temp_buffer.getvalue())
+            
+            results.append({
+                'audio_converted': audio_base64_converted.decode('ascii'),
+            })
+    
+    return json.dumps({
+        'total_wavs': total_wavs,
+        'results': results,
+    })
+
+
 @app.route('/convert_voice', methods=['POST'])
 def convert_voice():
     # get base64 audio from request
