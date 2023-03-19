@@ -15,86 +15,82 @@ import time
 import os
 import io
 # ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
-ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/FPMEL_AllFixed_Unnorm/2023-02-19_20-59-04/checkpoints/Epoch43_8915.ckpt"
+ssl_model_ckpt_path = "/Users/paarthneekhara/Dev/VirtualMic/CheckPoints/Epoch43_8915.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments/AugmentedTraining/2023-01-26_14-00-48/checkpoints/Epoch89.ckpt"
 # target_audio_paths = ["/data/shehzeen/SSLTTS/EVALDATA/source_2.wav"]
 
-temp_dir = "/data/shehzeen/temp_vc_audio/"
-if not os.path.exists(temp_dir):
-    os.makedirs(temp_dir)
-
 target_audio_paths = {
     'obama' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_2_335.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_1_335.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_1_336.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_1_337.wav"
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/obama_2_335.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/obama_1_335.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/obama_1_336.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/obama_1_337.wav"
     ],
     'modi' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_334.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_335.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_336.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_337.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/modi_1_334.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/modi_1_335.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/modi_1_336.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/modi_1_337.wav",
     ],
     'ravish' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_141.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_142.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_143.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_144.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ravish_2_141.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ravish_2_142.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ravish_2_143.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ravish_2_144.wav",
     ],
     'lex' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_290.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_291.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_292.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_293.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/lex_1_290.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/lex_1_291.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/lex_1_292.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/lex_1_293.wav",
     ],
     'oprah' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_151.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_152.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_153.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_154.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/oprah_2_151.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/oprah_2_152.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/oprah_2_153.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/oprah_2_154.wav",
     ],
     'emma' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_2.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_8.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/emma_1_2.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/emma_1_5.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/emma_1_8.wav",
     ],
     'priyanka' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_2.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_11.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/priyanka_1_2.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/priyanka_1_8.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/priyanka_1_11.wav",
     ],
     'miley' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_2.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_11.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/miley_1_2.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/miley_1_5.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/miley_1_11.wav",
     ],
     'aubrey' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_11.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/aubrey_1_5.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/aubrey_1_8.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/aubrey_1_11.wav",
     ],
     'sundar' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_11.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/sundar_1_5.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/sundar_1_8.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/sundar_1_11.wav",
     ],
     'ahmadCorrect' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_11.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ahmadCorrect_1_5.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ahmadCorrect_1_8.wav",
+        "/Users/paarthneekhara/Dev/VirtualMic/YoutubeChunkedAudio/ahmadCorrect_1_11.wav",
     ]
 }
 
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityLexOprah/2023-01-29_16-31-54/checkpoints/Epoch167.ckpt"
 # fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityFemailSpeakers/2023-01-30_14-41-11/checkpoints/Epoch300.ckpt"
-fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments2/FPCompNew_MLM_Auh100_NoNorm/2023-02-23_12-51-14/checkpoints/Epoch500_5797.ckpt"
+fastpitch_ckpt_path = "/Users/paarthneekhara/Dev/VirtualMic/CheckPoints/Epoch500_5797.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANObama/HifiGan/2023-01-28_19-02-46/checkpoints/Epoch909.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANCelebrity/HifiGan/2023-01-29_16-23-01/checkpoints/Epoch69.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynth/HifiGan/2023-01-29_21-35-32/checkpoints/Epoch799.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynthNewCelebs/HifiGan/2023-01-30_18-23-17/checkpoints/Epoch1019.ckpt"
-hifi_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperimentsCeleb/HifiGAN_finetuned/HifiGan/2023-03-07_08-58-05/checkpoints/Epoch7659_3494.ckpt"
+hifi_ckpt_path = "/Users/paarthneekhara/Dev/VirtualMic/CheckPoints/Epoch7659_3494.ckpt"
 # hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 

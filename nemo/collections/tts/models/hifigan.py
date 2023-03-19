@@ -78,25 +78,25 @@ class HifiGanModel(Vocoder, Exportable):
 
         self.automatic_optimization = False
 
-        if self._cfg.get("use_ssl_fastpitch_spec", False):
-            self.use_ssl_fastpitch_spec = True
-            ssl_model_ckpt_path = self._cfg.ssl_model_ckpt_path
-            fastpitch_model_ckpt_path = self._cfg.fastpitch_model_ckpt_path
+        # if self._cfg.get("use_ssl_fastpitch_spec", False):
+        #     self.use_ssl_fastpitch_spec = True
+        #     ssl_model_ckpt_path = self._cfg.ssl_model_ckpt_path
+        #     fastpitch_model_ckpt_path = self._cfg.fastpitch_model_ckpt_path
+            
+        #     ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(ssl_model_ckpt_path)
+        #     ssl_model.eval()
 
-            ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(ssl_model_ckpt_path)
-            ssl_model.eval()
+        #     fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_model_ckpt_path, strict=False)
+        #     fastpitch_model.eval()
 
-            fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_model_ckpt_path, strict=False)
-            fastpitch_model.eval()
+        #     nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
+        #     nemo_sv_model.eval()
 
-            nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
-            nemo_sv_model.eval()
-
-            self.non_trainable_models = {
-                "ssl_model": ssl_model,
-                "fastpitch_model": fastpitch_model,
-                "nemo_sv_model": nemo_sv_model,
-            }
+        #     self.non_trainable_models = {
+        #         "ssl_model": ssl_model,
+        #         "fastpitch_model": fastpitch_model,
+        #         "nemo_sv_model": nemo_sv_model,
+        #     }
 
 
     def get_synthetic_melspec(self, audio, audio_len):
