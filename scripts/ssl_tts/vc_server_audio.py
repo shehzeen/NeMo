@@ -14,88 +14,101 @@ import json
 import time
 import os
 import io
-# ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/AugLossAlpha100/Conformer-SSL/2023-01-24_00-42-05/checkpoints/Epoch68.ckpt"
-ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/MultiLing256/FPMEL_AllFixed_Unnorm/2023-02-19_20-59-04/checkpoints/Epoch43_8915.ckpt"
-# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
-# fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments/AugmentedTraining/2023-01-26_14-00-48/checkpoints/Epoch89.ckpt"
-# target_audio_paths = ["/data/shehzeen/SSLTTS/EVALDATA/source_2.wav"]
+from flask_ngrok import run_with_ngrok
+import random
 
-temp_dir = "/data/shehzeen/temp_vc_audio/"
-if not os.path.exists(temp_dir):
-    os.makedirs(temp_dir)
+temp_dir = "/data/shehzeen/TextlessVCDemoTempDir"
+os.makedirs(temp_dir, exist_ok=True)
+
+data_dir_path = "/data/shehzeen/SSLTTS/CelebrityData"
+
+ssl_model_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_8915.ckpt"
+
+avatar_paths = {
+    'default' : "/home/shehzeen/first-order-model/obama.jpg",
+    'obama' : "/home/shehzeen/first-order-model/obama.jpg",
+    'ahmadCorrect' : "/home/shehzeen/ahmad.png",
+    'sundar' : "/home/shehzeen/sundar.png",
+    'modi' : "/home/shehzeen/modi.png",
+    'emma' : "/home/shehzeen/emma.png",
+    'priyanka' : "/home/shehzeen/priyanka.png",
+    'ravish' : "/data/shehzeen/portraits/ravish.png",
+    'aubrey' : "/data/shehzeen/portraits/aubrey.png",
+    'lex' : "/data/shehzeen/portraits/lex.png",
+    'oprah' : "/data/shehzeen/portraits/oprah.png",
+    'miley' : "/data/shehzeen/portraits/miley.png",
+}
 
 target_audio_paths = {
     'obama' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_2_335.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_1_335.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_1_336.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/obama_1_337.wav"
+        "{}/YoutubeChunkedAudio/obama_2_335.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/obama_1_335.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/obama_1_336.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/obama_1_337.wav".format(data_dir_path)
     ],
     'modi' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_334.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_335.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_336.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/modi_1_337.wav",
+        "{}/YoutubeChunkedAudio/modi_1_334.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/modi_1_335.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/modi_1_336.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/modi_1_337.wav".format(data_dir_path),
     ],
     'ravish' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_141.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_142.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_143.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ravish_2_144.wav",
+        "{}/YoutubeChunkedAudio/ravish_2_141.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/ravish_2_142.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/ravish_2_143.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/ravish_2_144.wav".format(data_dir_path),
     ],
     'lex' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_290.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_291.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_292.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/lex_1_293.wav",
+        "{}/YoutubeChunkedAudio/lex_1_290.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/lex_1_291.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/lex_1_292.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/lex_1_293.wav".format(data_dir_path),
     ],
     'oprah' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_151.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_152.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_153.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/oprah_2_154.wav",
+        "{}/YoutubeChunkedAudio/oprah_2_151.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprah_2_152.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprah_2_153.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprah_2_154.wav".format(data_dir_path),
     ],
     'emma' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_2.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/emma_1_8.wav",
+        "{}/YoutubeChunkedAudio/emma_1_2.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/emma_1_5.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/emma_1_8.wav".format(data_dir_path),
     ],
     'priyanka' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_2.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/priyanka_1_11.wav",
+        "{}/YoutubeChunkedAudio/priyanka_1_2.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/priyanka_1_8.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/priyanka_1_11.wav".format(data_dir_path),
     ],
     'miley' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_2.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/miley_1_11.wav",
+        "{}/YoutubeChunkedAudio/miley_1_2.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/miley_1_5.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/miley_1_11.wav".format(data_dir_path),
     ],
     'aubrey' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/aubrey_1_11.wav",
+        "{}/YoutubeChunkedAudio/aubrey_1_5.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/aubrey_1_8.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/aubrey_1_11.wav".format(data_dir_path),
     ],
     'sundar' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/sundar_1_11.wav",
+        "{}/YoutubeChunkedAudio/sundar_1_5.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/sundar_1_8.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/sundar_1_11.wav".format(data_dir_path),
     ],
     'ahmadCorrect' : [
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_5.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_8.wav",
-        "/data/shehzeen/SSLTTS/CelebrityData/YoutubeChunkedAudio/ahmadCorrect_1_11.wav",
+        "{}/YoutubeChunkedAudio/ahmadCorrect_1_5.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/ahmadCorrect_1_8.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/ahmadCorrect_1_11.wav".format(data_dir_path),
     ]
 }
 
-# fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityLexOprah/2023-01-29_16-31-54/checkpoints/Epoch167.ckpt"
-# fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/CelebrityFastPitch/CelebrityFemailSpeakers/2023-01-30_14-41-11/checkpoints/Epoch300.ckpt"
-fastpitch_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperiments2/FPCompNew_MLM_Auh100_NoNorm/2023-02-23_12-51-14/checkpoints/Epoch500_5797.ckpt"
-# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANObama/HifiGan/2023-01-28_19-02-46/checkpoints/Epoch909.ckpt"
-# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANCelebrity/HifiGan/2023-01-29_16-23-01/checkpoints/Epoch69.ckpt"
-# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynth/HifiGan/2023-01-29_21-35-32/checkpoints/Epoch799.ckpt"
-# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HifiGANOnSynthNewCelebs/HifiGan/2023-01-30_18-23-17/checkpoints/Epoch1019.ckpt"
-hifi_ckpt_path = "/data/shehzeen/SSLTTS/TextlessFastPitchExperimentsCeleb/HifiGAN_finetuned/HifiGan/2023-03-07_08-58-05/checkpoints/Epoch7659_3494.ckpt"
-# hifi_ckpt_path = "/data/shehzeen/SSLTTS/HiFiLibriEpoch334.ckpt"
+
+fastpitch_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/Epoch500_5797.ckpt".format(data_dir_path)
+fastpitch_ckpt_path_finetuned = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_7464.ckpt".format(data_dir_path)
+
+hifi_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/HiFiLibriEpoch334.ckpt".format(data_dir_path)
+hifi_ckpt_path_finetuned = "/data/shehzeen/TextlessVCDemoCkpts/Epoch7659_3494.ckpt".format(data_dir_path)
+
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 print("Loading SSL Model")
@@ -113,6 +126,10 @@ print("Loading Vocoder Model")
 vocoder = hifigan.HifiGanModel.load_from_checkpoint(hifi_ckpt_path).to(device)
 vocoder.eval()
 
+print("Loading Vocoder Model")
+vocoder_finetuned = hifigan.HifiGanModel.load_from_checkpoint(hifi_ckpt_path_finetuned).to(device)
+vocoder_finetuned.eval()
+
 print("Loading FP Model")
 fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_ckpt_path, strict=False)
 fastpitch_model = fastpitch_model.to(device)
@@ -120,22 +137,37 @@ fastpitch_model.eval()
 fastpitch_model.non_trainable_models = {'vocoder': vocoder}
 fpssl_sample_rate = fastpitch_model._cfg.sample_rate
 
+print("Loading FP Model")
+fastpitch_model_finetuned = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_ckpt_path_finetuned, strict=False)
+fastpitch_model_finetuned = fastpitch_model_finetuned.to(device)
+fastpitch_model_finetuned.eval()
+fastpitch_model_finetuned.non_trainable_models = {'vocoder': vocoder_finetuned}
+
 wav_featurizer_sv = WaveformFeaturizer(sample_rate=sv_sample_rate, int_values=False, augmentor=None)
 wav_featurizer_fp = WaveformFeaturizer(sample_rate=fpssl_sample_rate, int_values=False, augmentor=None)
 
-print("Loading VAD Model")
-vad_model, vad_utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                              model='silero_vad',
-                              force_reload=True,
-                              onnx=False)
+# print("Loading VAD Model")
+# vad_model, vad_utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+#                               model='silero_vad',
+#                               force_reload=True,
+#                               onnx=False)
 
-(vad_get_speech_timestamps,
- vad_save_audio,
- vad_read_audio,
- vad_VADIterator,
- vad_collect_chunks) = vad_utils
+# (vad_get_speech_timestamps,
+#  vad_save_audio,
+#  vad_read_audio,
+#  vad_VADIterator,
+#  vad_collect_chunks) = vad_utils
 
-vad_model = vad_model.to("cpu")
+# vad_model = vad_model.to("cpu")
+def cleanup_temp_dir():
+    # Remove files in temp dir older than one hour
+    try:
+        for f in os.listdir(temp_dir):
+            if os.path.getmtime(os.path.join(temp_dir, f)) < time.time() - 3600:
+                os.remove(os.path.join(temp_dir, f))
+    except:
+        pass
+
 
 def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
     wav = wav_featurizer.process(wav_path)
@@ -202,6 +234,8 @@ with torch.no_grad():
         speaker_embeddings[speaker] = speaker_embedding
 
 app = Flask(__name__)
+
+run_with_ngrok(app)  # Start ngrok when app is run
 CORS(app)
 
 @app.route('/test_connection')
@@ -210,12 +244,46 @@ def test_connection():
 
 
 # Write a POST view to accept audio base64 and process it through the vc model
+@app.route('/get_avatar', methods=['POST'])
+def get_avatar():
+    cleanup_temp_dir()
+    audio_data_base64 = request.values.get('audio_data_base64')
+    audio_data = base64.b64decode(audio_data_base64)
+    speaker = request.values.get('speaker')
+    session_number = random.randint(0, 1000000)
+    temp_wav_fp = os.path.join(temp_dir, "temp_{}.wav".format(session_number))
+    print("Temp wav fp", temp_wav_fp)
+    temp_json_fp = os.path.join(temp_dir, "temp_{}.json".format(session_number))
+    with open(temp_wav_fp, "wb") as f:
+        f.write(audio_data)
+
+    if speaker in avatar_paths:
+        avatar_fp = avatar_paths[speaker]
+    else:
+        avatar_fp = avatar_paths["default"]
+    
+    command_string = '''pocketsphinx -phone_align yes single WAVFILE $text | jq '[.w[]|{word: (.t | ascii_upcase | sub("<S>"; "sil") | sub("<SIL>"; "sil") | sub("\\\(2\\\)"; "") | sub("\\\(3\\\)"; "") | sub("\\\(4\\\)"; "") | sub("\\\[SPEECH\\\]"; "SIL") | sub("\\\[NOISE\\\]"; "SIL")), phones: [.w[]|{ph: .t | sub("\\\+SPN\\\+"; "SIL") | sub("\\\+NSN\\\+"; "SIL"), bg: (.b*100)|floor, ed: (.b*100+.d*100)|floor}]}]' > JSONFILE'''
+    command_string = command_string.replace("WAVFILE", temp_wav_fp)
+    command_string = command_string.replace("JSONFILE", temp_json_fp)
+    # print("Command", command_string)
+    os.system(command_string)
+    os.system("cd /home/shehzeen/one-shot-talking-face-colab/content/one-shot-talking-face; CUDA_VISIBLE_DEVICES=2 python test_script.py --img_path {} --audio_path {} --phoneme_path {} --save_dir {}".format(avatar_fp, temp_wav_fp, temp_json_fp, temp_dir) )
+
+    output_video_name = os.path.basename(avatar_fp)[:-4] + "_" + os.path.basename(temp_wav_fp)[:-4] + ".mp4"
+    print(os.path.join(temp_dir, output_video_name))
+
+    video_base64 = base64.b64encode(open(os.path.join(temp_dir, output_video_name), "rb").read()).decode('utf-8')
+    
+    return json.dumps({'video_base64': video_base64})
+
+    
+
+
 @app.route('/convert_recordings', methods=['POST'])
 def convert_recordings():
     total_wavs = int(request.values.get('total_wavs'))
-
-
     results = []
+    _fastpitch_model = fastpitch_model
     for wav_no in range(total_wavs):
         with torch.no_grad():
             source_type = request.values.get('input_type_{}'.format(wav_no))
@@ -224,25 +292,20 @@ def convert_recordings():
             else:
                 audio_data = request.files['custom_source_audio_{}'.format(wav_no)]
             
-            # source_audio_path = os.path.join(temp_dir, 'source_audio_{}.wav'.format(wav_no))
-            # print("Audio Saved to: {}".format(source_audio_path))
-            # audio_data.save(source_audio_path)
             source_wav = load_wav(audio_data, wav_featurizer_fp)
             audio_np = source_wav.cpu().numpy()
 
             speaker = request.values.get('speaker_{}'.format(wav_no))
             if speaker == "custom":
                 target_audio_data = request.files['target_speaker_audio_{}'.format(wav_no)]
-                # target_audio_path = os.path.join(temp_dir, 'target_speaker_audio_{}.wav'.format(wav_no))
-                # target_audio_data.save(target_audio_path)
-                # print("Audio Saved to: {}".format(target_audio_path))
                 target_speaker_embedding = get_speaker_embedding(
                     nemo_sv_model, wav_featurizer_sv, [target_audio_data], duration=None, device=device
                 )
+                _fastpitch_model = fastpitch_model
             else:
                 target_speaker_embedding = speaker_embeddings[speaker]
+                _fastpitch_model = fastpitch_model_finetuned
 
-            # audio_np, _ = librosa.load(audio_data, sr=22050)
             segment_length = int(16*20480)
             seg_num = 0
             num_segments = int(np.ceil(len(audio_np) / segment_length))
@@ -265,7 +328,7 @@ def convert_recordings():
                 final_content_embedding = final_content_embedding[None]
                 duration = duration[None]
 
-                wav_generated = fastpitch_model.generate_wav(
+                wav_generated = _fastpitch_model.generate_wav(
                     final_content_embedding,
                     target_speaker_embedding,
                     pitch_contour=None,
@@ -279,15 +342,9 @@ def convert_recordings():
                 generated_wavs.append(wav_generated)
             
             wav_generated = np.concatenate(generated_wavs)
-            # temp_wav_path = os.path.join(temp_dir, 'temp.wav')
             temp_buffer = io.BytesIO()
-            # sf.write(temp_wav_path, wav_generated, 22050)
             sf.write(temp_buffer, wav_generated, 22050, format='WAV')
-            # print("Converted", temp_wav_path)
-            # with open(temp_wav_path, 'rb') as f:
-            #     audio_base64_converted = base64.b64encode(f.read())
             audio_base64_converted = base64.b64encode(temp_buffer.getvalue())
-            
             results.append({
                 'audio_converted': audio_base64_converted.decode('ascii'),
             })
@@ -296,6 +353,7 @@ def convert_recordings():
         'total_wavs': total_wavs,
         'results': results,
     })
+
 
 
 @app.route('/convert_voice', methods=['POST'])
@@ -369,4 +427,5 @@ def convert_voice():
     
 
 if __name__ == '__main__':
+    # app.run(host='0.0.0.0', port=8000, ssl_context=('/home/bossbwtw/server.crt', '/home/bossbwtw/server.key'))
     app.run()
