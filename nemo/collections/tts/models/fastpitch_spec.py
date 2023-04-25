@@ -112,12 +112,14 @@ class FastPitchModel_SSL(ModelPT):
         self.non_trainable_models = {}
         self.non_trainable_models['vocoder'] = vocoder
         self.content_aug_types = cfg.get("content_aug_types", [])
-        self.aug_loss_shift_amounts = [-5 + 0.2 * i for i in range(50)] #get values from -5 to 5 in 0.2 intervals 
+        self.aug_loss_shift_amounts = [-5 + 0.2 * i for i in range(50)]  # get values from -5 to 5 in 0.2 intervals
         self.aug_loss_shift_amounts = [v for v in self.aug_loss_shift_amounts if v > 2 or v < -2]
         self.pitch_transforms = []
-        
+
         for _n_steps in self.aug_loss_shift_amounts:
-                self.pitch_transforms.append(torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=self._cfg.sample_rate).to(self._device))
+            self.pitch_transforms.append(
+                torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=self._cfg.sample_rate).to(self._device)
+            )
 
     def vocode_spectrogram(self, spectrogram):
         # spectrogram [C, T] numpy
@@ -184,13 +186,13 @@ class FastPitchModel_SSL(ModelPT):
 
             enc_mask = mask_from_lens(mel_len)
             enc_mask = enc_mask[:, :, None]
-            mels_pred, _, _, _, _, _ = self(
-                enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=None, pace=1.0,
-            )
+            mels_pred, _, _, _, _, _ = self(enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=None, pace=1.0,)
             self.train(old_mode)
             return mels_pred
 
-    def compute_augmented_spectrogram(self, audios, audio_len, mels, mel_len, alternate_speaker_embedding, durs, dataset_id, is_val=False):
+    def compute_augmented_spectrogram(
+        self, audios, audio_len, mels, mel_len, alternate_speaker_embedding, durs, dataset_id, is_val=False
+    ):
         possible_transforms = ["pitch_shift"]
         if self.global_step > self.self_augment_after_steps:
             possible_transforms = ["pitch_shift", "self_voice_convert"]
@@ -201,7 +203,7 @@ class FastPitchModel_SSL(ModelPT):
                 transform.to(self._device)
                 pitch_shifted_audios = transform(audios)
                 aug_mels, aug_mel_lens = self.audio_to_melspec_precessor(pitch_shifted_audios, audio_len)
-                
+
         elif transform_type == "self_voice_convert":
             aug_mels = self.self_voice_convert(mels, mel_len, alternate_speaker_embedding, durs, dataset_id)
             aug_mel_lens = mel_len
@@ -228,8 +230,10 @@ class FastPitchModel_SSL(ModelPT):
         dataset_id = batch["dataset_id"]
         alternate_speaker_embedding = batch["alternate_speaker_embedding"]
 
-        content_embedding, aug_len = self.compute_augmented_spectrogram(audios, audio_len, mels, mel_len, alternate_speaker_embedding, durs, dataset_id)
-        
+        content_embedding, aug_len = self.compute_augmented_spectrogram(
+            audios, audio_len, mels, mel_len, alternate_speaker_embedding, durs, dataset_id
+        )
+
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
         if self.use_encoder:
             enc_out, _ = self.encoder(input=enc_out, seq_lens=encoded_len)
@@ -281,7 +285,7 @@ class FastPitchModel_SSL(ModelPT):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        
+
         encoded_len = batch["mel_len"]
         speaker_embedding = batch["speaker_embedding"]
         pitch = batch["pitch_contour"]
@@ -294,12 +298,13 @@ class FastPitchModel_SSL(ModelPT):
         durs = batch["duration"]
 
         alternate_speaker_embedding = batch["alternate_speaker_embedding"]
-        
 
-        content_embedding, aug_len = self.compute_augmented_spectrogram(audios, audio_len, mels, spec_len, alternate_speaker_embedding, durs, dataset_id, is_val=True)
+        content_embedding, aug_len = self.compute_augmented_spectrogram(
+            audios, audio_len, mels, spec_len, alternate_speaker_embedding, durs, dataset_id, is_val=True
+        )
 
         enc_out = self.compute_encoding(content_embedding, speaker_embedding, dataset_id)
-        
+
         if self.use_encoder:
             enc_out, _ = self.encoder(input=enc_out, seq_lens=encoded_len)
 
@@ -441,7 +446,7 @@ class FastPitchModel_SSL(ModelPT):
             pitch = None
 
         mels_pred, *_ = self(enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=pitch, pace=1.0)
-        
+
         if only_mel:
             return mels_pred
 

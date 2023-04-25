@@ -23,11 +23,12 @@ import librosa
 import soundfile
 import torch
 
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.tts.models import fastpitch_ssl, hifigan, ssl_tts
 from nemo.collections.tts.torch.helpers import get_base_dir
-import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.models import label_models
+
 
 def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
     wav = wav_featurizer.process(wav_path)
@@ -104,10 +105,8 @@ def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=N
     signal_length_batch = torch.stack([torch.tensor(signal_batch.shape[1]) for _ in range(len(all_segments))])
     signal_batch = signal_batch.to(device)
     signal_length_batch = signal_length_batch.to(device)
-    
-    _, speaker_embeddings = nemo_sv_model(
-        input_signal=signal_batch, input_signal_length=signal_length_batch
-    )
+
+    _, speaker_embeddings = nemo_sv_model(input_signal=signal_batch, input_signal_length=signal_length_batch)
     speaker_embedding = torch.mean(speaker_embeddings, dim=0)
     l2_norm = torch.norm(speaker_embedding, p=2)
     speaker_embedding = speaker_embedding / l2_norm
@@ -115,9 +114,7 @@ def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=N
     return speaker_embedding[None]
 
 
-def get_ssl_features_disentangled(
-    ssl_model, wav_featurizer, audio_path, device="cpu"
-):
+def get_ssl_features_disentangled(ssl_model, wav_featurizer, audio_path, device="cpu"):
     """
     Extracts content embedding, speaker embedding and duration tokens to be used as inputs for FastPitchModel_SSL 
     synthesizer. Content embedding and speaker embedding extracted using SSLDisentangler model.
@@ -135,23 +132,22 @@ def get_ssl_features_disentangled(
     audio_signal = audio_signal.to(device)
     audio_signal_length = audio_signal_length.to(device)
 
-
     processed_signal, processed_signal_length = ssl_model.preprocessor(
         input_signal=audio_signal, length=audio_signal_length,
     )
-    
-    batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+
+    batch_content_embedding, batch_encoded_len = ssl_model.encoder(
+        audio_signal=processed_signal, length=processed_signal_length
+    )
     if ssl_model._cfg.get("normalize_content_encoding", False):
         batch_content_embedding = ssl_model._normalize_encoding(batch_content_embedding)
-        
-    final_content_embedding = batch_content_embedding[0,:,:batch_encoded_len[0]]
+
+    final_content_embedding = batch_content_embedding[0, :, : batch_encoded_len[0]]
     ssl_downsampling_factor = ssl_model._cfg.encoder.subsampling_factor
     duration = torch.ones(final_content_embedding.shape[1]) * ssl_downsampling_factor
     duration = duration.to(device)
 
     return final_content_embedding[None], duration[None]
-    
-
 
 
 def main():
@@ -197,21 +193,21 @@ def main():
             temp_dir = os.path.join(source_audio_basedir, "temp")
             if not os.path.exists(temp_dir):
                 os.makedirs(temp_dir)
-            
-            segment_length = int(16*20480) # around 
+
+            segment_length = int(16 * 20480)  # around
             si = 0
             seg_num = 0
             source_target_out_pairs = []
             combine_outpaths = True
             while si < source_audio_length:
-                segment = source_audio_wav[si:si+segment_length]
+                segment = source_audio_wav[si : si + segment_length]
                 segment_path = os.path.join(temp_dir, "source_{}.wav".format(seg_num))
                 segment_outpath = os.path.join(temp_dir, "out_{}.wav".format(seg_num))
                 soundfile.write(segment_path, segment, 22050)
                 si += segment_length
                 source_target_out_pairs.append((segment_path, args.target_audio_path, segment_outpath))
                 seg_num += 1
-        else:                
+        else:
             source_target_out_pairs = [(args.source_audio_path, args.target_audio_path, args.out_path)]
 
     print(source_target_out_pairs)
@@ -220,10 +216,12 @@ def main():
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
-    ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(args.ssl_model_ckpt_path)
+    ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(
+        args.ssl_model_ckpt_path
+    )
     ssl_model.eval()
     ssl_model.to(device)
-    
+
     nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
     nemo_sv_model = nemo_sv_model.to(device)
     nemo_sv_model.eval()
@@ -252,10 +250,7 @@ def main():
 
         with torch.no_grad():
             content_embedding1, duration1 = get_ssl_features_disentangled(
-                ssl_model,
-                wav_featurizer,
-                source_audio_path,
-                device=device,
+                ssl_model, wav_featurizer, source_audio_path, device=device,
             )
 
             speaker_embedding2 = get_speaker_embedding(
@@ -280,14 +275,13 @@ def main():
             )
             wav_generated = wav_generated[0][0][:source_audio_length]
             soundfile.write(out_path, wav_generated, fpssl_sample_rate)
-    
+
     if combine_outpaths:
         print("Combining segments into one file")
         out_paths = [r[2] for r in source_target_out_pairs]
-        out_wavs = [ wav_featurizer.process(out_path) for out_path in out_paths ]
+        out_wavs = [wav_featurizer.process(out_path) for out_path in out_paths]
         out_wav = torch.cat(out_wavs, dim=0).cpu().numpy()
         soundfile.write(args.out_path, out_wav, fpssl_sample_rate)
-
 
 
 if __name__ == "__main__":

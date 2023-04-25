@@ -23,11 +23,12 @@ import librosa
 import soundfile
 import torch
 
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.tts.models import fastpitch_spec, hifigan, ssl_tts
 from nemo.collections.tts.torch.helpers import get_base_dir
-import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.models import label_models
+
 
 def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
     wav = wav_featurizer.process(wav_path)
@@ -100,16 +101,13 @@ def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=N
     signal_length_batch = torch.stack([torch.tensor(signal_batch.shape[1]) for _ in range(len(all_segments))])
     signal_batch = signal_batch.to(device)
     signal_length_batch = signal_length_batch.to(device)
-    
-    _, speaker_embeddings = nemo_sv_model(
-        input_signal=signal_batch, input_signal_length=signal_length_batch
-    )
+
+    _, speaker_embeddings = nemo_sv_model(input_signal=signal_batch, input_signal_length=signal_length_batch)
     speaker_embedding = torch.mean(speaker_embeddings, dim=0)
     l2_norm = torch.norm(speaker_embedding, p=2)
     speaker_embedding = speaker_embedding / l2_norm
 
     return speaker_embedding[None]
-
 
 
 def main():

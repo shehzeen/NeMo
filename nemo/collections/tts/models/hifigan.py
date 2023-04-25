@@ -13,15 +13,21 @@
 # limitations under the License.
 
 import itertools
+import random
 
 import torch
 import torch.nn.functional as F
+import torchaudio
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
+from PIL import Image
 from pytorch_lightning.loggers.wandb import WandbLogger
 
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import label_models
 from nemo.collections.tts.helpers.helpers import get_batch_size, get_num_workers, plot_spectrogram_to_numpy
 from nemo.collections.tts.losses.hifigan_losses import DiscriminatorLoss, FeatureMatchingLoss, GeneratorLoss
+from nemo.collections.tts.models import fastpitch_ssl
 from nemo.collections.tts.models.base import Vocoder
 from nemo.collections.tts.modules.hifigan_modules import MultiPeriodDiscriminator, MultiScaleDiscriminator
 from nemo.core.classes import Exportable
@@ -30,13 +36,6 @@ from nemo.core.neural_types.elements import AudioSignal, MelSpectrogramType
 from nemo.core.neural_types.neural_type import NeuralType
 from nemo.core.optim.lr_scheduler import CosineAnnealing, compute_max_steps
 from nemo.utils import logging, model_utils
-import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.models import label_models
-from nemo.collections.tts.models import fastpitch_ssl
-import torchaudio
-import random
-from nemo.collections.tts.helpers.helpers import plot_spectrogram_to_numpy
-from PIL import Image
 
 HAVE_WANDB = True
 try:
@@ -83,10 +82,14 @@ class HifiGanModel(Vocoder, Exportable):
             ssl_model_ckpt_path = self._cfg.ssl_model_ckpt_path
             fastpitch_model_ckpt_path = self._cfg.fastpitch_model_ckpt_path
 
-            ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(ssl_model_ckpt_path)
+            ssl_model = nemo_asr.models.ssl_models.SpeechEncDecSelfSupervisedModel.load_from_checkpoint(
+                ssl_model_ckpt_path
+            )
             ssl_model.eval()
 
-            fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_model_ckpt_path, strict=False)
+            fastpitch_model = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(
+                fastpitch_model_ckpt_path, strict=False
+            )
             fastpitch_model.eval()
 
             nemo_sv_model = label_models.EncDecSpeakerLabelModel.from_pretrained("titanet_large")
@@ -98,7 +101,6 @@ class HifiGanModel(Vocoder, Exportable):
                 "nemo_sv_model": nemo_sv_model,
             }
 
-
     def get_synthetic_melspec(self, audio, audio_len):
         for key in self.non_trainable_models:
             self.non_trainable_models[key] = self.non_trainable_models[key].to(audio.device)
@@ -109,16 +111,20 @@ class HifiGanModel(Vocoder, Exportable):
             _, speaker_embeddings = self.non_trainable_models["nemo_sv_model"](
                 input_signal=audio16, input_signal_length=audio16len
             )
-            
-            processed_signal, processed_signal_length = self.non_trainable_models['ssl_model'].preprocessor(
-                input_signal=audio, length=audio_len-1,
-            )
-            batch_content_embedding, batch_encoded_len = self.non_trainable_models['ssl_model'].encoder(audio_signal=processed_signal, length=processed_signal_length)
-            if self.non_trainable_models['ssl_model']._cfg.get("normalize_content_encoding", False):
-                batch_content_embedding = self.non_trainable_models['ssl_model']._normalize_encoding(batch_content_embedding)
 
-            final_content_embedding = batch_content_embedding[:,:,:batch_encoded_len[0]]
-            duration = torch.ones( [final_content_embedding.shape[0],final_content_embedding.shape[2]] ) * 4
+            processed_signal, processed_signal_length = self.non_trainable_models['ssl_model'].preprocessor(
+                input_signal=audio, length=audio_len - 1,
+            )
+            batch_content_embedding, batch_encoded_len = self.non_trainable_models['ssl_model'].encoder(
+                audio_signal=processed_signal, length=processed_signal_length
+            )
+            if self.non_trainable_models['ssl_model']._cfg.get("normalize_content_encoding", False):
+                batch_content_embedding = self.non_trainable_models['ssl_model']._normalize_encoding(
+                    batch_content_embedding
+                )
+
+            final_content_embedding = batch_content_embedding[:, :, : batch_encoded_len[0]]
+            duration = torch.ones([final_content_embedding.shape[0], final_content_embedding.shape[2]]) * 4
             duration = duration.to(audio.device)
             synthetic_spec = self.non_trainable_models['fastpitch_model'].generate_wav(
                 final_content_embedding,
@@ -133,7 +139,6 @@ class HifiGanModel(Vocoder, Exportable):
 
             synthetic_spec = synthetic_spec.detach()
             return synthetic_spec
-
 
     def _get_max_steps(self):
         return compute_max_steps(
@@ -227,14 +232,13 @@ class HifiGanModel(Vocoder, Exportable):
                 audio_mel_synthetic = self.get_synthetic_melspec(audio, audio_len)
                 # save audio_mel_synthetic as a png image
                 assert audio_mel_synthetic.shape == audio_mel.shape
-                
+
                 if random.random() < 0.5:
                     # randomly choose between real and synthetic mel spec as input
                     print("Choosing synthetic mel spec as input")
                     audio_mel = audio_mel_synthetic
                 else:
                     print("Choosing real mel spec as input")
-                
 
         # Mel as input for L1 mel loss
         audio_trg_mel, _ = self.trg_melspec_fn(audio, audio_len)

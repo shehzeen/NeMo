@@ -1,21 +1,21 @@
-import os
 import asyncio
 import base64
 import json
-import websockets
-import pyaudio
-import numpy as np
-import librosa
-from pygame._sdl2 import get_num_audio_devices, get_audio_device_name #Get playback device names
-from pygame import mixer #Playin
-import soundfile as sf
-import time
+import os
 import shutil
+import time
+
 import librosa
+import numpy as np
+import pyaudio
+import soundfile as sf
+import websockets
+from pygame import mixer  # Playin
+from pygame._sdl2 import get_audio_device_name, get_num_audio_devices  # Get playback device names
 
 SEGSIZE_SECS = 3
 
-FRAMES_PER_BUFFER = int(2048*SEGSIZE_SECS)
+FRAMES_PER_BUFFER = int(2048 * SEGSIZE_SECS)
 FORMAT = pyaudio.paFloat32
 CHANNELS = 1
 RATE = 22050
@@ -25,13 +25,7 @@ p = pyaudio.PyAudio()
 
 # mixer.init(devicename='VB-Cable')
 
-stream = p.open(
-    format=FORMAT,
-    channels=CHANNELS,
-    rate=RATE,
-    input=True,
-    frames_per_buffer=FRAMES_PER_BUFFER,
-)
+stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=FRAMES_PER_BUFFER,)
 
 # check size of stream
 
@@ -54,7 +48,7 @@ for i in range(10000000):
 
     wav = np.fromstring(data, dtype=np.float32)
     wav_total = np.concatenate((wav_total, wav))
-    if len(wav_total) == FRAMES_PER_BUFFER*10:
+    if len(wav_total) == FRAMES_PER_BUFFER * 10:
         wav_path = "{}/{}.wav".format(session_dir, wav_ctr)
         sf.write(wav_path, wav_total, RATE)
         wav_ctr += 1
@@ -62,13 +56,11 @@ for i in range(10000000):
     # wav_pitch_shifted = librosa.effects.pitch_shift(wav, RATE, n_steps=2)
     # sav wav_pitch_shifted
     # librosa.output.write_wav('test.wav', wav_pitch_shifted, RATE)
-    
+
     # mixer.music.load('test.wav')
     # mixer.music.play()
     # pitch shift audio
 
-
     # flush stream
     # convert into numpy array
     # data = np.fromstring(data, dtype=np.int16)
-    

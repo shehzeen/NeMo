@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 
+from nemo.collections.asr.parts.preprocessing import features as asr_features
 from nemo.collections.tts.helpers.helpers import plot_multipitch_to_numpy, plot_spectrogram_to_numpy
 from nemo.collections.tts.losses.fastpitchloss import DurationLoss, MelLoss, PitchLoss
 from nemo.collections.tts.modules.fastpitch import FastPitchSSLModule, average_features
@@ -28,7 +29,7 @@ from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging, model_utils
 from nemo.utils.decorators import experimental
-from nemo.collections.asr.parts.preprocessing import features as asr_features
+
 
 @experimental
 class FastPitchModel_SSL(ModelPT):
@@ -64,7 +65,7 @@ class FastPitchModel_SSL(ModelPT):
         self.mel_loss = MelLoss()
         self.pitch_loss = PitchLoss(loss_scale=pitch_loss_scale)
         self.duration_loss = DurationLoss(loss_scale=dur_loss_scale)
-        
+
         input_fft = None
         self.use_encoder = use_encoder = cfg.get("use_encoder", False)
         if use_encoder:
@@ -183,25 +184,25 @@ class FastPitchModel_SSL(ModelPT):
             enc_out = self.compute_encoding(orig_content_embedding, alternate_speaker_embedding, dataset_id)
             if self.use_encoder:
                 enc_out, _ = self.encoder(input=enc_out, seq_lens=encoded_len)
-            
+
             enc_mask = mask_from_lens(encoded_len)
             enc_mask = enc_mask[:, :, None]
 
-            mels_pred, _, _, _, _, _ = self(
-                enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=None, pace=1.0,
-            )
-            
+            mels_pred, _, _, _, _, _ = self(enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=None, pace=1.0,)
+
             mels_for_embedding = mels_pred
             if self.non_trainable_models['ssl_model']._cfg.preprocessor.get("mag_power", 2) == 2:
                 # old models.
                 print("self converted using old method")
-                audio_pred = self.non_trainable_models['vocoder'].generator(x=mels_pred)[:,0,:]
+                audio_pred = self.non_trainable_models['vocoder'].generator(x=mels_pred)[:, 0, :]
                 audio_mask = mask_from_lens(audio_len)
                 audio_pred = audio_pred * audio_mask
-                mels_pred_for_ssl, mel_lens_ssl = self.non_trainable_models['ssl_model'].preprocessor(input_signal=audio_pred, length=audio_len-1)
-                mels_pred_for_ssl = mels_pred_for_ssl[:,:,:mels_pred.shape[2]]
+                mels_pred_for_ssl, mel_lens_ssl = self.non_trainable_models['ssl_model'].preprocessor(
+                    input_signal=audio_pred, length=audio_len - 1
+                )
+                mels_pred_for_ssl = mels_pred_for_ssl[:, :, : mels_pred.shape[2]]
                 mel_mask = mask_from_lens(mel_lens_ssl)
-                mels_pred_for_ssl = mels_pred_for_ssl * mel_mask[:,None,:]
+                mels_pred_for_ssl = mels_pred_for_ssl * mel_mask[:, None, :]
                 mels_for_embedding = mels_pred_for_ssl
 
                 if self.global_step % 128 == 0:
@@ -209,15 +210,17 @@ class FastPitchModel_SSL(ModelPT):
                     self.tb_logger.add_audio("Aug Audio Orig", batch['audio'][0], self.global_step, 22050)
             elif self.non_trainable_models['ssl_model']._cfg.preprocessor.get("mag_power", 2) == 1:
                 print("new model normalizing mel specs")
-                mels_for_embedding, _, _ = asr_features.normalize_batch(
-                    mels_for_embedding, mel_len, "per_feature"
-                )
+                mels_for_embedding, _, _ = asr_features.normalize_batch(mels_for_embedding, mel_len, "per_feature")
 
-            new_content_embedding, new_encoded_len = self.non_trainable_models['ssl_model'].encoder(audio_signal=mels_for_embedding, length=mel_len)
+            new_content_embedding, new_encoded_len = self.non_trainable_models['ssl_model'].encoder(
+                audio_signal=mels_for_embedding, length=mel_len
+            )
             if self.non_trainable_models['ssl_model']._cfg.get("normalize_content_encoding", False):
                 print("Normalizing content encoding")
-                new_content_embedding = self.non_trainable_models['ssl_model']._normalize_encoding(new_content_embedding)
-                
+                new_content_embedding = self.non_trainable_models['ssl_model']._normalize_encoding(
+                    new_content_embedding
+                )
+
             new_content_embedding = new_content_embedding.detach()
 
         self.train(old_mode)
@@ -292,7 +295,7 @@ class FastPitchModel_SSL(ModelPT):
             content_embedding = self.get_content_embedding_self_converted(batch)
         else:
             content_embedding = batch["content_embedding"]
-        
+
         encoded_len = batch["encoded_len"]
         speaker_embedding = batch["speaker_embedding"]
         mels = batch["mel_spectrogram"]
@@ -443,7 +446,7 @@ class FastPitchModel_SSL(ModelPT):
             pitch = None
 
         mels_pred, *_ = self(enc_out=enc_out, enc_mask=enc_mask, durs=durs, pitch=pitch, pace=1.0)
-        
+
         if only_mel:
             return mels_pred
 

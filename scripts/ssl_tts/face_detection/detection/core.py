@@ -1,9 +1,10 @@
-import logging
 import glob
-from tqdm import tqdm
+import logging
+
+import cv2
 import numpy as np
 import torch
-import cv2
+from tqdm import tqdm
 
 
 class FaceDetector(object):

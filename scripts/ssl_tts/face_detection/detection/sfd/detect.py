@@ -1,19 +1,19 @@
+import argparse
+import datetime
+import math
+import os
+import random
+import sys
+import zipfile
+
+import cv2
+import numpy as np
+import scipy.io as sio
 import torch
 import torch.nn.functional as F
 
-import os
-import sys
-import cv2
-import random
-import datetime
-import math
-import argparse
-import numpy as np
-
-import scipy.io as sio
-import zipfile
-from .net_s3fd import s3fd
 from .bbox import *
+from .net_s3fd import s3fd
 
 
 def detect(net, img, device):
@@ -36,7 +36,7 @@ def detect(net, img, device):
     for i in range(len(olist) // 2):
         ocls, oreg = olist[i * 2], olist[i * 2 + 1]
         FB, FC, FH, FW = ocls.size()  # feature map size
-        stride = 2**(i + 2)    # 4,8,16,32,64,128
+        stride = 2 ** (i + 2)  # 4,8,16,32,64,128
         anchor = stride * 4
         poss = zip(*np.where(ocls[:, 1, :, :] > 0.05))
         for Iindex, hindex, windex in poss:
@@ -54,6 +54,7 @@ def detect(net, img, device):
         bboxlist = np.zeros((1, 5))
 
     return bboxlist
+
 
 def batch_detect(net, imgs, device):
     imgs = imgs - np.array([104, 117, 123])
@@ -74,7 +75,7 @@ def batch_detect(net, imgs, device):
     for i in range(len(olist) // 2):
         ocls, oreg = olist[i * 2], olist[i * 2 + 1]
         FB, FC, FH, FW = ocls.size()  # feature map size
-        stride = 2**(i + 2)    # 4,8,16,32,64,128
+        stride = 2 ** (i + 2)  # 4,8,16,32,64,128
         anchor = stride * 4
         poss = zip(*np.where(ocls[:, 1, :, :] > 0.05))
         for Iindex, hindex, windex in poss:
@@ -92,6 +93,7 @@ def batch_detect(net, imgs, device):
         bboxlist = np.zeros((1, BB, 5))
 
     return bboxlist
+
 
 def flip_detect(net, img, device):
     img = cv2.flip(img, 1)

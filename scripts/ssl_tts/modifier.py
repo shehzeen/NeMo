@@ -1,15 +1,16 @@
+import base64
+import json
 import os
-import soundfile as sf
-import librosa
-from pygame._sdl2 import get_num_audio_devices, get_audio_device_name #Get playback device names
-from pygame import mixer #Playin
 import shutil
 import time
-import base64
-import requests
-import json
+
+import librosa
 import numpy as np
 import pyaudio
+import requests
+import soundfile as sf
+from pygame import mixer  # Playin
+from pygame._sdl2 import get_audio_device_name, get_num_audio_devices  # Get playback device names
 
 current_file_number = 0
 session_dir = 'session/'
@@ -32,7 +33,7 @@ if len(wav_numbers) == 0:
     last_wavnum = 0
 else:
     last_wavnum = wav_numbers[-1]
-    
+
 current_file_number = last_wavnum
 print("last_wavname", last_wavnum)
 
@@ -45,30 +46,31 @@ for i in range(1000000):
         time.sleep(0.1)
         continue
     wav, sr = sf.read(input_wav_path, dtype='float32')
-    
-    if len(wav) != int(2048*SEGSIZE_SECS*10):
+
+    if len(wav) != int(2048 * SEGSIZE_SECS * 10):
         continue
 
     assert sr == 22050
     print(wav.dtype)
     wav_base64 = base64.b64encode(wav)
-    
+
     with open('speaker.txt') as f:
         speaker_name = f.read().strip()
 
-    response = requests.post("http://localhost:5000/convert_voice", data={"audio": wav_base64, "speaker" : speaker_name})
+    response = requests.post(
+        "http://localhost:5000/convert_voice", data={"audio": wav_base64, "speaker": speaker_name}
+    )
     response_data = json.loads(response.text)
     response_wav = base64.b64decode(response_data['audio_converted'])
     response_wav = np.frombuffer(response_wav, dtype=np.float32)
 
-
     shifted_path = "{}/shifted{}.wav".format(outdir, last_wavnum)
     sf.write(shifted_path, response_wav, 22050)
-    
+
     print("before play", time.time() - st)
     print("Writing audio", shifted_path, response_wav.dtype)
     # stream.write(response_wav.tostring())
-        
+
     wait_ctr = 0
     while mixer.music.get_busy():
         # current_audio_pos = mixer.music.get_pos()
@@ -79,7 +81,7 @@ for i in range(1000000):
         time.sleep(0.0001)
         wait_ctr += 1
         continue
-    
+
     if i == 0:
         print("Playing", shifted_path)
         mixer.music.load(shifted_path)
@@ -90,7 +92,6 @@ for i in range(1000000):
         mixer.music.unload()
         mixer.music.load(shifted_path)
         mixer.music.play()
-    
 
     # mixer.music.load(shifted_path)
     # mixer.music.play()
@@ -127,6 +128,6 @@ for i in range(1000000):
 #                 channels=1,
 #                 rate=22050,
 #                 output_device_index=device_index,
-#                 output=True, 
+#                 output=True,
 #                 stream_callback=dummy_callback
 #                 )

@@ -1,21 +1,22 @@
-from flask import Flask
-from flask_cors import CORS
-from nemo.collections.tts.models import fastpitch_ssl, hifigan
-import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.models import label_models
-import torch
-from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
-from flask import request
 import base64
+import io
+import json
+import os
+import random
+import time
+
+import librosa
 import numpy as np
 import soundfile as sf
-import librosa
-import json
-import time
-import os
-import io
+import torch
+from flask import Flask, request
+from flask_cors import CORS
 from flask_ngrok import run_with_ngrok
-import random
+
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import label_models
+from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
+from nemo.collections.tts.models import fastpitch_ssl, hifigan
 
 temp_dir = "/data/shehzeen/TextlessVCDemoTempDir"
 os.makedirs(temp_dir, exist_ok=True)
@@ -25,81 +26,81 @@ data_dir_path = "/data/shehzeen/SSLTTS/CelebrityData"
 ssl_model_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_8915.ckpt"
 
 avatar_paths = {
-    'default' : "/home/shehzeen/first-order-model/obama.jpg",
-    'obama' : "/home/shehzeen/first-order-model/obama.jpg",
-    'ahmadCorrect' : "/home/shehzeen/ahmad.png",
-    'sundar' : "/home/shehzeen/sundar.png",
-    'modi' : "/home/shehzeen/modi.png",
-    'emma' : "/home/shehzeen/emma.png",
-    'priyanka' : "/home/shehzeen/priyanka.png",
-    'ravish' : "/data/shehzeen/portraits/ravish.png",
-    'aubrey' : "/data/shehzeen/portraits/aubrey.png",
-    'lex' : "/data/shehzeen/portraits/lex.png",
-    'oprah' : "/data/shehzeen/portraits/oprah.png",
-    'miley' : "/data/shehzeen/portraits/miley.png",
+    'default': "/home/shehzeen/first-order-model/obama.jpg",
+    'obama': "/home/shehzeen/first-order-model/obama.jpg",
+    'ahmadCorrect': "/home/shehzeen/ahmad.png",
+    'sundar': "/home/shehzeen/sundar.png",
+    'modi': "/home/shehzeen/modi.png",
+    'emma': "/home/shehzeen/emma.png",
+    'priyanka': "/home/shehzeen/priyanka.png",
+    'ravish': "/data/shehzeen/portraits/ravish.png",
+    'aubrey': "/data/shehzeen/portraits/aubrey.png",
+    'lex': "/data/shehzeen/portraits/lex.png",
+    'oprah': "/data/shehzeen/portraits/oprah.png",
+    'miley': "/data/shehzeen/portraits/miley.png",
 }
 
 target_audio_paths = {
-    'obama' : [
+    'obama': [
         "{}/YoutubeChunkedAudio/obama_2_335.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/obama_1_335.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/obama_1_336.wav".format(data_dir_path),
-        "{}/YoutubeChunkedAudio/obama_1_337.wav".format(data_dir_path)
+        "{}/YoutubeChunkedAudio/obama_1_337.wav".format(data_dir_path),
     ],
-    'modi' : [
+    'modi': [
         "{}/YoutubeChunkedAudio/modi_1_334.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/modi_1_335.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/modi_1_336.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/modi_1_337.wav".format(data_dir_path),
     ],
-    'ravish' : [
+    'ravish': [
         "{}/YoutubeChunkedAudio/ravish_2_141.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/ravish_2_142.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/ravish_2_143.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/ravish_2_144.wav".format(data_dir_path),
     ],
-    'lex' : [
+    'lex': [
         "{}/YoutubeChunkedAudio/lex_1_290.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/lex_1_291.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/lex_1_292.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/lex_1_293.wav".format(data_dir_path),
     ],
-    'oprah' : [
+    'oprah': [
         "{}/YoutubeChunkedAudio/oprah_2_151.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/oprah_2_152.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/oprah_2_153.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/oprah_2_154.wav".format(data_dir_path),
     ],
-    'emma' : [
+    'emma': [
         "{}/YoutubeChunkedAudio/emma_1_2.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/emma_1_5.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/emma_1_8.wav".format(data_dir_path),
     ],
-    'priyanka' : [
+    'priyanka': [
         "{}/YoutubeChunkedAudio/priyanka_1_2.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/priyanka_1_8.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/priyanka_1_11.wav".format(data_dir_path),
     ],
-    'miley' : [
+    'miley': [
         "{}/YoutubeChunkedAudio/miley_1_2.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/miley_1_5.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/miley_1_11.wav".format(data_dir_path),
     ],
-    'aubrey' : [
+    'aubrey': [
         "{}/YoutubeChunkedAudio/aubrey_1_5.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/aubrey_1_8.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/aubrey_1_11.wav".format(data_dir_path),
     ],
-    'sundar' : [
+    'sundar': [
         "{}/YoutubeChunkedAudio/sundar_1_5.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/sundar_1_8.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/sundar_1_11.wav".format(data_dir_path),
     ],
-    'ahmadCorrect' : [
+    'ahmadCorrect': [
         "{}/YoutubeChunkedAudio/ahmadCorrect_1_5.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/ahmadCorrect_1_8.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/ahmadCorrect_1_11.wav".format(data_dir_path),
-    ]
+    ],
 }
 
 
@@ -138,7 +139,9 @@ fastpitch_model.non_trainable_models = {'vocoder': vocoder}
 fpssl_sample_rate = fastpitch_model._cfg.sample_rate
 
 print("Loading FP Model")
-fastpitch_model_finetuned = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(fastpitch_ckpt_path_finetuned, strict=False)
+fastpitch_model_finetuned = fastpitch_ssl.FastPitchModel_SSL.load_from_checkpoint(
+    fastpitch_ckpt_path_finetuned, strict=False
+)
 fastpitch_model_finetuned = fastpitch_model_finetuned.to(device)
 fastpitch_model_finetuned.eval()
 fastpitch_model_finetuned.non_trainable_models = {'vocoder': vocoder_finetuned}
@@ -177,6 +180,7 @@ def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
 
     return wav
 
+
 def segment_wav(wav, segment_length=32000, hop_size=16000, min_segment_size=16000):
     if len(wav) < segment_length:
         pad = torch.zeros(segment_length - len(wav))
@@ -194,6 +198,7 @@ def segment_wav(wav, segment_length=32000, hop_size=16000, min_segment_size=1600
             segments.append(segment)
             si += hop_size
         return segments
+
 
 def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=None, device="cpu"):
     all_segments = []
@@ -213,10 +218,8 @@ def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=N
     signal_length_batch = torch.stack([torch.tensor(signal_batch.shape[1]) for _ in range(len(all_segments))])
     signal_batch = signal_batch.to(device)
     signal_length_batch = signal_length_batch.to(device)
-    
-    _, speaker_embeddings = nemo_sv_model(
-        input_signal=signal_batch, input_signal_length=signal_length_batch
-    )
+
+    _, speaker_embeddings = nemo_sv_model(input_signal=signal_batch, input_signal_length=signal_length_batch)
     speaker_embedding = torch.mean(speaker_embeddings, dim=0)
     l2_norm = torch.norm(speaker_embedding, p=2)
     speaker_embedding = speaker_embedding / l2_norm
@@ -237,6 +240,7 @@ app = Flask(__name__)
 
 run_with_ngrok(app)  # Start ngrok when app is run
 CORS(app)
+
 
 @app.route('/test_connection')
 def test_connection():
@@ -261,22 +265,24 @@ def get_avatar():
         avatar_fp = avatar_paths[speaker]
     else:
         avatar_fp = avatar_paths["default"]
-    
+
     command_string = '''pocketsphinx -phone_align yes single WAVFILE $text | jq '[.w[]|{word: (.t | ascii_upcase | sub("<S>"; "sil") | sub("<SIL>"; "sil") | sub("\\\(2\\\)"; "") | sub("\\\(3\\\)"; "") | sub("\\\(4\\\)"; "") | sub("\\\[SPEECH\\\]"; "SIL") | sub("\\\[NOISE\\\]"; "SIL")), phones: [.w[]|{ph: .t | sub("\\\+SPN\\\+"; "SIL") | sub("\\\+NSN\\\+"; "SIL"), bg: (.b*100)|floor, ed: (.b*100+.d*100)|floor}]}]' > JSONFILE'''
     command_string = command_string.replace("WAVFILE", temp_wav_fp)
     command_string = command_string.replace("JSONFILE", temp_json_fp)
     # print("Command", command_string)
     os.system(command_string)
-    os.system("cd /home/shehzeen/one-shot-talking-face-colab/content/one-shot-talking-face; CUDA_VISIBLE_DEVICES=2 python test_script.py --img_path {} --audio_path {} --phoneme_path {} --save_dir {}".format(avatar_fp, temp_wav_fp, temp_json_fp, temp_dir) )
+    os.system(
+        "cd /home/shehzeen/one-shot-talking-face-colab/content/one-shot-talking-face; CUDA_VISIBLE_DEVICES=2 python test_script.py --img_path {} --audio_path {} --phoneme_path {} --save_dir {}".format(
+            avatar_fp, temp_wav_fp, temp_json_fp, temp_dir
+        )
+    )
 
     output_video_name = os.path.basename(avatar_fp)[:-4] + "_" + os.path.basename(temp_wav_fp)[:-4] + ".mp4"
     print(os.path.join(temp_dir, output_video_name))
 
     video_base64 = base64.b64encode(open(os.path.join(temp_dir, output_video_name), "rb").read()).decode('utf-8')
-    
-    return json.dumps({'video_base64': video_base64})
 
-    
+    return json.dumps({'video_base64': video_base64})
 
 
 @app.route('/convert_recordings', methods=['POST'])
@@ -291,7 +297,7 @@ def convert_recordings():
                 audio_data = request.files['audio_data_{}'.format(wav_no)]
             else:
                 audio_data = request.files['custom_source_audio_{}'.format(wav_no)]
-            
+
             source_wav = load_wav(audio_data, wav_featurizer_fp)
             audio_np = source_wav.cpu().numpy()
 
@@ -306,7 +312,7 @@ def convert_recordings():
                 target_speaker_embedding = speaker_embeddings[speaker]
                 _fastpitch_model = fastpitch_model_finetuned
 
-            segment_length = int(16*20480)
+            segment_length = int(16 * 20480)
             seg_num = 0
             num_segments = int(np.ceil(len(audio_np) / segment_length))
             generated_wavs = []
@@ -320,8 +326,10 @@ def convert_recordings():
                     input_signal=audio_signal, length=audio_signal_length,
                 )
 
-                batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
-                final_content_embedding = batch_content_embedding[0,:,:batch_encoded_len[0]]
+                batch_content_embedding, batch_encoded_len = ssl_model.encoder(
+                    audio_signal=processed_signal, length=processed_signal_length
+                )
+                final_content_embedding = batch_content_embedding[0, :, : batch_encoded_len[0]]
                 ssl_downsampling_factor = ssl_model._cfg.encoder.subsampling_factor
                 duration = torch.ones(final_content_embedding.shape[1]) * ssl_downsampling_factor
                 duration = duration.to(device)
@@ -340,20 +348,16 @@ def convert_recordings():
 
                 wav_generated = wav_generated[0][0]
                 generated_wavs.append(wav_generated)
-            
+
             wav_generated = np.concatenate(generated_wavs)
             temp_buffer = io.BytesIO()
             sf.write(temp_buffer, wav_generated, 22050, format='WAV')
             audio_base64_converted = base64.b64encode(temp_buffer.getvalue())
-            results.append({
-                'audio_converted': audio_base64_converted.decode('ascii'),
-            })
-    
-    return json.dumps({
-        'total_wavs': total_wavs,
-        'results': results,
-    })
+            results.append(
+                {'audio_converted': audio_base64_converted.decode('ascii'),}
+            )
 
+    return json.dumps({'total_wavs': total_wavs, 'results': results,})
 
 
 @app.route('/convert_voice', methods=['POST'])
@@ -364,7 +368,7 @@ def convert_voice():
     # run vc model
 
     audio_base64 = request.values.get('audio')
-    
+
     speaker = request.values.get('speaker')
     if speaker not in speaker_embeddings:
         print("speaker not found, using default speaker")
@@ -373,7 +377,6 @@ def convert_voice():
 
     audio_base64 = base64.b64decode(audio_base64)
     audio_np = np.frombuffer(audio_base64, dtype=np.float32)
-    
 
     audio_np_16000 = librosa.resample(audio_np, 22050, 16000)
 
@@ -382,10 +385,8 @@ def convert_voice():
     print("speech timestamps ", speech_timestamps)
     if len(speech_timestamps) == 0:
         silence = audio_np * 0
-        return json.dumps({
-            'audio_converted': base64.b64encode(silence).decode('utf-8'),
-        })
-    
+        return json.dumps({'audio_converted': base64.b64encode(silence).decode('utf-8'),})
+
     st = time.time()
     with torch.no_grad():
         audio_np = audio_np[:-1]
@@ -396,8 +397,10 @@ def convert_voice():
         processed_signal, processed_signal_length = ssl_model.preprocessor(
             input_signal=audio_signal, length=audio_signal_length,
         )
-        batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
-        final_content_embedding = batch_content_embedding[0,:,:batch_encoded_len[0]]
+        batch_content_embedding, batch_encoded_len = ssl_model.encoder(
+            audio_signal=processed_signal, length=processed_signal_length
+        )
+        final_content_embedding = batch_content_embedding[0, :, : batch_encoded_len[0]]
         ssl_downsampling_factor = ssl_model._cfg.encoder.subsampling_factor
         duration = torch.ones(final_content_embedding.shape[1]) * ssl_downsampling_factor
         duration = duration.to(device)
@@ -421,10 +424,8 @@ def convert_voice():
     audio_time = time.time() - st
     print("audio time ", audio_time)
 
-    return json.dumps({
-        'audio_converted': base64.b64encode(wav_generated).decode('utf-8'),
-    })
-    
+    return json.dumps({'audio_converted': base64.b64encode(wav_generated).decode('utf-8'),})
+
 
 if __name__ == '__main__':
     # app.run(host='0.0.0.0', port=8000, ssl_context=('/home/bossbwtw/server.crt', '/home/bossbwtw/server.key'))

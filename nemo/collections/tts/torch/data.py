@@ -1237,10 +1237,9 @@ class FastPitchSSLDataset(Dataset):
                 speaker_stats_raw = json.load(f)
                 for key in speaker_stats_raw:
                     self.speaker_stats[int(key)] = speaker_stats_raw[key]
-        
+
         self.alternate_speaker_conditioning = alternate_speaker_conditioning
         self.compute_mean_speaker_embeddings()
-        
 
     def _get_wav_from_filepath(self, audio_filepath):
         features = AudioSegment.segment_from_file(
@@ -1276,7 +1275,7 @@ class FastPitchSSLDataset(Dataset):
             raise ValueError(
                 f"Content embedding file {content_emb_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
             )
-        
+
         aug_embeddings = {}
         if len(self.content_aug_types) > 0:
             for aug_type in self.content_aug_types:
@@ -1288,7 +1287,6 @@ class FastPitchSSLDataset(Dataset):
                     raise ValueError(
                         f"Augmented content embedding file {aug_emb_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
                     )
-                    
 
         if os.path.exists(speaker_emb_fp):
             speaker_embedding = torch.load(speaker_emb_fp)
@@ -1401,7 +1399,7 @@ class FastPitchSSLDataset(Dataset):
         for encoded in final_batch["content_embedding"]:
             encoded_padded = torch.nn.functional.pad(encoded, (0, max_encoded_len - encoded.size(1)), value=0)
             content_embeddings_padded.append(encoded_padded)
-        
+
         durations_padded = []
         for duration in final_batch["duration"]:
             duration_padded = torch.nn.functional.pad(duration, (0, max_encoded_len - duration.size(0)), value=0.0)
@@ -1439,7 +1437,9 @@ class FastPitchSSLDataset(Dataset):
         if self.pitch_conditioning:
             pitch_contour = self.get_pitch_contour(rel_audio_path_as_text_id)
 
-        content_embedding, speaker_embedding, encoded_len, duration, aug_embeddings = self.get_ssl_features(rel_audio_path_as_text_id)
+        content_embedding, speaker_embedding, encoded_len, duration, aug_embeddings = self.get_ssl_features(
+            rel_audio_path_as_text_id
+        )
 
         if self.speaker_conditioning_type == "mean":
             assert sample["speaker"] in self.mean_speaker_embeddings, "{} not in speaker emb".format(sample['speaker'])
@@ -1463,7 +1463,7 @@ class FastPitchSSLDataset(Dataset):
         if not self.load_content_embedding:
             duration = torch.ones(mel_spectrogram.shape[1])
             encoded_len = mel_len
-        
+
         alternate_speakers = [spk for spk in self.mean_speaker_embeddings if spk != sample["speaker"]]
         if len(alternate_speakers) == 0:
             alternate_speaker = sample["speaker"]
@@ -1472,7 +1472,7 @@ class FastPitchSSLDataset(Dataset):
                 alternate_speaker = random.choice(alternate_speakers)
             elif self.alternate_speaker_conditioning == "fixed":
                 alternate_speaker = min(alternate_speakers)
-        
+
         alternate_speaker_embedding = self.mean_speaker_embeddings[alternate_speaker]
 
         if pitch_contour is not None:

@@ -16,6 +16,7 @@
 import argparse
 import json
 import os
+import random
 import time
 from multiprocessing import Pool
 from pathlib import Path
@@ -24,18 +25,18 @@ import hydra.utils
 import librosa
 import numpy as np
 import torch
+import torchaudio
 from omegaconf import open_dict
 from tqdm import tqdm
 
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
 from nemo.collections.tts.models import ssl_tts
 from nemo.collections.tts.torch.helpers import get_base_dir
 from nemo.core.classes import Dataset
 from nemo.utils import logging
-import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.models import label_models
-import torchaudio
-import random
+
 
 class AudioDataset(Dataset):
     def __init__(
@@ -348,14 +349,18 @@ def main():
     nemo_sv_model.eval()
 
     nsteps_positive = [2, 2.2, 2.5, 2.8, 3, 3.2, 3.5, 3.7, 4]
-    nsteps_negative = [-2, -2.2, -2.5, -2.8,  -3, -3.2, -3.5, -3.7 -4]
+    nsteps_negative = [-2, -2.2, -2.5, -2.8, -3, -3.2, -3.5, -3.7 - 4]
     pitch_transforms_positive = []
     pitch_transforms_negative = []
     for _n_steps in nsteps_positive:
-        pitch_transforms_positive.append(torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=args.sample_rate).to(device))
-    
+        pitch_transforms_positive.append(
+            torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=args.sample_rate).to(device)
+        )
+
     for _n_steps in nsteps_negative:
-        pitch_transforms_negative.append(torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=args.sample_rate).to(device))
+        pitch_transforms_negative.append(
+            torchaudio.transforms.PitchShift(n_steps=_n_steps, sample_rate=args.sample_rate).to(device)
+        )
 
     sample_rate = args.sample_rate
     stft_params = {
@@ -394,11 +399,13 @@ def main():
     for batch in tqdm(dataloader):
         bidx += 1
         with torch.no_grad():
-            
+
             processed_signal, processed_signal_length = ssl_model.preprocessor(
                 input_signal=batch['audio'].to(device), length=batch['audio_len'].to(device),
             )
-            batch_content_embedding, batch_encoded_len = ssl_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+            batch_content_embedding, batch_encoded_len = ssl_model.encoder(
+                audio_signal=processed_signal, length=processed_signal_length
+            )
             if ssl_model._cfg.get('normalize_content_encoding', False):
                 print("normalizing embeddings")
                 batch_content_embedding = ssl_model._normalize_encoding(batch_content_embedding)
@@ -418,10 +425,14 @@ def main():
                     _processed_signal, _processed_signal_length = ssl_model.preprocessor(
                         input_signal=audio_transformed, length=batch['audio_len'].to(device),
                     )
-                    transformed_batch_embeddings[transform_type], _ = ssl_model.encoder(audio_signal=_processed_signal, length=_processed_signal_length)
+                    transformed_batch_embeddings[transform_type], _ = ssl_model.encoder(
+                        audio_signal=_processed_signal, length=_processed_signal_length
+                    )
                     if ssl_model._cfg.get('normalize_content_encoding', False):
                         print("normalizing embeddings")
-                        transformed_batch_embeddings[transform_type] = ssl_model._normalize_encoding(transformed_batch_embeddings[transform_type])
+                        transformed_batch_embeddings[transform_type] = ssl_model._normalize_encoding(
+                            transformed_batch_embeddings[transform_type]
+                        )
 
             batch_mel_specs = get_mel_spectrogram(fb, batch['audio'][:, :-1].to(device), stft_params)
             audio_sv_segmented, segment_indices = segment_batch(
@@ -441,8 +452,8 @@ def main():
                 wav_and_id_list.append((wav_path, wav_id, _speaker))
                 content_embedding = batch_content_embedding[idx].detach()
                 encoded_len = batch_encoded_len[idx].detach()
-                content_embedding = content_embedding[:, :encoded_len.item()]
-                
+                content_embedding = content_embedding[:, : encoded_len.item()]
+
                 duration = torch.ones(content_embedding.shape[1]) * args.ssl_downsampling_factor
 
                 bsi_start = segment_indices[idx][0]
@@ -475,11 +486,12 @@ def main():
                 if augment_embeddings:
                     for transform_type in transforms:
                         _emb = transformed_batch_embeddings[transform_type][idx].detach()
-                        _emb = _emb[:, :encoded_len.item()]
-                        content_emb_fn = f"{args.ssl_content_emb_type}_{transform_type}_content_embedding_{wav_text_id}.pt"
+                        _emb = _emb[:, : encoded_len.item()]
+                        content_emb_fn = (
+                            f"{args.ssl_content_emb_type}_{transform_type}_content_embedding_{wav_text_id}.pt"
+                        )
                         content_emb_fp = os.path.join(dataset.sup_data_dir, content_emb_fn)
                         torch.save(_emb.cpu(), content_emb_fp)
-                    
 
             et = time.time()
             logging.info(

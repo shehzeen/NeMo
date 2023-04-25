@@ -5,6 +5,7 @@ import os
 import pickle
 import random
 
+import editdistance
 import librosa
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -20,11 +21,11 @@ from sklearn.manifold import TSNE
 from sklearn.metrics import auc, roc_curve
 from tqdm import tqdm
 
+import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.tts.models import fastpitch_ssl, hifigan, ssl_tts
-import nemo.collections.asr as nemo_asr
-import editdistance
+
 
 def get_similarity(emb1, emb2):
     similarity = dot(emb1, emb2) / (norm(emb1) * norm(emb2))
@@ -51,15 +52,15 @@ def calculate_cer(transcriptions):
         print("gen", t1)
         print("real", t2)
         if len(t1) > 0 and len(t2) > 0:
-            cer = (1.0*editdistance.eval(t1, t2)) / max(len(t1), len(t2))
+            cer = (1.0 * editdistance.eval(t1, t2)) / max(len(t1), len(t2))
         else:
             cer = 1.0
-        ctr += 1 
+        ctr += 1
         mean_cer += cer
     mean_cer /= ctr
 
     return mean_cer
-    
+
 
 def calculate_eer(speaker_embeddings, mode="generated"):
     generated_embeddings = {}
@@ -123,16 +124,22 @@ def calculate_eer(speaker_embeddings, mode="generated"):
     }
 
 
-
 def main():
     parser = argparse.ArgumentParser(description='Evaluate the model')
     parser.add_argument("--generated_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/ACEVCTRIALS/")
-    parser.add_argument("--gt_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK")
-    parser.add_argument("--gt_source_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE")
+    parser.add_argument(
+        "--gt_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK"
+    )
+    parser.add_argument(
+        "--gt_source_audio_dir",
+        type=str,
+        required=True,
+        default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE",
+    )
     parser.add_argument("--base_exp_dir", type=str, required=False, default="/data/shehzeen/SSLTTS/GENDER_EXP/RESULTS")
 
     args = parser.parse_args()
-    
+
     generated_audio_dir = args.generated_audio_dir
     gt_audio_dir = args.gt_audio_dir
     gt_source_audio_dir = args.gt_source_audio_dir
@@ -161,7 +168,7 @@ def main():
 
             generated_audio_files[speaker].append(os.path.join(generated_audio_dir, f))
             source_audio_files[speaker].append(source_path)
-    
+
     gt_audio_files = {}
     for f in os.listdir(gt_audio_dir):
         if 'targetspeaker' in f and f.endswith('.wav'):
@@ -173,7 +180,7 @@ def main():
 
     for key in gt_audio_files:
         assert key in generated_audio_files, "{} not in generated_audio_files".format(key)
-    
+
     speaker_embeddings = {}
     transcriptions = {}
 
@@ -213,13 +220,13 @@ def main():
             embedding = nemo_sv_model.get_embedding(fp)
             embedding = embedding.cpu().detach().numpy().flatten()
             speaker_embeddings["original_{}".format(key)].append(embedding)
-        
+
         kidx += 1
         # if kidx == 2:
         #     break
 
     for key in transcriptions:
-        print (key, len(transcriptions[key]))
+        print(key, len(transcriptions[key]))
     print("results real")
 
     # real_eer = calculate_eer(speaker_embeddings, mode="real")
@@ -232,11 +239,10 @@ def main():
     print(generated_metrics)
 
     out_file_path = os.path.join(base_exp_dir, 'results_{}.json'.format(exp_name))
-    
+
     with open(out_file_path, 'w') as f:
         json.dump(generated_metrics, f, indent=4)
-    
-    
+
 
 if __name__ == '__main__':
     main()

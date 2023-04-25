@@ -1,12 +1,14 @@
 from __future__ import print_function
-import os
-import sys
-import cv2
-import random
-import datetime
-import time
-import math
+
 import argparse
+import datetime
+import math
+import os
+import random
+import sys
+import time
+
+import cv2
 import numpy as np
 import torch
 
@@ -80,7 +82,7 @@ def encode(matched, priors, variances):
     # dist b/t match center and prior's center
     g_cxcy = (matched[:, :2] + matched[:, 2:]) / 2 - priors[:, :2]
     # encode variance
-    g_cxcy /= (variances[0] * priors[:, 2:])
+    g_cxcy /= variances[0] * priors[:, 2:]
     # match wh / prior wh
     g_wh = (matched[:, 2:] - matched[:, :2]) / priors[:, 2:]
     g_wh = torch.log(g_wh) / variances[1]
@@ -101,12 +103,17 @@ def decode(loc, priors, variances):
         decoded bounding box predictions
     """
 
-    boxes = torch.cat((
-        priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:],
-        priors[:, 2:] * torch.exp(loc[:, 2:] * variances[1])), 1)
+    boxes = torch.cat(
+        (
+            priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:],
+            priors[:, 2:] * torch.exp(loc[:, 2:] * variances[1]),
+        ),
+        1,
+    )
     boxes[:, :2] -= boxes[:, 2:] / 2
     boxes[:, 2:] += boxes[:, :2]
     return boxes
+
 
 def batch_decode(loc, priors, variances):
     """Decode locations from predictions using priors to undo
@@ -121,9 +128,13 @@ def batch_decode(loc, priors, variances):
         decoded bounding box predictions
     """
 
-    boxes = torch.cat((
-        priors[:, :, :2] + loc[:, :, :2] * variances[0] * priors[:, :, 2:],
-        priors[:, :, 2:] * torch.exp(loc[:, :, 2:] * variances[1])), 2)
+    boxes = torch.cat(
+        (
+            priors[:, :, :2] + loc[:, :, :2] * variances[0] * priors[:, :, 2:],
+            priors[:, :, 2:] * torch.exp(loc[:, :, 2:] * variances[1]),
+        ),
+        2,
+    )
     boxes[:, :, :2] -= boxes[:, :, 2:] / 2
     boxes[:, :, 2:] += boxes[:, :, :2]
     return boxes
