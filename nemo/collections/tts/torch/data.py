@@ -1125,6 +1125,7 @@ class FastPitchSSLDataset(Dataset):
         content_aug_types: Optional[List[str]] = [],
         load_content_embedding: Optional[bool] = True,
         alternate_speaker_conditioning: Optional[str] = "random",
+        emb_similarity_threshold: Optional[float] = 1.0, # Set to 1.0 to disable grouping
     ):
 
         """Dataset used for training FastPitchModel_SSL model.
@@ -1239,6 +1240,7 @@ class FastPitchSSLDataset(Dataset):
                     self.speaker_stats[int(key)] = speaker_stats_raw[key]
 
         self.alternate_speaker_conditioning = alternate_speaker_conditioning
+        self.emb_similarity_threshold = emb_similarity_threshold
         self.compute_mean_speaker_embeddings()
 
     def _get_wav_from_filepath(self, audio_filepath):
@@ -1257,6 +1259,37 @@ class FastPitchSSLDataset(Dataset):
             audio_length = torch.tensor(audio.shape[0]).long()
 
         return audio, audio_length
+
+    def group_content_embeddings(self, content_embedding, aug_embeddings, duration):
+        # content_embedding: (256, n_timesteps)
+        grouped_content_embeddings = [ content_embedding[:, 0] ]
+        grouped_durations = [ duration[0] ]
+        grouped_aug_embeddings =  {key:  [ aug_embeddings[key][:, 0] ] for key in aug_embeddings}
+        group_size = 1
+        for _tidx in range(1, content_embedding.shape[1]):
+            prev_embedding = grouped_content_embeddings[-1]
+            curr_embedding = content_embedding[:, _tidx]
+            emb_similarity = torch.cosine_similarity(prev_embedding, curr_embedding, dim=0)
+            if emb_similarity < self.emb_similarity_threshold:
+                grouped_content_embeddings.append(curr_embedding)
+                grouped_durations.append(duration[_tidx])
+                for key in aug_embeddings:
+                    grouped_aug_embeddings[key].append(aug_embeddings[key][:, _tidx])
+            else:
+                # group with previous embedding
+                grouped_content_embeddings[-1] = (grouped_content_embeddings[-1] * group_size + curr_embedding) / (group_size + 1)
+                grouped_durations[-1] += duration[_tidx]
+                for key in aug_embeddings:
+                    grouped_aug_embeddings[key][-1] = (grouped_aug_embeddings[key][-1] * group_size + aug_embeddings[key][:, _tidx]) / (group_size + 1)
+                group_size += 1
+        
+        grouped_content_embeddings = torch.stack(grouped_content_embeddings, dim=1)
+        grouped_durations = torch.stack(grouped_durations, dim=0)
+        grouped_aug_embeddings = {key: torch.stack(grouped_aug_embeddings[key], dim=1) for key in grouped_aug_embeddings}
+
+        return grouped_content_embeddings, grouped_aug_embeddings, grouped_durations
+
+
 
     def get_ssl_features(self, wav_text_id):
         content_emb_fn = f"{self.ssl_content_emb_type}_content_embedding_{wav_text_id}.pt"
@@ -1304,6 +1337,9 @@ class FastPitchSSLDataset(Dataset):
             raise ValueError(
                 f"Duration file {duration_fp} does not exist. Make sure to run scripts/ssl_tts/make_supdata.py before training."
             )
+        
+        if self.emb_similarity_threshold < 1.0:
+            content_embedding, aug_embeddings, duration = self.group_content_embeddings(content_embedding, aug_embeddings, duration)
 
         encoded_len = torch.tensor(content_embedding.shape[1]).long()
 

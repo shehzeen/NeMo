@@ -142,6 +142,7 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
 
         self.use_aug_loss = False
         if self._cfg.get("aug_loss", None):
+            print ("Aug Loss True")
             self.use_aug_loss = True
             self.aug_loss_weight = self._cfg.aug_loss.aug_loss_alpha
             self.aug_loss_after_n_steps = self._cfg.aug_loss.aug_loss_after_n_steps
