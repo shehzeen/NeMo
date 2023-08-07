@@ -210,6 +210,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             # Format the input example according to the template
             # Get context, question and answer codes in a dict.
             input_dict = self._insert_data_in_template(input_example, prompt_template_fields, doc, answer_field)
+            # import ipdb; ipdb.set_trace()
             context_tokens = input_dict['context']
             question_tokens = input_dict['question']
 
@@ -519,6 +520,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             # Or if some fields from the template aren't present, e.g. {answer} during inference
             # just remove that field from the template, leaving the space blank
             if field == answer_field or field not in doc.keys():
+                if f"{field}_type" not in doc.keys():
+                    doc[f"{field}_type"] = "TEXT"
                 continue
                 #  out_dict[field] = ""
 
@@ -526,7 +529,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 field_data = doc[field]
                 if f"{field}_type" not in doc.keys():
                     doc[f"{field}_type"] = "TEXT"
-                    raise Exception(f"{field}_type does not exist in doc")
+                    # raise Exception(f"{field}_type does not exist in doc")
+                    out_dict[field] = self._get_tokens(doc, field, field_data)
                 else:
                     out_dict[field] = self._get_tokens(doc, field, field_data)
         return out_dict
