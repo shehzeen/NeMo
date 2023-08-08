@@ -264,9 +264,9 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             context_tokens, context_tokens_len = self.list_to_tensor(context_tokens)
             question_tokens, question_tokens_len = self.list_to_tensor(question_tokens)
 
-            if doc["question_type"] != "SPEECH" and doc["context_type"] == "SPEECH":
+            if doc["question_type"] != "SPEECH": # and doc["context_type"] == "SPEECH":
                 question_tokens = pad_text_to_speech_dims(question_tokens, self.tokenizer.pad_id)
-            if doc["context_type"] != "SPEECH" and doc["question_type"] == "SPEECH":
+            if doc["context_type"] != "SPEECH": # and doc["question_type"] == "SPEECH":
                 context_tokens = pad_text_to_speech_dims(context_tokens, self.tokenizer.pad_id)
             context_and_question_tokens = torch.cat([context_tokens, question_tokens], dim=1)
 
@@ -634,8 +634,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 dec_label_len,
                 is_speech
             ) = sample_tuple
-            print(f"virtual_token {virtual_token.size()}")
-            print(f"context_and_question_token {context_and_question_token.size()}")
+            # print(f"virtual_token {virtual_token.size()}")
+            # print(f"context_and_question_token {context_and_question_token.size()}")
 
             virtual_tokens_list.append(general_padding(virtual_token, virtual_token_len.item(), max_virtual_tokens_len, pad_value=self.tokenizer.pad_id))
 

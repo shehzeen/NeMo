@@ -657,17 +657,38 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     if self.fp16_cross_entropy:
                         assert token_logits.dtype == torch.half
                         tokens_loss = vocab_parallel_cross_entropy(token_logits, labels[0, :, :], label_smoothing)
+                        # @shehzeen print labels range
+                        # print ('labels range: ', labels[0, :, :].min(), labels[0, :, :].max())
+                        # @shehzeen print token logit shape
+                        # print ('token logits shape: ', token_logits.shape)
+
                     else:
                         tokens_loss = vocab_parallel_cross_entropy(token_logits.float(), labels[0, :, :], label_smoothing)
                         logging.debug(f"token_loss: {tokens_loss}")
                         logging.debug(f"token_loss: {torch.all(torch.isfinite(tokens_loss))}")
+                        # @shehzeen print labels range
+                        print ('labels range: ', labels[0, :, :].min(), labels[0, :, :].max())
+                        # @shehzeen print token logit shape
+                        print ('token logits shape: ', token_logits.shape)
                         # If condition tests if the expected output is text or speech
                         # If speech then the label of first codebook in first timestep will not be 0
                         for i in range(speech_layers):
                             # What is labels[:7, :, :] if this is text?
                             # speech mask will make loss corresponding to Text = 0.
-                            labels[i+1, :, :] = (labels[i+1, :, :] - 30000 - (i+1)*1024).long()
+                            if labels[i+1, :, :].max().item() != 0:
+                                # If it is not text, then
+                                labels[i+1, :, :] = labels[i+1, :, :] - 30000 - ((i+1) * 1024)
+                                # Clip between 0 and 1023
+                                labels[i+1, :, :] = torch.clamp(labels[i+1, :, :], min=0, max=1023)
+                            # labels[i+1, :, :] = (labels[i+1, :, :] - 30000 - (i+1)*1024).long()
+                            # labels[i+1, :, :] = torch.clamp(labels[i+1, :, :], min=0, max=1023)
                             tokens_loss += vocab_parallel_cross_entropy(speech_logits[:,:,:,i].float(), labels[i+1, :, :], label_smoothing) * speech_mask.T
+                            # @shehzeen print range of labels, are they in range of 0-1024?
+                            # print('label iteration: ', i)
+                            # print('labels:', torch.min(labels[i+1, :, :]), torch.max(labels[i+1, :, :]))
+                            # @shehzeen print shape of speech logits
+                            # print('speech logits shape: ', speech_logits[:,:,:,i].shape)
+
                             logging.debug(f"token_loss_{i}: {tokens_loss}")
                             logging.debug(f"token_loss_{i}: {torch.all(torch.isfinite(tokens_loss))}")
 
