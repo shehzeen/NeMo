@@ -228,33 +228,24 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
 
     def state_dict(self):
         """
-        Custom state dict that only contains prompt table and prompt encoder parameters. 
-        No frozen model parameters are stored in the state dict. Prompt encoder parameters 
+        Custom state dict that only contains prompt table and prompt encoder parameters.
+        No frozen model parameters are stored in the state dict. Prompt encoder parameters
         are only in state dict for intermediate checkpoints saved during training. Final
-        nemo checkpoints at the end of training will contain prompt table parameters only. 
+        nemo checkpoints at the end of training will contain prompt table parameters only.
         """
         state_dict_ = {}
-
-        if self.first_stage_of_pipeline():
-            if self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER:
-                state_dict_ = self.prompt_encoder.state_dict()
-            else:
-                raise ValueError("invalid virtual prompt source")
-
+        state_dict_["frozen_model_enc_dec_model"] = self.frozen_model.enc_dec_model.state_dict()
+        state_dict_["word_embeddings"] = self.word_embeddings.state_dict()
+        
         return state_dict_
 
-    # def load_state_dict(self, state_dict, strict: bool = True):
-    #     """
-    #     Custom load state dict method that only loads prompt table and prompt encoder
-    #     parameters. Matching load method for this class' custom state dict method. 
-    #     """
-    #     if self.first_stage_of_pipeline():
-    #         if self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER:
-    #             if self.prompt_encoder is None:
-    #                 self.init_prompt_encoder()
-    #             self.prompt_encoder.load_state_dict(state_dict, strict)
-    #         else:
-    #             raise ValueError("invalid virtual prompt source")
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """
+        Custom load state dict method that only loads prompt table and prompt encoder
+        parameters. Matching load method for this class' custom state dict method.
+        """
+        self.frozen_model.enc_dec_model.load_state_dict(state_dict["frozen_model_enc_dec_model"], strict)
+        self.word_embeddings.load_state_dict(state_dict["word_embeddings"], strict)
 
     # def setup_optimizer_param_groups(self):
     #     """

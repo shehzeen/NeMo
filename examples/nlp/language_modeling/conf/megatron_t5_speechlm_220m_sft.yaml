@@ -12,9 +12,10 @@ trainer:
   max_steps: 100000
   log_every_n_steps: 10
   val_check_interval: null
-  check_val_every_n_epoch: 10
+  check_val_every_n_epoch: 3
   gradient_clip_val: 1.0
   resume_from_checkpoint: null 
+  limit_val_batches: 25
 
 exp_manager:
   explicit_log_dir: null
@@ -102,7 +103,7 @@ model:
 
   optim:
     name: fused_adam
-    lr: 1e-4
+    lr: 5e-5
     weight_decay: 0.01 
     betas: 
     - 0.9

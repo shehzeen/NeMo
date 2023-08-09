@@ -224,8 +224,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             if "Text to speech this" in question_in_manifest:
                 total_context_len = context_tokens[0].size()[1]
                 reduced_len = min(400, int(total_context_len * 0.2) if total_context_len > 600 else int( total_context_len * random.uniform(0.2, 0.5) ))
-                start_token_index = random.randint(0, total_context_len - reduced_len)
-                context_tokens[0] = context_tokens[0][:, start_token_index:min(440, start_token_index+reduced_len)]
+                start_token_index = random.randint(0, total_context_len - reduced_len) # Can be greater than 440
+                context_tokens[0] = context_tokens[0][:, start_token_index:min(start_token_index+440, start_token_index+reduced_len)]
                 if self.train_task != 'tts':
                     continue
             elif "Next token prediction" in question_in_manifest:

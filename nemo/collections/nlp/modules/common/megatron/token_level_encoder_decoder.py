@@ -666,10 +666,6 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                         tokens_loss = vocab_parallel_cross_entropy(token_logits.float(), labels[0, :, :], label_smoothing)
                         logging.debug(f"token_loss: {tokens_loss}")
                         logging.debug(f"token_loss: {torch.all(torch.isfinite(tokens_loss))}")
-                        # @shehzeen print labels range
-                        print ('labels range: ', labels[0, :, :].min(), labels[0, :, :].max())
-                        # @shehzeen print token logit shape
-                        print ('token logits shape: ', token_logits.shape)
                         # If condition tests if the expected output is text or speech
                         # If speech then the label of first codebook in first timestep will not be 0
                         for i in range(speech_layers):
@@ -683,11 +679,6 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                             # labels[i+1, :, :] = (labels[i+1, :, :] - 30000 - (i+1)*1024).long()
                             # labels[i+1, :, :] = torch.clamp(labels[i+1, :, :], min=0, max=1023)
                             tokens_loss += vocab_parallel_cross_entropy(speech_logits[:,:,:,i].float(), labels[i+1, :, :], label_smoothing) * speech_mask.T
-                            # @shehzeen print range of labels, are they in range of 0-1024?
-                            # print('label iteration: ', i)
-                            # print('labels:', torch.min(labels[i+1, :, :]), torch.max(labels[i+1, :, :]))
-                            # @shehzeen print shape of speech logits
-                            # print('speech logits shape: ', speech_logits[:,:,:,i].shape)
 
                             logging.debug(f"token_loss_{i}: {tokens_loss}")
                             logging.debug(f"token_loss_{i}: {torch.all(torch.isfinite(tokens_loss))}")
@@ -695,7 +686,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     # [s, b] -> [b, s]
                     tokens_loss = tokens_loss.transpose(0, 1).contiguous()
 
-                    return tokens_loss
+                    return tokens_loss, [token_logits, speech_logits]
                 else:
                     # [s, b, h] -> [b, s, h]
                     token_logits = token_logits.transpose(0, 1).contiguous()
@@ -708,31 +699,36 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 encoder_output = output
                 return encoder_output
 
-    def state_dict_for_save_checkpoint(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self):
         """For easy load when model is combined with other heads,
         add an extra key."""
 
         state_dict_ = {}
+        state_dict_[self._encoder_embedding_key] = self.encoder_embedding.state_dict()
+        state_dict_[self._decoder_embedding_key] = self.decoder_embedding.state_dict()
+        state_dict_[self._enc_dec_model_key] = self.enc_dec_model.state_dict()
+        state_dict_[self._tokens_head_key] = self.tokens_head.state_dict()
 
-        state_dict_[self._encoder_embedding_key] = self.encoder_embedding.state_dict_for_save_checkpoint(
-            destination, prefix, keep_vars
-        )
-        state_dict_[self._decoder_embedding_key] = self.decoder_embedding.state_dict_for_save_checkpoint(
-            destination, prefix, keep_vars
-        )
-        state_dict_[self._enc_dec_model_key] = self.enc_dec_model.state_dict_for_save_checkpoint(
-            destination, prefix, keep_vars
-        )
-        state_dict_[self._tokens_head_key] = self.tokens_head.state_dict_for_save_checkpoint(
-            destination, prefix, keep_vars
-        )
+        if hasattr(self, "speech_tokens_heads"):
+            state_dict_["speech_tokens_heads"] = self.speech_tokens_heads.state_dict()
 
+        if hasattr(self, "speech_residual_model_1"):
+            state_dict_["speech_residual_model_1"] = self.speech_residual_model_1.state_dict()
+            
+        if hasattr(self, "speech_residual_model_2"):
+            state_dict_["speech_residual_model_2"] = self.speech_residual_model_2.state_dict()
+        
         return state_dict_
 
     def load_state_dict(self, state_dict, strict=True):
         """Customized load."""
-
-        self.encoder_embedding.encoder_embeddingload_state_dict(state_dict[self._encoder_embedding_key], strict=strict)
+        self.encoder_embedding.load_state_dict(state_dict[self._encoder_embedding_key], strict=strict)
         self.decoder_embedding.load_state_dict(state_dict[self._decoder_embedding_key], strict=strict)
         self.enc_dec_model.load_state_dict(state_dict[self._enc_dec_model_key], strict=strict)
         self.tokens_head.load_state_dict(state_dict[self._tokens_head_key], strict=strict)
+        if hasattr(self, "speech_tokens_heads"):
+            self.speech_tokens_heads.load_state_dict(state_dict["speech_tokens_heads"], strict=strict)
+        if hasattr(self, "speech_residual_model_1"):
+            self.speech_residual_model_1.load_state_dict(state_dict["speech_residual_model_1"], strict=strict)
+        if hasattr(self, "speech_residual_model_2"):
+            self.speech_residual_model_2.load_state_dict(state_dict["speech_residual_model_2"], strict=strict)
