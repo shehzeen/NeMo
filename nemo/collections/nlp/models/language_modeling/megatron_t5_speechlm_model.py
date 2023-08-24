@@ -459,7 +459,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         for tokens in token_list:
             embedding_list.append(self.get_embeddings(tokens, taskname_ids, inference))
         return torch.cat(embedding_list, dim=1)
-
+    
+    
     def validation_step(self, batch, batch_idx, inference=False):
         (
             virtual_tokens,
@@ -473,57 +474,123 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             taskname_ids,
             speech_mask,
         ) = batch
+
+        # loss_mask (b, t)
         # does not use dataloader_iter due to device placement issues arising from PTL
         mode = self.training
         self.eval()
         gbs = self.cfg.get('validation_global_batch_size', self.cfg.global_batch_size)
         self._reconfigure_and_process_inference_batch(virtual_tokens.size(0), gbs)
-        loss_mean = self.fwd_bwd_step(itertools.chain([batch]), batch_idx, forward_only=True)
+        loss_mean = self.fwd_bwd_step(itertools.chain([batch]), batch_idx, forward_only=True) #comment this out and add custom forward function to calculate WER
+        # print (f'loss_mean {loss_mean}')
 
-        if self.first_stage_of_pipeline():
-            # Get embeddings for text tokens and insert virtual token embeddings
-            input_embeds = self.get_embeddings_and_combine(
-                [virtual_tokens, context_and_question_tokens], taskname_ids, inference
-            )
-
-            if hasattr(self.frozen_model.enc_dec_model.encoder_embedding, 'position_embeddings'):
-                position_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.position_embeddings(
-                    position_ids
+        labels_original = labels.clone() # (b, 8, t)
+        output_loss, encoder_input, output_logits = self.forward(
+                    virtual_tokens,
+                    context_and_question_tokens,
+                    enc_mask,
+                    dec_input,
+                    dec_input_mask,
+                    position_ids,
+                    taskname_ids,
+                    labels=labels,
+                    speech_mask=speech_mask,
+                    inference=True,
                 )
-                encoder_input = input_embeds + position_embeddings
-            else:
-                encoder_input = input_embeds
-        else:
-            encoder_input = None
-
-        if self.cfg.get("report_validation_metric", False):
-            metrics = self.get_predictions(input_ids, enc_mask, encoder_input, labels)
-            metrics['loss'] = loss_mean
-        else:
-            metrics = {'loss': loss_mean}
-
+        first_layer_logits, speech_logits = output_logits #first_layer_logits: (t,bs,vocab_size)
+        first_layer_preds = first_layer_logits.argmax(dim=2)  #(t,bs)
+        first_layer_preds = first_layer_preds.transpose(0,1) #(bs,t)
+        labels_first_layer = labels_original[:,0,:] #(bs,t)
+        correct_predictions = first_layer_preds == labels_first_layer #(bs,t)
+        correct_predictions = correct_predictions * loss_mask #(bs,t)
+        total_correct_predictions = torch.sum(correct_predictions) 
+        total_predictions = torch.sum(loss_mask)
+        first_layer_accuracy = total_correct_predictions/total_predictions
+        first_layer_loss = torch.nn.functional.cross_entropy(first_layer_logits.permute(1, 2, 0), labels_first_layer, reduction='none') #(bs,t)
+        first_layer_loss = torch.sum(first_layer_loss * loss_mask) / total_predictions
+        
+        metrics = {
+            'loss': loss_mean,
+            'first_layer_accuracy': first_layer_accuracy,
+            'first_layer_loss': first_layer_loss,
+        }
+        loss_total = first_layer_loss
+        for i in range(7):
+            speech_logits_i = speech_logits[:,:,:,i]
+            speech_preds_i = speech_logits_i.argmax(dim=2) #(t,bs)
+            speech_preds_i = speech_preds_i.transpose(0,1) #(bs,t)
+            labels_i = labels_original[:,i+1,:] #(bs,t)
+            correct_predictions_i = speech_preds_i == labels_i #(bs,t)
+            correct_predictions_i = correct_predictions_i * loss_mask #(bs,t)
+            total_correct_predictions_i = torch.sum(correct_predictions_i)
+            total_predictions_i = torch.sum(loss_mask)
+            speech_accuracy_i = total_correct_predictions_i/total_predictions_i
+            loss_i = torch.nn.functional.cross_entropy(speech_logits_i.permute(1, 2, 0), labels_i, reduction='none') #(bs,t)
+            loss_i = torch.sum(loss_i * loss_mask) / total_predictions_i
+            metrics[f'speech_accuracy_{i+1}'] = speech_accuracy_i
+            metrics[f'speech_loss_{i+1}'] = loss_i
+            loss_total += loss_i
+        
+        metrics['loss_total_check'] = loss_total
         self.train(mode=mode)
         self.frozen_model.eval()
         return metrics
+
+        
 
     def validation_epoch_end(self, outputs):
         if self.cfg.get('pipeline_model_parallel_size', 1) > 1:
             if parallel_state.is_pipeline_last_stage():
                 # only the last pipeline parallel stages return loss
-                averaged_loss = torch.stack([i['loss'] for i in outputs]).mean()
+                averaged_loss = torch.stack([item['loss'] for item in outputs]).mean()
+                averaged_loss_total_check = torch.stack([item['loss_total_check'] for item in outputs]).mean()
+                averaged_first_layer_accuracy = torch.stack([item['first_layer_accuracy'] for item in outputs]).mean()
+
+                self.log('val_first_layer_accuracy', averaged_first_layer_accuracy, prog_bar=True, rank_zero_only=True, batch_size=1)
+                self.log('val_loss_total_check', averaged_loss_total_check, prog_bar=True, rank_zero_only=True, batch_size=1)
+                logging.info(f'Validation first_layer_accuracy: {averaged_first_layer_accuracy}')
+                logging.info(f'Validation loss_total_check: {averaged_loss_total_check}')
+                
+                for i in range(1,8):
+                    averaged_speech_accuracy = torch.stack([item[f'speech_accuracy_{i}'] for item in outputs]).mean()
+                    averaged_speech_loss = torch.stack([item[f'speech_loss_{i}'] for item in outputs]).mean()
+                    self.log(f'val_speech_accuracy_{i}', averaged_speech_accuracy, prog_bar=True, rank_zero_only=True, batch_size=1)
+                    self.log(f'val_speech_loss_{i}', averaged_speech_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
+                    logging.info(f'Validation speech_accuracy_{i}: {averaged_speech_accuracy}')
+                    logging.info(f'Validation speech_loss_{i}: {averaged_speech_loss}')
             else:
                 averaged_loss = torch.tensor(0.0).cuda()
+
 
             # we can only log on one rank if it is rank zero so we broadcast from last rank
             torch.distributed.broadcast(averaged_loss, get_last_rank())
 
             self.log('val_loss', averaged_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
             logging.info(f'Validation loss: {averaged_loss}')
+            
+        
 
         else:
-            averaged_loss = torch.stack([item['loss'] for item in outputs]).mean()
-            logging.info(f'Validation loss: {averaged_loss}')
-            self.log('val_loss', averaged_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
+            if len(outputs) > 0:
+                averaged_loss = torch.stack([item['loss'] for item in outputs]).mean()
+                averaged_loss_total_check = torch.stack([item['loss_total_check'] for item in outputs]).mean()
+                logging.info(f'Validation loss: {averaged_loss}')
+                self.log('val_loss', averaged_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
+                self.log('val_loss_total_check', averaged_loss_total_check, prog_bar=True, rank_zero_only=True, batch_size=1)
+
+                averaged_first_layer_accuracy = torch.stack([item['first_layer_accuracy'] for item in outputs]).mean()
+                logging.info(f'Validation first_layer_accuracy: {averaged_first_layer_accuracy}')
+                self.log('val_first_layer_accuracy', averaged_first_layer_accuracy, prog_bar=True, rank_zero_only=True, batch_size=1)
+
+                
+                for i in range(1,8):
+                    averaged_speech_accuracy = torch.stack([item[f'speech_accuracy_{i}'] for item in outputs]).mean()
+                    averaged_speech_loss = torch.stack([item[f'speech_loss_{i}'] for item in outputs]).mean()
+                    logging.info(f'Validation speech_accuracy_{i}: {averaged_speech_accuracy}')
+                    logging.info(f'Validation speech_loss_{i}: {averaged_speech_loss}')
+                    self.log(f'val_speech_accuracy_{i}', averaged_speech_accuracy, prog_bar=True, rank_zero_only=True, batch_size=1)
+                    self.log(f'val_speech_loss_{i}', averaged_speech_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
+
 
         if self.cfg.get("report_validation_metric", False):
             gather_results = [None for _ in range(parallel_state.get_data_parallel_world_size())]
