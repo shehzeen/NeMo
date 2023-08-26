@@ -38,6 +38,7 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank
 from nemo.utils import AppState, logging
+from nemo.collections.tts.parts.utils.helpers import plot_encodec_to_numpy
 
 try:
     from apex.transformer.pipeline_parallel.utils import (
@@ -726,9 +727,19 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     speech_mask=speech_mask,
                     inference=True,
                 )
-                output_tokens = output_logits.argmax(dim=2)  # (B,T,8)
-                output_tokens_curr_timestep = output_tokens[:, t]
+                # output_logits (B, T, V, 8)
+                output_logits_currtimestep = output_logits[:, t, :, :].permute(0,2,1).contiguous().view(-1, 1024) # (B*8, V)
+                temperature = 0.7 #0.01 for greedy and 0.7 for sampling
+                output_logits_currtimestep = output_logits_currtimestep / temperature
+                output_logits_currtimestep = torch.nn.functional.softmax(output_logits_currtimestep, dim=1)
+                output_tokens_curr_timestep = torch.multinomial(output_logits_currtimestep, num_samples=1)  # (B*8, 1)
+                # Convert back to (B, 8)
+                output_tokens_curr_timestep = output_tokens_curr_timestep.view(output_logits.shape[0], 8)
+
+                # output_tokens = output_logits.argmax(dim=2)  # (B,T,8)
+                # output_tokens_curr_timestep = output_tokens[:, t]
                 output_token_list.append(output_tokens_curr_timestep)  # for later predicting audio
+
                 dec_input_next_timestep = output_tokens_curr_timestep * 1  # (B,8)
                 dec_input_next_timestep[:, 0] = (
                     dec_input_next_timestep[:, 0] + self.speech_offset
@@ -737,6 +748,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
             output_tokens_combined = torch.stack(output_token_list)  # (T, B, 8)
             output_tokens_combined = output_tokens_combined.permute(1, 2, 0)  # (B, 8, T)
+            
 
             # predicting audio
             batch_size = output_tokens_combined.shape[0]
@@ -746,10 +758,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 dec_input_to_1024 = self.convert_tokens_to_range(dec_input_raw[i, :, 0:audio_len])
                 dec_input_wav = self.additional_models['encodec'].decode([[dec_input_to_1024[None], None]])[0, 0]
                 self.logger.experiment.add_audio("Inf Dec Input Wav", dec_input_wav, step, 24000)
+                
                 predicted_tokens = output_tokens_combined[i]
                 predicted_tokens = predicted_tokens[:, 0:audio_len]
+                pred_img = predicted_tokens.data.cpu().float().numpy()
+                dec_inp_img = dec_input_to_1024.data.cpu().float().numpy()
+
                 predicted_wav = self.additional_models['encodec'].decode([[predicted_tokens[None], None]])[0, 0]
                 self.logger.experiment.add_audio("Inf Pred Wav", predicted_wav, step, 24000)
+                self.logger.experiment.add_image("Inf Pred Tokens", plot_encodec_to_numpy(pred_img), step, dataformats="HWC",)
+                self.logger.experiment.add_image("Inf Dec Input Tokens", plot_encodec_to_numpy(dec_inp_img), step, dataformats="HWC",)
+      
 
             return {'loss': torch.tensor(0.0).to(self.device)}
 
