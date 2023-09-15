@@ -186,12 +186,35 @@ def main():
 
     generated_audio_files = {}
     source_audio_files = {}
+    # {9: 'russian',
+    #  5: 'german',
+    #  7: 'french',
+    #  1: 'greek',
+    #  8: 'hungarian',
+    #  2: 'finnish',
+    #  3: 'spanish',
+    #  6: 'japanese',
+    #  4: 'dutch',
+    #  0: 'chinese'}
+    language_asr_mapping = {
+        9 : 'stt_ru_quartznet15x5', # ok
+        5 : 'stt_de_quartznet15x5', # ok
+        7 : 'stt_fr_quartznet15x5', # ok
+        1 : 'stt_en_quartznet15x5', # el
+        8 : 'stt_en_quartznet15x5', # el
+        2 : 'stt_en_quartznet15x5', # fi
+        3 : 'stt_es_quartznet15x5', # ok
+        6 : 'stt_en_quartznet15x5', # ok
+        4 : 'stt_en_quartznet15x5', # ok
+        0 : 'stt_zh_citrinet_512', 
+    }
     for f in os.listdir(generated_audio_dir):
         if 'targetspeaker' in f and f.endswith('.wav'):
             # f = source_1_targetspeaker_6_0.wav
             speaker = f.split('_')[3]
             if ".wav" in speaker:
                 speaker = speaker.split(".")[0]
+            print("speaker", speaker)
             if "TO" in f:
                 speaker = f.split('_')[2]
             if speaker not in generated_audio_files:
@@ -218,16 +241,18 @@ def main():
                 gt_audio_files[speaker] = []
             gt_audio_files[speaker].append(os.path.join(gt_audio_dir, f))
 
-    print("generated_audio_files", generated_audio_files.keys())
     keys_to_remove = []
     for key in gt_audio_files:
         if key not in generated_audio_files:
             print("{} not in generated_audio_files".format(key))
             keys_to_remove.append(key)
+    print("keys_to_remove", len(keys_to_remove), len(gt_audio_files))
+    print(generated_audio_files.keys())
     
+
+
     for key in keys_to_remove:
         del gt_audio_files[key]
-            
 
     speaker_embeddings = {}
     transcriptions = {}
@@ -241,6 +266,7 @@ def main():
     asr_model = nemo_asr.models.EncDecCTCModel.from_pretrained(model_name=asr_model_name)
     asr_model = asr_model.to(device)
     asr_model.eval()
+    last_loaded_asr_model = asr_model_name
 
     kidx = 0
     for key in gt_audio_files:
@@ -254,13 +280,26 @@ def main():
             embedding = nemo_sv_model.get_embedding(fp)
             embedding = embedding.cpu().detach().numpy().flatten()
             speaker_embeddings["generated_{}".format(key)].append(embedding)
+            language_idx = int(fp.split('/')[-1].split('_')[1][0])
+            if last_loaded_asr_model != language_asr_mapping[language_idx]:
+                asr_model = nemo_asr.models.EncDecCTCModel.from_pretrained(model_name=last_loaded_asr_model)
+                asr_model = asr_model.to(device)
+                asr_model.eval()
+                last_loaded_asr_model = language_asr_mapping[language_idx]
+
             trancription = asr_model.transcribe([fp])[0]
-            # print("Transcription generated: {}".format(trancription))
+            print("Transcription generated: {}".format(trancription))
             transcriptions["generated_{}".format(key)].append(trancription)
 
         for fp in source_audio_files[key]:
+            language_idx = int(fp.split('/')[-1].split('_')[1][0])
+            if last_loaded_asr_model != language_asr_mapping[language_idx]:
+                asr_model = nemo_asr.models.EncDecCTCModel.from_pretrained(model_name=last_loaded_asr_model)
+                asr_model = asr_model.to(device)
+                asr_model.eval()
+                last_loaded_asr_model = language_asr_mapping[language_idx]
             trancription = asr_model.transcribe([fp])[0]
-            # print("Transcription original: {}".format(trancription))
+            print("Transcription original: {}".format(trancription))
             transcriptions["original_{}".format(key)].append(trancription)
 
         for fp in gt_audio_files[key]:
@@ -278,9 +317,9 @@ def main():
     print("results real")
 
     # real_eer = calculate_eer(speaker_embeddings, mode="real")
-    # print("REAL EER", real_eer)
-    # print("---------------------------------------------------------------------------------")
-    # print("results generated")
+    # print(real_eer)
+    print("---------------------------------------------------------------------------------")
+    print("results generated")
     generated_metrics = calculate_eer(speaker_embeddings, mode="generated")
     generated_metrics['cer'] = calculate_cer(transcriptions)
 

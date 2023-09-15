@@ -23,7 +23,8 @@ os.makedirs(temp_dir, exist_ok=True)
 
 data_dir_path = "/data/shehzeen/SSLTTS/CelebrityData"
 
-ssl_model_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_8915.ckpt"
+# ssl_model_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_8915.ckpt"
+ssl_model_ckpt_path = "/data/shehzeen/SSLTTS/PretrainingExperiments/Libri360/NoAugment/2023-04-26_13-10-21/checkpoints/Epoch47.ckpt"
 
 avatar_paths = {
     'default': "/home/shehzeen/first-order-model/obama.jpg",
@@ -38,6 +39,7 @@ avatar_paths = {
     'lex': "/data/shehzeen/portraits/lex.png",
     'oprah': "/data/shehzeen/portraits/oprah.png",
     'miley': "/data/shehzeen/portraits/miley.png",
+    'tiken':  "/data/shehzeen/portraits/tiken.png",
 }
 
 target_audio_paths = {
@@ -65,11 +67,17 @@ target_audio_paths = {
         "{}/YoutubeChunkedAudio/lex_1_292.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/lex_1_293.wav".format(data_dir_path),
     ],
+    # 'oprah': [
+    #     "{}/YoutubeChunkedAudio/oprah_2_151.wav".format(data_dir_path),
+    #     "{}/YoutubeChunkedAudio/oprah_2_152.wav".format(data_dir_path),
+    #     "{}/YoutubeChunkedAudio/oprah_2_153.wav".format(data_dir_path),
+    #     "{}/YoutubeChunkedAudio/oprah_2_154.wav".format(data_dir_path),
+    # ],
     'oprah': [
-        "{}/YoutubeChunkedAudio/oprah_2_151.wav".format(data_dir_path),
-        "{}/YoutubeChunkedAudio/oprah_2_152.wav".format(data_dir_path),
-        "{}/YoutubeChunkedAudio/oprah_2_153.wav".format(data_dir_path),
-        "{}/YoutubeChunkedAudio/oprah_2_154.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprahNew_1_0.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprahNew_1_1.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprahNew_1_2.wav".format(data_dir_path),
+        "{}/YoutubeChunkedAudio/oprahNew_1_3.wav".format(data_dir_path),
     ],
     'emma': [
         "{}/YoutubeChunkedAudio/emma_1_2.wav".format(data_dir_path),
@@ -101,14 +109,23 @@ target_audio_paths = {
         "{}/YoutubeChunkedAudio/ahmadCorrect_1_8.wav".format(data_dir_path),
         "{}/YoutubeChunkedAudio/ahmadCorrect_1_11.wav".format(data_dir_path),
     ],
+    'tiken' : [
+        '/data/shehzeen/SingingVoices/tiken_chunks/chunk_23.wav',
+        '/data/shehzeen/SingingVoices/tiken_chunks/chunk_24.wav',
+        '/data/shehzeen/SingingVoices/tiken_chunks/chunk_25.wav',
+        '/data/shehzeen/SingingVoices/tiken_chunks/chunk_26.wav'
+    ],
 }
 
 
 fastpitch_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/Epoch500_5797.ckpt".format(data_dir_path)
-fastpitch_ckpt_path_finetuned = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_7464.ckpt".format(data_dir_path)
+# fastpitch_ckpt_path_finetuned = "/data/shehzeen/TextlessVCDemoCkpts/Epoch43_7464.ckpt".format(data_dir_path)
+fastpitch_ckpt_path_finetuned = "/data/shehzeen/SSLTTS/TextlessFastPitchExperimentsLibri360/TikenCelebrityFinetuned/SingingModelLouder/2023-06-09_10-19-01/checkpoints/Epoch300.ckpt"
+# fastpitch_ckpt_path_finetuned = "/data/shehzeen/SSLTTS/TextlessFastPitchExperimentsLibri360/OprahNew/Try2/2023-07-12_23-38-03/checkpoints/Epoch25.ckpt"
 
 hifi_ckpt_path = "/data/shehzeen/TextlessVCDemoCkpts/HiFiLibriEpoch334.ckpt".format(data_dir_path)
-hifi_ckpt_path_finetuned = "/data/shehzeen/TextlessVCDemoCkpts/Epoch7659_3494.ckpt".format(data_dir_path)
+# hifi_ckpt_path_finetuned = "/data/shehzeen/TextlessVCDemoCkpts/Epoch7659_3494.ckpt".format(data_dir_path)
+hifi_ckpt_path_finetuned = "/data/shehzeen/SSLTTS/TextlessFastPitchExperimentsTiken/HifiGAN_finetuned/HifiGan/2023-06-09_15-57-41/checkpoints/Epoch1959.ckpt"
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -180,6 +197,30 @@ def load_wav(wav_path, wav_featurizer, pad_multiple=1024):
 
     return wav
 
+
+def get_pitch_contour(wav, pitch_mean=None, pitch_std=None, compute_mean_std=False, sample_rate=22050):
+    f0, _, _ = librosa.pyin(
+        wav.numpy(),
+        fmin=librosa.note_to_hz('C2'),
+        fmax=librosa.note_to_hz('C7'),
+        frame_length=1024,
+        hop_length=256,
+        sr=sample_rate,
+        center=True,
+        fill_na=0.0,
+    )
+    pitch_contour = torch.tensor(f0, dtype=torch.float32)
+    _pitch_mean = pitch_contour.mean().item()
+    _pitch_std = pitch_contour.std().item()
+    if compute_mean_std:
+        pitch_mean = _pitch_mean
+        pitch_std = _pitch_std
+    if (pitch_mean is not None) and (pitch_std is not None):
+        pitch_contour = pitch_contour - pitch_mean
+        pitch_contour[pitch_contour == -pitch_mean] = 0.0
+        pitch_contour = pitch_contour / pitch_std
+
+    return pitch_contour
 
 def segment_wav(wav, segment_length=32000, hop_size=16000, min_segment_size=16000):
     if len(wav) < segment_length:
@@ -298,6 +339,8 @@ def convert_recordings():
             else:
                 audio_data = request.files['custom_source_audio_{}'.format(wav_no)]
 
+            conversion_type = request.values.get('conversion_type_{}'.format(wav_no))
+
             source_wav = load_wav(audio_data, wav_featurizer_fp)
             audio_np = source_wav.cpu().numpy()
 
@@ -335,12 +378,21 @@ def convert_recordings():
                 duration = duration.to(device)
                 final_content_embedding = final_content_embedding[None]
                 duration = duration[None]
+                
+                pitch_contour1 = None
+                compute_pitch = True
+                print("CONVERSION TYPEEEE>>>>>>", conversion_type)
+                if conversion_type == "mimic":
+                    print("MIMICCIN")
+                    pitch_contour1 = get_pitch_contour(audio_signal[0].cpu(), compute_mean_std=True, sample_rate=22050)[None]
+                    pitch_contour1 = pitch_contour1.to(device)
+                    compute_pitch = False
 
                 wav_generated = _fastpitch_model.generate_wav(
                     final_content_embedding,
                     target_speaker_embedding,
-                    pitch_contour=None,
-                    compute_pitch=True,
+                    pitch_contour=pitch_contour1,
+                    compute_pitch=compute_pitch,
                     compute_duration=False,
                     durs_gt=duration,
                     dataset_id=0,
@@ -370,6 +422,9 @@ def convert_voice():
     audio_base64 = request.values.get('audio')
 
     speaker = request.values.get('speaker')
+    print("speaker", speaker)
+    conversion_type = request.values.get('conversion_type')
+    
     if speaker not in speaker_embeddings:
         print("speaker not found, using default speaker")
         speaker = speaker_embeddings.keys()[0]
@@ -377,21 +432,18 @@ def convert_voice():
 
     audio_base64 = base64.b64decode(audio_base64)
     audio_np = np.frombuffer(audio_base64, dtype=np.float32)
-
-    audio_np_16000 = librosa.resample(audio_np, 22050, 16000)
-
-    audio_torch_16000 = torch.from_numpy(audio_np_16000)
-    speech_timestamps = vad_get_speech_timestamps(audio_torch_16000, vad_model, sampling_rate=16000)
-    print("speech timestamps ", speech_timestamps)
-    if len(speech_timestamps) == 0:
-        silence = audio_np * 0
-        return json.dumps({'audio_converted': base64.b64encode(silence).decode('utf-8'),})
+    print("Audio np", audio_np.shape)
 
     st = time.time()
+    pad_multiple = 1024
     with torch.no_grad():
         audio_np = audio_np[:-1]
-        audio_signal = torch.from_numpy(audio_np).to(device)[None]
-
+        audio_signal = torch.from_numpy(audio_np)
+        if (audio_signal.shape[0] % pad_multiple) != 0:
+            audio_signal = torch.cat([audio_signal, torch.zeros(pad_multiple - audio_signal.shape[0] % pad_multiple, dtype=torch.float)])
+        
+        audio_signal = audio_signal[:-1][None].to(device)
+        
         audio_signal_length = torch.tensor([audio_signal.shape[1]]).to(device)
 
         processed_signal, processed_signal_length = ssl_model.preprocessor(
@@ -407,11 +459,18 @@ def convert_voice():
         final_content_embedding = final_content_embedding[None]
         duration = duration[None]
 
-        wav_generated = fastpitch_model.generate_wav(
+        pitch_contour1 = None
+        compute_pitch = True
+        if conversion_type == "mimic":
+            pitch_contour1 = get_pitch_contour(audio_signal[0].cpu(), compute_mean_std=True, sample_rate=fpssl_sample_rate)[None]
+            pitch_contour1 = pitch_contour1.to(device)
+            compute_pitch = False
+
+        wav_generated = fastpitch_model_finetuned.generate_wav(
             final_content_embedding,
             speaker_embeddings[speaker],
-            pitch_contour=None,
-            compute_pitch=True,
+            pitch_contour=pitch_contour1,
+            compute_pitch=compute_pitch,
             compute_duration=False,
             durs_gt=duration,
             dataset_id=0,
@@ -419,7 +478,7 @@ def convert_voice():
 
         wav_generated = wav_generated[0][0]
         print("wav generated ", wav_generated.shape, wav_generated.dtype)
-        print("***\n***\n***\n***\n***\n***\n")
+        # print("***\n***\n***\n***\n***\n***\n")
         # wav_pitch_shifted = librosa.effects.pitch_shift(audio_np, 22050, n_steps=-2)
     audio_time = time.time() - st
     print("audio time ", audio_time)

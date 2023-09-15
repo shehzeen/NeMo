@@ -166,12 +166,7 @@ def main():
     parser.add_argument(
         "--gt_audio_dir", type=str, required=True, default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK"
     )
-    parser.add_argument(
-        "--gt_source_audio_dir",
-        type=str,
-        required=True,
-        default="/data/shehzeen/SSLTTS/EVAL_SEEN_SPEAKERS_VCTK_SOURCE",
-    )
+    
     parser.add_argument("--base_exp_dir", type=str, required=False, default="/data/shehzeen/SSLTTS/GENDER_EXP/RESULTS")
 
     args = parser.parse_args()
@@ -190,8 +185,6 @@ def main():
         if 'targetspeaker' in f and f.endswith('.wav'):
             # f = source_1_targetspeaker_6_0.wav
             speaker = f.split('_')[3]
-            if ".wav" in speaker:
-                speaker = speaker.split(".")[0]
             if "TO" in f:
                 speaker = f.split('_')[2]
             if speaker not in generated_audio_files:
@@ -212,22 +205,12 @@ def main():
         if 'targetspeaker' in f and f.endswith('.wav'):
             # f = targetspeaker_19_4.wav
             speaker = f.split('_')[1]
-            if ".wav" in speaker:
-                speaker = speaker.split(".")[0]
             if speaker not in gt_audio_files:
                 gt_audio_files[speaker] = []
             gt_audio_files[speaker].append(os.path.join(gt_audio_dir, f))
 
-    print("generated_audio_files", generated_audio_files.keys())
-    keys_to_remove = []
     for key in gt_audio_files:
-        if key not in generated_audio_files:
-            print("{} not in generated_audio_files".format(key))
-            keys_to_remove.append(key)
-    
-    for key in keys_to_remove:
-        del gt_audio_files[key]
-            
+        assert key in generated_audio_files, "{} not in generated_audio_files".format(key)
 
     speaker_embeddings = {}
     transcriptions = {}
@@ -278,9 +261,9 @@ def main():
     print("results real")
 
     # real_eer = calculate_eer(speaker_embeddings, mode="real")
-    # print("REAL EER", real_eer)
-    # print("---------------------------------------------------------------------------------")
-    # print("results generated")
+    # print(real_eer)
+    print("---------------------------------------------------------------------------------")
+    print("results generated")
     generated_metrics = calculate_eer(speaker_embeddings, mode="generated")
     generated_metrics['cer'] = calculate_cer(transcriptions)
 

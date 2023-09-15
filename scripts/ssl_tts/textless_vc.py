@@ -114,7 +114,29 @@ def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=N
     return speaker_embedding[None]
 
 
-def get_ssl_features_disentangled(ssl_model, wav_featurizer, audio_path, device="cpu"):
+def group_content_embeddings(content_embedding, duration, emb_similarity_threshold=0.925):
+    # content_embedding: (256, n_timesteps)
+    grouped_content_embeddings = [ content_embedding[:, 0] ]
+    grouped_durations = [ duration[0] ]
+    group_size = 1
+    for _tidx in range(1, content_embedding.shape[1]):
+        prev_embedding = grouped_content_embeddings[-1]
+        curr_embedding = content_embedding[:, _tidx]
+        emb_similarity = torch.cosine_similarity(prev_embedding, curr_embedding, dim=0)
+        if emb_similarity < emb_similarity_threshold:
+            grouped_content_embeddings.append(curr_embedding)
+            grouped_durations.append(duration[_tidx])
+        else:
+            # group with previous embedding
+            grouped_content_embeddings[-1] = (grouped_content_embeddings[-1] * group_size + curr_embedding) / (group_size + 1)
+            grouped_durations[-1] += duration[_tidx]
+    
+    grouped_content_embeddings = torch.stack(grouped_content_embeddings, dim=1)
+    grouped_durations = torch.stack(grouped_durations, dim=0)
+
+    return grouped_content_embeddings, grouped_durations
+
+def get_ssl_features_disentangled(ssl_model, wav_featurizer, audio_path, use_unique_tokens=False, device="cpu"):
     """
     Extracts content embedding, speaker embedding and duration tokens to be used as inputs for FastPitchModel_SSL 
     synthesizer. Content embedding and speaker embedding extracted using SSLDisentangler model.
@@ -142,12 +164,22 @@ def get_ssl_features_disentangled(ssl_model, wav_featurizer, audio_path, device=
     if ssl_model._cfg.get("normalize_content_encoding", False):
         batch_content_embedding = ssl_model._normalize_encoding(batch_content_embedding)
 
-    final_content_embedding = batch_content_embedding[0, :, : batch_encoded_len[0]]
+    content_embedding = batch_content_embedding[0, :, : batch_encoded_len[0]]
     ssl_downsampling_factor = ssl_model._cfg.encoder.subsampling_factor
-    duration = torch.ones(final_content_embedding.shape[1]) * ssl_downsampling_factor
-    duration = duration.to(device)
+    duration = torch.ones(content_embedding.shape[1]) * ssl_downsampling_factor
+    
+    if use_unique_tokens:
+        print("Grouping..")
+        emb_similarity_threshold = ssl_model._cfg.get("emb_similarity_threshold", 0.925)
+        final_content_embedding, final_duration = group_content_embeddings(content_embedding, duration, emb_similarity_threshold)
+        print("Grouped duration", final_duration)
+    else:
+        final_content_embedding, final_duration = content_embedding, duration
+        
+    final_content_embedding = final_content_embedding.to(device)
+    final_duration = final_duration.to(device)
 
-    return final_content_embedding[None], duration[None]
+    return final_content_embedding[None], final_duration[None]
 
 
 def main():
@@ -163,6 +195,8 @@ def main():
     parser.add_argument('--compute_duration', type=int, default=1)
     parser.add_argument('--max_input_length_sec', type=int, default=20)
     parser.add_argument('--segment_length_seconds', type=int, default=16)
+    parser.add_argument('--use_unique_tokens', type=int, default=0)
+    parser.add_argument('--duration', type=float, default=None)
     args = parser.parse_args()
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -239,8 +273,10 @@ def main():
     wav_featurizer = WaveformFeaturizer(sample_rate=fpssl_sample_rate, int_values=False, augmentor=None)
     wav_featurizer_sv = WaveformFeaturizer(sample_rate=sv_sample_rate, int_values=False, augmentor=None)
 
+    use_unique_tokens = args.use_unique_tokens == 1
     compute_pitch = args.compute_pitch == 1
     compute_duration = args.compute_duration == 1
+
 
     for source_target_out in source_target_out_pairs:
         source_audio_path = source_target_out[0]
@@ -250,11 +286,11 @@ def main():
 
         with torch.no_grad():
             content_embedding1, duration1 = get_ssl_features_disentangled(
-                ssl_model, wav_featurizer, source_audio_path, device=device,
+                ssl_model, wav_featurizer, source_audio_path, use_unique_tokens, device=device,
             )
 
             speaker_embedding2 = get_speaker_embedding(
-                nemo_sv_model, wav_featurizer_sv, target_audio_paths, duration=None, device=device
+                nemo_sv_model, wav_featurizer_sv, target_audio_paths, duration=args.duration, device=device
             )
 
             pitch_contour1 = None

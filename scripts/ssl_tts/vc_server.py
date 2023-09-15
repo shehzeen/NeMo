@@ -133,7 +133,7 @@ vad_model = vad_model.to("cpu")
 
 facial_image_paths = {
     'obama': "/home/shehzeen/first-order-model/obama.jpg",
-    'ahmadCorrect': "/home/shehzeen/ahmad.png",
+    'ahmadCorrect': "/home/shehzeen/ahmad_3.png",
     'sundar': "/home/shehzeen/sundar.png",
     'modi': "/home/shehzeen/modi.png",
     'emma': "/home/shehzeen/emma.png",
