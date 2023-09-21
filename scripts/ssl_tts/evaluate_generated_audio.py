@@ -25,7 +25,85 @@ import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.models import label_models
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.tts.models import fastpitch_ssl, hifigan, ssl_tts
+from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
+import jiwer
 
+
+nemo_transcriptions = {} # key: audio_path, value: transcription (Cache)
+def transcribe_nemo(asr_model, audio_path):
+    global nemo_transcriptions
+    if audio_path in nemo_transcriptions:
+        return nemo_transcriptions[audio_path]
+    transcription = asr_model.transcribe([audio_path])[0]
+    nemo_transcriptions[audio_path] = transcription
+
+    return transcription
+
+
+
+
+wav2vec2_transcriptions = {} # key: audio_path, value: transcription (Cache)
+def transcribe_wav2vec2(wav2vec2_processor, wav2vec2_model, audio_path):
+    global wav2vec2_transcriptions
+
+    if audio_path in wav2vec2_transcriptions:
+        return wav2vec2_transcriptions[audio_path]
+    
+    audio_input, _ = librosa.load(audio_path, sr=16000)
+    audio_torch = wav2vec2_processor(audio_input, return_tensors="pt", sampling_rate=16000).input_values
+
+    with torch.no_grad():
+        logits = wav2vec2_model(audio_torch).logits
+        predicted_ids = torch.argmax(logits, dim=-1)
+        transcription = wav2vec2_processor.batch_decode(predicted_ids)[0]
+        wav2vec2_transcriptions[audio_path] = transcription
+
+    return transcription
+    
+
+def segment_wav(wav, segment_length=32000, hop_size=16000, min_segment_size=16000):
+    if len(wav) < segment_length:
+        pad = torch.zeros(segment_length - len(wav))
+        segment = torch.cat([wav, pad])
+        return [segment]
+    else:
+        si = 0
+        segments = []
+        while si < len(wav) - min_segment_size:
+            segment = wav[si : si + segment_length]
+            if len(segment) < segment_length:
+                pad = torch.zeros(segment_length - len(segment))
+                segment = torch.cat([segment, pad])
+
+            segments.append(segment)
+            si += hop_size
+        return segments
+
+def get_speaker_embedding(nemo_sv_model, wav_featurizer, audio_paths, duration=None, device="cpu"):
+    all_segments = []
+    all_wavs = []
+    for audio_path in audio_paths:
+        wav = wav_featurizer.process(audio_path)
+        segments = segment_wav(wav)
+        all_segments += segments
+        all_wavs.append(wav)
+        if duration is not None and len(all_segments) >= duration:
+            # each segment is 2 seconds with one second overlap.
+            # so 10 segments would mean 0 to 2, 1 to 3.. 9 to 11 (11 seconds.)
+            all_segments = all_segments[: int(duration)]
+            break
+
+    with torch.no_grad():
+        signal_batch = torch.stack(all_segments)
+        signal_length_batch = torch.stack([torch.tensor(signal_batch.shape[1]) for _ in range(len(all_segments))])
+        signal_batch = signal_batch.to(device)
+        signal_length_batch = signal_length_batch.to(device)
+
+        _, speaker_embeddings = nemo_sv_model(input_signal=signal_batch, input_signal_length=signal_length_batch)
+
+    speaker_embedding_list = [speaker_embeddings[i].cpu().detach().numpy().flatten() for i in range(speaker_embeddings.shape[0])]
+
+    return speaker_embedding_list
 
 def calculatePitchMetrics(ref_pitch_contour_np, gen_pitch_contour_np):
     # F0 Frame Error - FFE #
@@ -67,36 +145,18 @@ def get_similarity(emb1, emb2):
     similarity = dot(emb1, emb2) / (norm(emb1) * norm(emb2))
     return similarity
 
-
-def calculate_cer(transcriptions):
-    generated_transcriptions = []
-    real_transcriptions = []
-
-    for key in transcriptions:
-        if 'generated' in key:
-            real_key = key.replace('generated', 'original')
-            assert real_key in transcriptions, "{} not in transcriptions".format(real_key)
-            real_transcriptions += transcriptions[real_key]
-            generated_transcriptions += transcriptions[key]
-    # print(len(generated_transcriptions))
-    # print(len(real_transcriptions))
-    mean_cer = 0.0
-    ctr = 0
-    for idx in range(len(generated_transcriptions)):
-        t1 = generated_transcriptions[idx]
-        t2 = real_transcriptions[idx]
-        print("gen", t1)
-        print("real", t2)
-        if len(t1) > 0 and len(t2) > 0:
-            cer = (1.0 * editdistance.eval(t1, t2)) / max(len(t1), len(t2))
-        else:
-            cer = 1.0
-        ctr += 1
-        mean_cer += cer
-    mean_cer /= ctr
-
-    return mean_cer
-
+def calculate_cer(source_transcripts, generated_transcripts, source_paths, generated_paths):
+    assert len(source_transcripts) == len(generated_transcripts)
+    cer_mean = 0.0
+    pairwise_cers = []
+    for i in range(len(source_transcripts)):
+        t1 = source_transcripts[i]
+        t2 = generated_transcripts[i]
+        cer = jiwer.cer(t1, t2)
+        pairwise_cers.append((source_paths[i], generated_paths[i], cer))
+        cer_mean += cer
+    cer_mean /= len(source_transcripts)
+    return cer_mean, pairwise_cers
 
 def calculate_eer(speaker_embeddings, mode="generated"):
     generated_embeddings = {}
@@ -120,9 +180,18 @@ def calculate_eer(speaker_embeddings, mode="generated"):
         anchor_embeddings = real_embeddings
 
     speaker_similarities = {}
+    kidx = 0
     for key in anchor_embeddings:
         speaker_sim_score = []
         alternate_keys = [k for k in real_embeddings if k != key]
+        alt_indices = []
+        for altkey in alternate_keys:
+            for aid in range(len(real_embeddings[altkey])):
+                alt_indices.append((altkey, aid))
+        
+        random.seed(kidx)
+        random.shuffle(alt_indices)
+
         for aidx, anchor_embedding in enumerate(anchor_embeddings[key]):
             for ridx, real_same_embedding in enumerate(real_embeddings[key]):
                 if mode == "real" and ridx == aidx:
@@ -134,14 +203,17 @@ def calculate_eer(speaker_embeddings, mode="generated"):
                 speaker_sim_score.append(same_score)
                 y_true.append(1)
 
-                alternate_speaker = random.choice(alternate_keys)
-                alternate_audio_idx = random.randint(0, len(real_embeddings[alternate_speaker]) - 1)
+                alternate_speaker = alt_indices[ridx][0]
+                alternate_audio_idx = alt_indices[ridx][1]
+                
                 alternate_embedding = real_embeddings[alternate_speaker][alternate_audio_idx]
                 y_score.append(get_similarity(anchor_embedding, alternate_embedding))
                 y_true.append(0)
 
         speaker_sim_score = np.mean(speaker_sim_score)
         speaker_similarities[key] = float(speaker_sim_score)
+
+        kidx += 1
 
     fpr, tpr, thresholds = roc_curve(y_true, y_score)
     _auc = auc(fpr, tpr)
@@ -186,6 +258,9 @@ def main():
 
     generated_audio_files = {}
     source_audio_files = {}
+
+    wav_featurizer_sv = WaveformFeaturizer(sample_rate=16000, int_values=False, augmentor=None)
+
     for f in os.listdir(generated_audio_dir):
         if 'targetspeaker' in f and f.endswith('.wav'):
             # f = source_1_targetspeaker_6_0.wav
@@ -242,54 +317,79 @@ def main():
     asr_model = asr_model.to(device)
     asr_model.eval()
 
+    wav2vec2_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-xlsr-53-espeak-cv-ft")
+    wav2vec2_model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-xlsr-53-espeak-cv-ft")
+    wav2vec2_model = wav2vec2_model.to(device)
+    wav2vec2_model.eval()
+
     kidx = 0
+    source_transcriptions_nemo = []
+    source_transcriptions_wav2vec2 = []
+    generated_transcriptions_nemo = []
+    generated_transcriptions_wav2vec2 = []
+    source_paths = []
+    generated_paths = []
+
     for key in gt_audio_files:
         speaker_embeddings["generated_{}".format(key)] = []
         speaker_embeddings["original_{}".format(key)] = []
-        transcriptions["generated_{}".format(key)] = []
-        transcriptions["original_{}".format(key)] = []
 
         for fp in generated_audio_files[key]:
-            # print("getting embedding for {}".format(fp))
             embedding = nemo_sv_model.get_embedding(fp)
             embedding = embedding.cpu().detach().numpy().flatten()
             speaker_embeddings["generated_{}".format(key)].append(embedding)
-            trancription = asr_model.transcribe([fp])[0]
-            # print("Transcription generated: {}".format(trancription))
-            transcriptions["generated_{}".format(key)].append(trancription)
+            trancription = transcribe_nemo(asr_model, fp)
+            transcription_wav2vec2 = transcribe_wav2vec2(wav2vec2_processor, wav2vec2_model, fp)
+
+            generated_paths.append(fp)
+            generated_transcriptions_nemo.append(trancription)
+            generated_transcriptions_wav2vec2.append(transcription_wav2vec2)
 
         for fp in source_audio_files[key]:
-            trancription = asr_model.transcribe([fp])[0]
-            # print("Transcription original: {}".format(trancription))
-            transcriptions["original_{}".format(key)].append(trancription)
+            trancription = transcribe_nemo(asr_model, fp)
+            trancription_wav2vec2 = transcribe_wav2vec2(wav2vec2_processor, wav2vec2_model, fp)
+            
+            source_paths.append(fp)
+            source_transcriptions_nemo.append(trancription)
+            source_transcriptions_wav2vec2.append(trancription_wav2vec2)
 
         for fp in gt_audio_files[key]:
-            # print("getting embedding for {}".format(fp))
-            embedding = nemo_sv_model.get_embedding(fp)
-            embedding = embedding.cpu().detach().numpy().flatten()
-            speaker_embeddings["original_{}".format(key)].append(embedding)
+            # Split the original audio into segments to get the embedding
+            embeddings = get_speaker_embedding(nemo_sv_model, wav_featurizer_sv, [fp], device=device)
+            speaker_embeddings["original_{}".format(key)] += embeddings
 
         kidx += 1
         # if kidx == 2:
         #     break
 
-    for key in transcriptions:
-        print(key, len(transcriptions[key]))
-    print("results real")
-
-    # real_eer = calculate_eer(speaker_embeddings, mode="real")
-    # print("REAL EER", real_eer)
-    # print("---------------------------------------------------------------------------------")
-    # print("results generated")
     generated_metrics = calculate_eer(speaker_embeddings, mode="generated")
-    generated_metrics['cer'] = calculate_cer(transcriptions)
+    real_metrics = calculate_eer(speaker_embeddings, mode="real")
+    cer_nemo, nemo_pairwise_cers = calculate_cer(source_transcriptions_nemo, generated_transcriptions_nemo, source_paths, generated_paths)
+    cer_wav2vec2, wav2vec2_pairwise_cers = calculate_cer(source_transcriptions_wav2vec2, generated_transcriptions_wav2vec2, source_paths, generated_paths)
+
+    generated_metrics['cer_nemo'] = cer_nemo
+    generated_metrics['cer_wav2vec2'] = cer_wav2vec2
+    generated_metrics['real_eer'] = real_metrics['eer']
+    generated_metrics['real_auc'] = real_metrics['auc']
+    generated_metrics['real_mean_speaker_similarity'] = real_metrics['mean_speaker_similarity']
 
     print(generated_metrics)
 
-    out_file_path = os.path.join(base_exp_dir, 'results_{}.json'.format(exp_name))
+    detailed_cers = {
+        'nemo': nemo_pairwise_cers,
+        'wav2vec2': wav2vec2_pairwise_cers,
+    }
 
+    out_file_path = os.path.join(base_exp_dir, 'results_{}.json'.format(exp_name))
     with open(out_file_path, 'w') as f:
         json.dump(generated_metrics, f, indent=4)
+    
+    detailed_out_path = os.path.join(base_exp_dir, 'detailed_results_{}.json'.format(exp_name))
+    with open(detailed_out_path, 'w') as f:
+        json.dump(detailed_cers, f, indent=4)
+    
+    print("Saved to {}".format(out_file_path))
+    print("Saved Detailed CERs to {}".format(detailed_out_path))
 
 
 if __name__ == '__main__':
