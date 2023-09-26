@@ -819,7 +819,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
             end_indices = {}
             # pad dec_input (B, 8, T) to 1000 timesteps
-            max_inference_timesteps = self.cfg.get('max_inference_timesteps', 1000)
+            max_inference_timesteps = self.cfg.get('max_inference_timesteps', 1200)
             dec_input = torch.nn.functional.pad(dec_input, (0, max_inference_timesteps - dec_input.shape[2]), value=0)
             dec_input_mask = torch.nn.functional.pad(
                 dec_input_mask, (0, max_inference_timesteps - dec_input_mask.shape[1]), value=1
@@ -899,9 +899,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
             # predicting audio
             batch_size = output_tokens_combined.shape[0]
+            global_batch_size = self.cfg.global_batch_size
             for i in range(batch_size):
                 audio_len = (labels[i][0] != 0).sum().item()
-                step = dataloader_idx + i
+                step = global_batch_size * batch_idx + i
                 dec_input_to_1024 = self.convert_tokens_to_range(dec_input_raw[i, :, 0:audio_len])
                 dec_input_wav = self.additional_models['encodec'].decode([[dec_input_to_1024[None], None]])[0, 0]
                 self.logger.experiment.add_audio("Inf Dec Input Wav", dec_input_wav, step, 24000)
