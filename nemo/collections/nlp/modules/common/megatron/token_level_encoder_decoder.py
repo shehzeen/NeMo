@@ -625,10 +625,12 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 enc_self_attention_relative_position_bias=encoder_self_attention_relative_position_bias,
                 dec_self_attention_relative_position_bias=decoder_self_attention_relative_position_bias,
                 dec_cross_attention_relative_position_bias=decoder_cross_attention_relative_position_bias,
+                return_all_crossattention_probs=True,
             )
 
             if self.post_process and self.add_decoder:
                 dec_output, enc_output = output  # [s, b, h]
+                dec_output, attention_probs = dec_output
                 # output_type = self.predict_output_type(enc_output)
                 # project decoder output to vocabulary-size dimensions
                 if self.share_decoder_tokens_head_embeddings:
@@ -716,7 +718,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     # [s, b] -> [b, s]
                     tokens_loss = tokens_loss.transpose(0, 1).contiguous()
 
-                    return tokens_loss, [token_logits, speech_logits_list]
+                    return tokens_loss, [token_logits, speech_logits_list, attention_probs]
                 else:
                     # [s, b, h] -> [b, s, h]
                     # If labels is None then we are in inference mode and we return the gathered logits
@@ -741,7 +743,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     all_speech_logits = torch.cat(
                         [first_layer_speech_logits, speech_logits], dim=-1
                     )  # (b, s, 1024, 8)
-                    return all_speech_logits, [token_logits, speech_logits]
+                    return all_speech_logits, [token_logits, speech_logits, attention_probs]
 
             elif self.add_decoder and not self.add_encoder:
                 decoder_output, _ = output
