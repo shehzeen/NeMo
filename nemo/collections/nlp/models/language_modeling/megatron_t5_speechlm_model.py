@@ -42,9 +42,8 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
 )
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank
-from nemo.collections.tts.parts.utils.helpers import plot_encodec_to_numpy
+from nemo.collections.tts.parts.utils.helpers import plot_encodec_to_numpy, plot_alignment_to_numpy
 from nemo.utils import AppState, logging
-
 try:
     from apex.transformer.pipeline_parallel.utils import (
         _reconfigure_microbatch_calculator,
@@ -374,12 +373,31 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             context_and_question_tokens[0, 0, i].item()
                             for i in range(context_and_question_tokens.shape[2])
                         ]
-                        input_token_list = [t for t in input_token_list if t != 0 and t < 30000]
-                        input_text = self.frozen_model.tokenizer.ids_to_text(input_token_list)
+                        input_token_list = [ (ti,t) for ti, t in enumerate(input_token_list) if t != 0 and t < 30000 ]
+                        question_si = input_token_list[0][0]
+                        question_ei = input_token_list[-1][0]
+
+                        input_text = self.frozen_model.tokenizer.ids_to_text([v[1] for v in input_token_list])
                         self.logger.experiment.add_text("Input Text", input_text, self.global_step)
 
                         token_logits = out_logits[0]
                         speech_logits_list = out_logits[1]
+                        attention_probs_list = out_logits[2] # list of (BS, 12, out_length, in_length)
+                        for lidx in range(len(attention_probs_list)):
+                            attention_probs = attention_probs_list[lidx]
+                            for _i in range(attention_probs.shape[1]):
+                                # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().numpy().T)
+                                # self.logger.experiment.add_image(
+                                #     f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
+                                # )
+
+                                # print("attention_probs[0,_i]", attention_probs[0,_i].shape, question_si, question_ei, audio_len)
+                                attention_probs_sliced = attention_probs[0,_i,0:audio_len+1,question_si:question_ei+1]
+                                alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().numpy().T)
+                                self.logger.experiment.add_image(
+                                    f"Attention Probs Layer {lidx} Head {_i} Sliced", alignment_image_sliced, self.global_step, dataformats="HWC",
+                                )
+
                         if self.frozen_model.enc_dec_model.parallel_output:
                             # Gather from tensor parallel region
                             token_logits = tensor_parallel.gather_from_tensor_model_parallel_region(token_logits)
@@ -553,7 +571,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             speech_mask=speech_mask,
             inference=True,
         )
-        first_layer_logits, speech_logits_list = output_logits  # first_layer_logits: (t,bs,vocab_size)
+        first_layer_logits, speech_logits_list, _ = output_logits  # first_layer_logits: (t,bs,vocab_size)
         if self.frozen_model.enc_dec_model.parallel_output:
             # Gather from tensor parallel region
             first_layer_logits = tensor_parallel.gather_from_tensor_model_parallel_region(first_layer_logits)
@@ -742,6 +760,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         for key in average_metrics:
             average_metrics[key] = np.mean(average_metrics[key])
             logging.info(f'Test {key}: {average_metrics[key]}')
+            self.log(f'test_{key}', average_metrics[key], prog_bar=True, rank_zero_only=True, batch_size=1)
+            self.logger.experiment.add_scalar(f'Inf Cumulative {key}', average_metrics[key], 0)
 
     def build_virtual_prompt_dataset(
         self, dataset_paths, batch_size, for_train, drop_last, shuffle, num_workers, pin_memory
@@ -846,12 +866,31 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                 output_logits_currtimestep = (
                     output_logits[:, t, :, :].permute(0, 2, 1).contiguous().view(-1, self.speech_codebook_size)
-                )  # (B*8, V)
+                )  # (B*8, V) -> (128, 1024)
+
+                # perform top k =1024 sampling with temperature
+                # temperature = self.cfg.get('temperature', 0.7)  # Set temp 0.01 for greedy decoding
+                # output_logits_currtimestep = output_logits_currtimestep / temperature
+                # output_logits_currtimestep = torch.nn.functional.softmax(output_logits_currtimestep, dim=1)
+                # output_tokens_curr_timestep = torch.multinomial(output_logits_currtimestep, num_samples=1)  # (B*8, 1)
+                # import ipdb; ipdb.set_trace()
+
+                # perform top k sampling
+                top_k = self.cfg.get('top_k', 10)
+                output_logits_currtimestep_topk = torch.topk(output_logits_currtimestep, top_k, dim=1)[0]
+                # output_logits_currtimestep_topk -> (128, 10)
+                # find indices which are not top k
+                output_indices_to_remove =  output_logits_currtimestep < output_logits_currtimestep_topk[:, -1].unsqueeze(1)
+                # output_indices_to_remove -> (128, 1024)
+                output_tokens_curr_timestep = output_logits_currtimestep.clone()
+                output_tokens_curr_timestep[output_indices_to_remove] = -float('Inf')
                 temperature = self.cfg.get('temperature', 0.7)  # Set temp 0.01 for greedy decoding
-                output_logits_currtimestep = output_logits_currtimestep / temperature
-                output_logits_currtimestep = torch.nn.functional.softmax(output_logits_currtimestep, dim=1)
-                output_tokens_curr_timestep = torch.multinomial(output_logits_currtimestep, num_samples=1)  # (B*8, 1)
-                # Convert back to (B, 8)
+                output_tokens_curr_timestep = output_tokens_curr_timestep / temperature
+                output_tokens_curr_timestep = torch.nn.functional.softmax(output_tokens_curr_timestep, dim=1)
+                output_tokens_curr_timestep = torch.multinomial(output_tokens_curr_timestep, num_samples=1)  # (B*8, 1)                               
+                
+
+                # Convert back to (B, 8) 
                 output_tokens_curr_timestep = output_tokens_curr_timestep.view(output_logits.shape[0], 8)
 
                 for _b in range(token_preds.shape[0]):
