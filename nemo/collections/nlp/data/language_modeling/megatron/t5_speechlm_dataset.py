@@ -79,6 +79,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         speech_offset: Optional[int] = None,
         train_task: Optional[str] = None,
         seq_pattern: Optional[str] = "parallel",
+        use_attention_prior: Optional[bool] = False,
         **kwargs,
     ):
         """
@@ -116,6 +117,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         self.trim_hop_length = trim_hop_length if trim_hop_length is not None else 512
         self.speech_offset = speech_offset if speech_offset is not None else 3
         self.seq_pattern = seq_pattern
+        self.use_attention_prior = use_attention_prior
 
         # Initialize sup_data_path, sup_data_types and run preprocessing methods for every supplementary data type
         if sup_data_path is not None:
@@ -395,14 +397,13 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                     dec_labels_len = torch.tensor(dec_labels.shape[1]).long()
 
             enc_len = context_tokens_len + question_tokens_len + virtual_tokens_len
-            cross_attention_prior = torch.zeros(dec_labels_len, enc_len)
             # TODO: Remove hardcoding
             num_question_offset = 4 # For "Text to Speech this"
             
-            cross_attention_question_prior = torch.from_numpy(beta_binomial_prior_distribution(question_tokens_len.item()-num_question_offset, dec_labels_len.item()))
-            # print("cross_attention_question_prior", cross_attention_question_prior.shape, cross_attention_question_prior.min(), cross_attention_question_prior.max())
-            cross_attention_prior[:,virtual_tokens_len+context_tokens_len+num_question_offset:] = cross_attention_question_prior
-            # print("cross_attention_prior", cross_attention_prior.shape, cross_attention_prior.min(), cross_attention_prior.max())
+            cross_attention_prior = torch.zeros(dec_labels_len, enc_len)
+            if self.use_attention_prior:
+                cross_attention_question_prior = torch.from_numpy(beta_binomial_prior_distribution(question_tokens_len.item()-num_question_offset, dec_labels_len.item()))
+                cross_attention_prior[:,virtual_tokens_len+context_tokens_len+num_question_offset:] = cross_attention_question_prior
 
             return (
                 taskname_id,

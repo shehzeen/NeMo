@@ -206,6 +206,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         # For NeMo-Megatron, the sequence starts with <bos>, which is never masked so we can always set index 0 to be unmasked.
         dec_mask[:, 0] = 1
 
+        
+        if not self.cfg.data.get('use_attention_prior', False):
+            cross_attention_prior = None
+        
         # Call forward on T5 model with preprocessed embeddings
         if self.autocast_dtype == torch.float32:
             output, out_logits = self.frozen_model.enc_dec_model(
@@ -805,6 +809,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             speech_offset=self.cfg.data.get('speech_offset', None),
             train_task=self.cfg.data.get('train_task', "tts"),
             seq_pattern=self.cfg.seq_pattern,
+            use_attention_prior=self.cfg.data.get('use_attention_prior', False),
         )
 
         rank = parallel_state.get_data_parallel_rank()
