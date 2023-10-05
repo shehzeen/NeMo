@@ -938,7 +938,12 @@ class CoreAttention(MegatronModule):
         attention_scores = matmul_result.view(b, np, sq, sk)
 
         if attention_bias is not None:
+            # print("Attention Bias!", attention_bias.shape)
+            # print("Orig attention scores", attention_scores.min(), attention_scores.max())
+            # print("Attention bias", attention_bias.min(), attention_bias.max())
             attention_scores += attention_bias
+            # attention_scores = attention_bias
+            # print("New attention scores", attention_scores.min(), attention_scores.max())
 
         _attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
         # This is actually dropping out entire tokens to attend to, which might
@@ -960,6 +965,7 @@ class CoreAttention(MegatronModule):
         context_layer = rearrange(context_layer, '(b np) sq hn -> b np sq hn', np=np)
 
         if return_scores:
+            # import ipdb; ipdb.set_trace()
             return context_layer, _attention_probs
         else:
             return context_layer

@@ -524,6 +524,8 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
         enc_input=None,  # Result of running encoder embedding only
         output_enc_hidden_only=False,
         speech_mask=None,
+        cross_attention_prior=None,
+        global_step=None,
     ):
         """
         Return value is per token / per dimension (i.e., non collapsed loss value)
@@ -610,6 +612,22 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     )
                 else:
                     decoder_cross_attention_relative_position_bias = None
+            
+            if cross_attention_prior is not None:
+                # cross_attention_prior shape [B, dec_len, enc_len]
+                # Repeat it to make it [B, 12, dec_len, enc_len]
+                num_attention_heads = 12
+                prior_scaling_factor = 1.0
+                prior_end_step = 50000
+                prior_scaledown_start_step = 10000
+                if prior_end_step >= prior_end_step:
+                    prior_scaling_factor = 0.0
+                elif global_step > prior_scaledown_start_step and global_step < prior_end_step:
+                    # Scale down the prior factor from 1.0 to 0.0 from Step 10k to 50k
+                    prior_scaling_factor = (50000.0 - global_step) / 40000.0
+                print("global_step", global_step, "prior_scaling_factor", prior_scaling_factor)
+                decoder_cross_attention_relative_position_bias = prior_scaling_factor * cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
+                # import ipdb; ipdb.set_trace()
 
             output = self.enc_dec_model(
                 enc_input=enc_input,
