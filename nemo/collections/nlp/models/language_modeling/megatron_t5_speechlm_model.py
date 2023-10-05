@@ -393,18 +393,18 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         token_logits = out_logits[0]
                         speech_logits_list = out_logits[1]
 
-                        if self.trainer.global_step % 500:
+                        if self.trainer.global_step % 500 == 0:
                             attention_probs_list = out_logits[2] # list of (BS, 12, out_length, in_length)
                             for lidx in range(len(attention_probs_list)):
                                 attention_probs = attention_probs_list[lidx]
                                 for _i in range(attention_probs.shape[1]):
-                                    # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().numpy().T)
+                                    # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
                                     # self.logger.experiment.add_image(
                                     #     f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
                                     # )
                                     # print("attention_probs[0,_i]", attention_probs[0,_i].shape, question_si, question_ei, audio_len)
                                     attention_probs_sliced = attention_probs[0,_i,0:audio_len+1,question_si:question_ei+1]
-                                    alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().numpy().T)
+                                    alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().float().numpy().T)
                                     self.logger.experiment.add_image(
                                         f"Attention Probs Layer {lidx} Head {_i} Sliced", alignment_image_sliced, self.global_step, dataformats="HWC",
                                     )
