@@ -93,6 +93,7 @@ model:
     add_eos: true
     add_bos: false
     use_attention_prior: false
+    attention_prior_scaling_factor: 1.0
     decoder_starts_with_pad: False
     add_eos_to_decoder_output: True
     add_sentinel_to_input: True

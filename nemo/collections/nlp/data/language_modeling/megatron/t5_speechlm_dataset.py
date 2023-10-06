@@ -80,6 +80,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         train_task: Optional[str] = None,
         seq_pattern: Optional[str] = "parallel",
         use_attention_prior: Optional[bool] = False,
+        attention_prior_scaling_factor: Optional[float] = 1.0,
         **kwargs,
     ):
         """
@@ -118,6 +119,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         self.speech_offset = speech_offset if speech_offset is not None else 3
         self.seq_pattern = seq_pattern
         self.use_attention_prior = use_attention_prior
+        self.attention_prior_scaling_factor = attention_prior_scaling_factor
 
         # Initialize sup_data_path, sup_data_types and run preprocessing methods for every supplementary data type
         if sup_data_path is not None:
@@ -402,7 +404,12 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             
             cross_attention_prior = torch.zeros(dec_labels_len, enc_len)
             if self.use_attention_prior:
-                cross_attention_question_prior = torch.from_numpy(beta_binomial_prior_distribution(question_tokens_len.item()-num_question_offset, dec_labels_len.item()))
+                cross_attention_question_prior = torch.from_numpy(
+                    beta_binomial_prior_distribution(
+                        question_tokens_len.item()-num_question_offset, dec_labels_len.item(),
+                        scaling_factor=self.attention_prior_scaling_factor
+                        )
+                    )
                 cross_attention_prior[:,virtual_tokens_len+context_tokens_len+num_question_offset:] = cross_attention_question_prior
 
             return (
