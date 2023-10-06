@@ -618,13 +618,15 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 # Repeat it to make it [B, 12, dec_len, enc_len]
                 num_attention_heads = 12
                 prior_scaling_factor = 1.0
-                prior_end_step = 50000
+                prior_end_step = 20000
                 prior_scaledown_start_step = 10000
                 if global_step >= prior_end_step:
                     prior_scaling_factor = 0.0
                 elif global_step > prior_scaledown_start_step and global_step < prior_end_step:
-                    # Scale down the prior factor from 1.0 to 0.0 from Step 10k to 50k
-                    prior_scaling_factor = (prior_end_step*1. - global_step) / (prior_end_step - prior_scaledown_start_step)
+                    # Scale down the prior factor from 1.0 to 10^-9 from Step prior_scaledown_start_step to prior_end_step exponentially
+                    # Because we take log of the prior (so scale down needs to be exponential)
+                    prior_scaling_factor = 10 ** (-(global_step - prior_scaledown_start_step) / (prior_end_step - prior_scaledown_start_step) * 9)
+                    
                 print("global_step", global_step, "prior_scaling_factor", prior_scaling_factor)
                 decoder_cross_attention_relative_position_bias = prior_scaling_factor * cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
                 # import ipdb; ipdb.set_trace()
