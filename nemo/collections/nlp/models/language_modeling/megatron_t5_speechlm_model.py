@@ -863,6 +863,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             )
 
             for t in range(dec_input.shape[2] - 1):
+                if t % 10 == 0:
+                    print("Timestep {}".format(t))
                 output_logits, _, token_and_speech_logits = self.forward(
                     virtual_tokens,
                     context_and_question_tokens,
