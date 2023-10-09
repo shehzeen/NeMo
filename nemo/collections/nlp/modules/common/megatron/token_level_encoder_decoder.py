@@ -641,10 +641,6 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     decoder_cross_attention_relative_position_bias = cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
                     print("decoder_cross_attention_relative_position_bias", decoder_cross_attention_relative_position_bias.shape)
 
-            print("encoder_self_attention_relative_position_bias", encoder_self_attention_relative_position_bias)
-            print("decoder_self_attention_relative_position_bias", decoder_self_attention_relative_position_bias)
-
-
             output = self.enc_dec_model(
                 enc_input=enc_input,
                 enc_attn_mask=enc_attn_mask,
