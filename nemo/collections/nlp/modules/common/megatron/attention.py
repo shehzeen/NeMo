@@ -938,13 +938,12 @@ class CoreAttention(MegatronModule):
         attention_scores = matmul_result.view(b, np, sq, sk)
 
         if attention_bias is not None:
-            if return_scores:
-                # Return scores is True only for cross attention layers right now
-                eps = 1e-8
-                attention_bias_log = torch.log(attention_bias + eps)
-                attention_scores = torch.log_softmax(attention_scores, dim=2) + attention_bias_log
-            else:
-                attention_scores += attention_bias
+            # attention_bias is None only for cross attention layers right now
+            # TODO: make attention_bias type configurable: additive or multiplicative (log additive)
+            eps = 1e-8
+            attention_bias_log = torch.log(attention_bias + eps)
+            attention_scores = torch.log_softmax(attention_scores, dim=2) + attention_bias_log
+            # attention_scores += attention_bias
 
         _attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
         # This is actually dropping out entire tokens to attend to, which might

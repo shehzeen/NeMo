@@ -102,6 +102,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         speech_head_type = cfg.get('speech_head_type', 'token_level')  # token_level, linear
         attn_prior_scaledown_start_step = cfg.get('attn_prior_scaledown_start_step', 10000)
         attn_prior_end_step = cfg.get('attn_prior_end_step', 11000)
+        return_all_crossattention_probs = cfg.get('return_all_crossattention_probs', False)
+        num_cross_attention_heads = cfg.get('num_cross_attention_heads', 12)
 
         self.speech_offset = speech_offset
         self.speech_codebook_size = speech_codebook_size
@@ -112,6 +114,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.frozen_model.enc_dec_model.speech_head_type = speech_head_type
         self.frozen_model.enc_dec_model.attn_prior_scaledown_start_step = attn_prior_scaledown_start_step
         self.frozen_model.enc_dec_model.attn_prior_end_step = attn_prior_end_step
+        self.frozen_model.enc_dec_model.return_all_crossattention_probs = return_all_crossattention_probs
+        self.frozen_model.enc_dec_model.num_cross_attention_heads = num_cross_attention_heads
 
         # Parallel output is used only for vocab parallel cross entropy.
         self.frozen_model.enc_dec_model.parallel_output = (
@@ -401,19 +405,20 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                         if self.trainer.global_step % 500 == 0:
                             attention_probs_list = out_logits[2] # list of (BS, 12, out_length, in_length)
-                            for lidx in range(len(attention_probs_list)):
-                                attention_probs = attention_probs_list[lidx]
-                                for _i in range(attention_probs.shape[1]):
-                                    # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
-                                    # self.logger.experiment.add_image(
-                                    #     f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
-                                    # )
-                                    # print("attention_probs[0,_i]", attention_probs[0,_i].shape, question_si, question_ei, audio_len)
-                                    attention_probs_sliced = attention_probs[0,_i,0:audio_len+1,question_si:question_ei+1]
-                                    alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().float().numpy().T)
-                                    self.logger.experiment.add_image(
-                                        f"Attention Probs Layer {lidx} Head {_i} Sliced", alignment_image_sliced, self.global_step, dataformats="HWC",
-                                    )
+                            if attention_probs_list is not None:
+                                for lidx in range(len(attention_probs_list)):
+                                    attention_probs = attention_probs_list[lidx]
+                                    for _i in range(attention_probs.shape[1]):
+                                        # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
+                                        # self.logger.experiment.add_image(
+                                        #     f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
+                                        # )
+                                        # print("attention_probs[0,_i]", attention_probs[0,_i].shape, question_si, question_ei, audio_len)
+                                        attention_probs_sliced = attention_probs[0,_i,0:audio_len+1,question_si:question_ei+1]
+                                        alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().float().numpy().T)
+                                        self.logger.experiment.add_image(
+                                            f"Attention Probs Layer {lidx} Head {_i} Sliced", alignment_image_sliced, self.global_step, dataformats="HWC",
+                                        )
 
                         if self.frozen_model.enc_dec_model.parallel_output:
                             # Gather from tensor parallel region

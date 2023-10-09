@@ -148,6 +148,8 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
         self.speech_head_type = "token_level"
         self.attn_prior_scaledown_start_step = 10000
         self.attn_prior_end_step = 11000
+        self.return_all_crossattention_probs=False
+        self.num_cross_attention_heads=12 # 12 for 220m T5, 16 for 11b T5
 
         encoder_kv_channels, decoder_kv_channels = self._validate_config()
 
@@ -622,7 +624,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 # Repeat it to make it [B, 12, dec_len, enc_len]
                 attn_prior_end_step = self.attn_prior_end_step
                 attn_prior_scaledown_start_step = self.attn_prior_scaledown_start_step
-                num_attention_heads = 12
+                num_attention_heads = self.num_cross_attention_heads
                 assert attn_prior_scaledown_start_step < attn_prior_end_step
                 print("attn_prior_scaledown_start_step", attn_prior_scaledown_start_step)
                 print("attn_prior_scaledown_start_step", attn_prior_end_step)
@@ -639,6 +641,10 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     decoder_cross_attention_relative_position_bias = cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
                     print("decoder_cross_attention_relative_position_bias", decoder_cross_attention_relative_position_bias.shape)
 
+            print("encoder_self_attention_relative_position_bias", encoder_self_attention_relative_position_bias)
+            print("decoder_self_attention_relative_position_bias", decoder_self_attention_relative_position_bias)
+
+
             output = self.enc_dec_model(
                 enc_input=enc_input,
                 enc_attn_mask=enc_attn_mask,
@@ -653,12 +659,15 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 enc_self_attention_relative_position_bias=encoder_self_attention_relative_position_bias,
                 dec_self_attention_relative_position_bias=decoder_self_attention_relative_position_bias,
                 dec_cross_attention_relative_position_bias=decoder_cross_attention_relative_position_bias,
-                return_all_crossattention_probs=True,
+                return_all_crossattention_probs=self.return_all_crossattention_probs,
             )
 
             if self.post_process and self.add_decoder:
                 dec_output, enc_output = output  # [s, b, h]
-                dec_output, attention_probs = dec_output
+                if self.return_all_crossattention_probs:
+                    dec_output, attention_probs = dec_output
+                else:
+                    attention_probs = None
                 # output_type = self.predict_output_type(enc_output)
                 # project decoder output to vocabulary-size dimensions
                 if self.share_decoder_tokens_head_embeddings:
