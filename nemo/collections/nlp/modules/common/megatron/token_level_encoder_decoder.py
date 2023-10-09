@@ -631,11 +631,10 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 if global_step >= attn_prior_end_step:
                     decoder_cross_attention_relative_position_bias = None
                 elif global_step > attn_prior_scaledown_start_step and global_step < attn_prior_end_step:
-                    # Scale down the prior factor from 1.0 to 10^-9 from Step attn_prior_scaledown_start_step to attn_prior_end_step exponentially
-                    # Because we take log of the prior (so scale down needs to be exponential)
-                    prior_scaling_factor = 10 ** (-(global_step - attn_prior_scaledown_start_step) / (attn_prior_end_step - attn_prior_scaledown_start_step) * 9)
-                    print("global_step", global_step, "prior_scaling_factor", prior_scaling_factor)
-                    decoder_cross_attention_relative_position_bias = prior_scaling_factor * cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
+                    total_annealing_steps = attn_prior_end_step - attn_prior_scaledown_start_step
+                    curr_annealing_step = global_step - attn_prior_scaledown_start_step
+                    curr_cross_attention_prior = cross_attention_prior + ( (1 - cross_attention_prior) * curr_annealing_step / total_annealing_steps )
+                    decoder_cross_attention_relative_position_bias = curr_cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
                 else:
                     print("global_step", global_step, "prior_scaling_factor", 1)
                     decoder_cross_attention_relative_position_bias = cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)

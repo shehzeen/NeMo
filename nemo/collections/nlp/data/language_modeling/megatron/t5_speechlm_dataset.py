@@ -407,7 +407,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             # TODO: Remove hardcoding
             num_question_offset = 4 # For "Text to Speech this"
             
-            cross_attention_prior = torch.zeros(dec_labels_len, enc_len)
+            cross_attention_prior = torch.ones(dec_labels_len, enc_len)
             if self.use_attention_prior:
                 cross_attention_question_prior = torch.from_numpy(
                     beta_binomial_prior_distribution(
@@ -777,7 +777,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                     cross_attention_prior,
                     pad=(0, _p1, 0, _p0),
                     mode="constant",
-                    value=0,
+                    value=1,
                 )
                 cross_attention_prior_list.append(cross_attention_prior_padded)
 
