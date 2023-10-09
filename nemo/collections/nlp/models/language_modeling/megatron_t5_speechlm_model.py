@@ -879,6 +879,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             speech_offset=self.cfg.data.get('speech_offset', None),
             train_task=self.cfg.data.get('train_task', "tts"),
             seq_pattern=self.cfg.get('seq_pattern', 'delay_parallel'),
+            use_attention_prior=self.cfg.data.get('use_attention_prior', False),
+            attention_prior_scaling_factor=self.cfg.data.get('attention_prior_scaling_factor', 1.0),
         )
 
         rank = parallel_state.get_data_parallel_rank()
