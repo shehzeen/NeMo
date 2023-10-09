@@ -141,9 +141,13 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
         self.share_token_embeddings = share_token_embeddings
         self.share_decoder_tokens_head_embeddings = share_decoder_tokens_head_embeddings
         self.tokens_head_bias = tokens_head_bias
+        
+        # Overridden in MegatronT5SpeechLMModel constructor
         self.cross_entropy_type = "vocab_parallel"
         self.seq_pattern = "parallel"
         self.speech_head_type = "token_level"
+        self.attn_prior_scaledown_start_step = 10000
+        self.attn_prior_end_step = 11000
 
         encoder_kv_channels, decoder_kv_channels = self._validate_config()
 
@@ -616,22 +620,24 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
             if cross_attention_prior is not None:
                 # cross_attention_prior shape [B, dec_len, enc_len]
                 # Repeat it to make it [B, 12, dec_len, enc_len]
+                attn_prior_end_step = self.attn_prior_end_step
+                attn_prior_scaledown_start_step = self.attn_prior_scaledown_start_step
                 num_attention_heads = 12
-                prior_scaling_factor = 1.0
-                prior_end_step = 11000
-                prior_scaledown_start_step = 10000
-                if global_step >= prior_end_step:
+                assert attn_prior_scaledown_start_step < attn_prior_end_step
+                print("attn_prior_scaledown_start_step", attn_prior_scaledown_start_step)
+                print("attn_prior_scaledown_start_step", attn_prior_end_step)
+                if global_step >= attn_prior_end_step:
                     decoder_cross_attention_relative_position_bias = None
-                elif global_step > prior_scaledown_start_step and global_step < prior_end_step:
-                    # Scale down the prior factor from 1.0 to 10^-9 from Step prior_scaledown_start_step to prior_end_step exponentially
+                elif global_step > attn_prior_scaledown_start_step and global_step < attn_prior_end_step:
+                    # Scale down the prior factor from 1.0 to 10^-9 from Step attn_prior_scaledown_start_step to attn_prior_end_step exponentially
                     # Because we take log of the prior (so scale down needs to be exponential)
-                    prior_scaling_factor = 10 ** (-(global_step - prior_scaledown_start_step) / (prior_end_step - prior_scaledown_start_step) * 9)
+                    prior_scaling_factor = 10 ** (-(global_step - attn_prior_scaledown_start_step) / (attn_prior_end_step - attn_prior_scaledown_start_step) * 9)
                     print("global_step", global_step, "prior_scaling_factor", prior_scaling_factor)
                     decoder_cross_attention_relative_position_bias = prior_scaling_factor * cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
                 else:
                     print("global_step", global_step, "prior_scaling_factor", 1)
                     decoder_cross_attention_relative_position_bias = cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
-                # import ipdb; ipdb.set_trace()
+                    print("decoder_cross_attention_relative_position_bias", decoder_cross_attention_relative_position_bias.shape)
 
             output = self.enc_dec_model(
                 enc_input=enc_input,
