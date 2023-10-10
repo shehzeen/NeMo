@@ -81,6 +81,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         seq_pattern: Optional[str] = "parallel",
         use_attention_prior: Optional[bool] = False,
         attention_prior_scaling_factor: Optional[float] = 1.0,
+        cross_attention_epsilon: Optional[float] = 0.0,
         **kwargs,
     ):
         """
@@ -120,6 +121,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         self.seq_pattern = seq_pattern
         self.use_attention_prior = use_attention_prior
         self.attention_prior_scaling_factor = attention_prior_scaling_factor
+        self.cross_attention_epsilon = cross_attention_epsilon # value of prior for context tokens (b/w 0 and 1)
+        assert self.cross_attention_epsilon >= 0.0 and self.cross_attention_epsilon <= 1.0
 
         # Initialize sup_data_path, sup_data_types and run preprocessing methods for every supplementary data type
         if sup_data_path is not None:
@@ -407,7 +410,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             # TODO: Remove hardcoding
             num_question_offset = 4 # For "Text to Speech this"
             
-            cross_attention_prior = torch.ones(dec_labels_len, enc_len)
+            cross_attention_prior = torch.zeros(dec_labels_len, enc_len) + self.cross_attention_epsilon
             if self.use_attention_prior:
                 cross_attention_question_prior = torch.from_numpy(
                     beta_binomial_prior_distribution(

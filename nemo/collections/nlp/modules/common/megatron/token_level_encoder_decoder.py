@@ -633,7 +633,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 elif global_step > attn_prior_scaledown_start_step and global_step < attn_prior_end_step:
                     total_annealing_steps = attn_prior_end_step - attn_prior_scaledown_start_step
                     curr_annealing_step = global_step - attn_prior_scaledown_start_step
-                    curr_cross_attention_prior = cross_attention_prior + ( (1 - cross_attention_prior) * curr_annealing_step / total_annealing_steps )
+                    curr_cross_attention_prior = cross_attention_prior + ( (1. - cross_attention_prior) * curr_annealing_step / total_annealing_steps )
                     decoder_cross_attention_relative_position_bias = curr_cross_attention_prior.unsqueeze(1).repeat(1, num_attention_heads, 1, 1)
                 else:
                     print("global_step", global_step, "prior_scaling_factor", 1)

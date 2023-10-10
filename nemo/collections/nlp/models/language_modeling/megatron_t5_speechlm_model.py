@@ -409,11 +409,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                 for lidx in range(len(attention_probs_list)):
                                     attention_probs = attention_probs_list[lidx]
                                     for _i in range(attention_probs.shape[1]):
-                                        # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
-                                        # self.logger.experiment.add_image(
-                                        #     f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
-                                        # )
-                                        # print("attention_probs[0,_i]", attention_probs[0,_i].shape, question_si, question_ei, audio_len)
+                                        alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
+                                        self.logger.experiment.add_image(
+                                            f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
+                                        )
+                                        
                                         attention_probs_sliced = attention_probs[0,_i,0:audio_len+1,question_si:question_ei+1]
                                         alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().float().numpy().T)
                                         self.logger.experiment.add_image(
@@ -823,6 +823,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             seq_pattern=self.cfg.seq_pattern,
             use_attention_prior=self.cfg.data.get('use_attention_prior', False),
             attention_prior_scaling_factor=self.cfg.data.get('attention_prior_scaling_factor', 1.0),
+            cross_attention_epsilon=self.cfg.data.get('cross_attention_epsilon', 0.0),
         )
 
         rank = parallel_state.get_data_parallel_rank()
@@ -881,6 +882,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             seq_pattern=self.cfg.get('seq_pattern', 'delay_parallel'),
             use_attention_prior=self.cfg.data.get('use_attention_prior', False),
             attention_prior_scaling_factor=self.cfg.data.get('attention_prior_scaling_factor', 1.0),
+            cross_attention_epsilon=self.cfg.data.get('cross_attention_epsilon', 0.0),
         )
 
         rank = parallel_state.get_data_parallel_rank()

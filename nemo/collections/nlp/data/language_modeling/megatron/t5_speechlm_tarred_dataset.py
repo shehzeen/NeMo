@@ -90,6 +90,7 @@ class T5SpeechLMTarredDataset(_TarredInstructionTuningDataset):
         return_sample_id: bool = False,
         use_attention_prior: Optional[bool] = False,
         attention_prior_scaling_factor: Optional[float] = 1.0,
+        cross_attention_epsilon: Optional[float] = 0.0,
         **kwargs,
     ):
         """
@@ -130,6 +131,8 @@ class T5SpeechLMTarredDataset(_TarredInstructionTuningDataset):
         self.max_duration = kwargs.get('max_duration', 20)
         self.use_attention_prior = use_attention_prior
         self.attention_prior_scaling_factor = attention_prior_scaling_factor
+        self.cross_attention_epsilon = cross_attention_epsilon # value of prior for context tokens (b/w 0 and 1)
+        assert self.cross_attention_epsilon >= 0.0 and self.cross_attention_epsilon <= 1.0
         
         self.train_task = train_task
 
@@ -375,7 +378,7 @@ class T5SpeechLMTarredDataset(_TarredInstructionTuningDataset):
             # TODO: Remove hardcoding
             num_question_offset = 4 # For "Text to Speech this"
             
-            cross_attention_prior = torch.ones(dec_labels_len, enc_len)
+            cross_attention_prior = torch.ones(dec_labels_len, enc_len) + self.cross_attention_epsilon
             if self.use_attention_prior:
                 cross_attention_question_prior = torch.from_numpy(
                     beta_binomial_prior_distribution(
