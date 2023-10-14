@@ -92,6 +92,8 @@ model:
   data:
     train_manifest: ["/Data/MLSData/MLS/audio_24khz_train_tar_3/tarred_audio_manifest.json"]
     train_audio_path: "/Data/MLSData/MLS/audio_24khz_train_tar_3/audio__OP_0..1023_CL_.tar"
+    # train_manifest: ["/Data/MLSData/MLS/audio_24khz_val_seen_tar_3/tarred_audio_manifest.json"]
+    # train_audio_path: "/Data/MLSData/MLS/audio_24khz_val_seen_tar_3/audio__OP_0..3_CL_.tar"
     validation_manifest: ["/Data/MLSData/MLS/audio_24khz_val_seen_tar_3/tarred_audio_manifest.json"]
     validation_audio_path: "/Data/MLSData/MLS/audio_24khz_val_seen_tar_3/audio__OP_0..3_CL_.tar"
     max_seq_length: 512
@@ -106,7 +108,7 @@ model:
     add_sentinel_to_input: True
     ul2_prompt_token: null # <extra_id_s>, <extra_id_r>, <extra_id_x>
     shuffle: true
-    num_workers: 4
+    num_workers: 1
     pin_memory: true
     speech_offset: 30000
     train_task: asr
