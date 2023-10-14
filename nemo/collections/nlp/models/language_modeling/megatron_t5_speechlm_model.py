@@ -69,6 +69,7 @@ except (ImportError, ModuleNotFoundError):
 
     HAVE_MEGATRON_CORE = False
 
+import jiwer
 
 __all__ = ['MegatronT5SpeechLMModel']
 
@@ -409,10 +410,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                 for lidx in range(len(attention_probs_list)):
                                     attention_probs = attention_probs_list[lidx]
                                     for _i in range(attention_probs.shape[1]):
-                                        alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
-                                        self.logger.experiment.add_image(
-                                            f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
-                                        )
+                                        # alignment_image = plot_alignment_to_numpy(attention_probs[0, _i, :, :].cpu().float().numpy().T)
+                                        # self.logger.experiment.add_image(
+                                        #     f"Attention Probs Layer {lidx} Head {_i}", alignment_image, self.global_step, dataformats="HWC",
+                                        # )
                                         
                                         attention_probs_sliced = attention_probs[0,_i,0:audio_len+1,question_si:question_ei+1]
                                         alignment_image_sliced = plot_alignment_to_numpy(attention_probs_sliced.cpu().float().numpy().T)
@@ -903,6 +904,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             else False,  # (@adithyare and @eharper) We need to set this to True to get around issues with spawn=True
         )
         print('build success', len(dataloader), dataset_paths)
+        
         return dataset, dataloader
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
@@ -964,7 +966,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 # output_logits_currtimestep = output_logits_currtimestep / temperature
                 # output_logits_currtimestep = torch.nn.functional.softmax(output_logits_currtimestep, dim=1)
                 # output_tokens_curr_timestep = torch.multinomial(output_logits_currtimestep, num_samples=1)  # (B*8, 1)
-                # import ipdb; ipdb.set_trace()
+                
 
                 # perform top k sampling
                 top_k = self.cfg.get('top_k', 10)
@@ -1025,12 +1027,39 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 os.mkdir(_exp_dir_path)
             hyp_pred_transcript_list = []
             gt_transcript_list = []
+            gt_input_text_list = []
             similarity_list = []
-
+            
             # predicting audio
             batch_size = output_tokens_combined.shape[0]
             global_batch_size = self.cfg.global_batch_size
             for i in range(batch_size):
+                
+                # context_and_question_tokens (B,8,T)
+                input_token_list = [
+                    context_and_question_tokens[i, 0, tx].item()
+                    for tx in range(context_and_question_tokens.shape[2])
+                    ]
+                input_token_list = [ (ti,t) for ti, t in enumerate(input_token_list) if t != 0 and t < 30000 ]
+                # question_si = input_token_list[0][0] + virtual_tokens.shape[1] + 4 # 4 to offset "Text to Speech this"
+                # question_ei = input_token_list[-1][0] + virtual_tokens.shape[1]
+                # import ipdb; ipdb.set_trace()
+                gt_input_text = self.frozen_model.tokenizer.ids_to_text([v[1] for v in input_token_list])
+                gt_input_text = gt_input_text.replace("Text to speech this ", "")
+                gt_input_text = gt_input_text.replace("<extra_id_0>", "")
+                gt_input_text = gt_input_text.replace(" ' ", "'")
+                gt_input_text = gt_input_text.replace(" ,", ",")
+                gt_input_text = gt_input_text.replace(" .", ".")
+                # remove commas and full stop
+                gt_input_text = jiwer.RemovePunctuation()([gt_input_text])[0]
+                gt_input_text = jiwer.RemoveMultipleSpaces()([gt_input_text])[0]
+                gt_input_text = jiwer.Strip()([gt_input_text])[0]
+                # gt_input_text = gt_input_text.trim()
+                gt_input_text = gt_input_text.lower()
+
+                
+                # self.logger.experiment.add_text("Input Text", input_text, self.global_step)
+                
                 audio_len = (labels[i][0] != 0).sum().item()
                 step = global_batch_size * batch_idx + i
                 dec_input_to_1024 = self.convert_tokens_to_range(dec_input_raw[i, :, 0:audio_len])
@@ -1075,10 +1104,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 # transcribe predicted_wav and gt_wav using asr_model
                 pred_transcript = asr_model.transcribe([audio_fp_pred])[0][0]
                 gt_transcript = asr_model.transcribe([audio_fp_gt])[0][0]
+
                 self.logger.experiment.add_text("Inf Predicted Text", pred_transcript, step)
                 self.logger.experiment.add_text("Inf GT Text", gt_transcript, step)
+                self.logger.experiment.add_text("Inf GT Input Text", gt_input_text, step)
+
                 hyp_pred_transcript_list.append(pred_transcript)
                 gt_transcript_list.append(gt_transcript)
+                gt_input_text_list.append(gt_input_text)
+
 
                 # store predicted_tokens for each layer to compute token error rate
                 for layer_idx in range(8):
@@ -1091,10 +1125,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 self.logger.experiment.add_scalar(f'Inf TER Layer {layer_idx}', wer, 0)
 
             # compute character/word error rate for predicted transcript and gt transcript
-            cer_glob = word_error_rate(hyp_pred_transcript_list, gt_transcript_list, use_cer=True)
-            self.logger.experiment.add_scalar(f'Inf CER Transcript', cer_glob, batch_idx)
-            wer_glob = word_error_rate(hyp_pred_transcript_list, gt_transcript_list, use_cer=False)
-            self.logger.experiment.add_scalar(f'Inf WER Transcript', wer_glob, batch_idx)
+            cer_gtaudio = word_error_rate(hyp_pred_transcript_list, gt_transcript_list, use_cer=True)
+            self.logger.experiment.add_scalar(f'Inf CER GT Audio', cer_gtaudio, batch_idx)
+            wer_gtaudio = word_error_rate(hyp_pred_transcript_list, gt_transcript_list, use_cer=False)
+            self.logger.experiment.add_scalar(f'Inf WER GT Audio', wer_gtaudio, batch_idx)
+
+            cer_input_text = word_error_rate(hyp_pred_transcript_list, gt_input_text_list, use_cer=True)
+            self.logger.experiment.add_scalar(f'Inf CER Input Text', cer_input_text, batch_idx)
+            wer_input_text = word_error_rate(hyp_pred_transcript_list, gt_input_text_list, use_cer=False)
+            self.logger.experiment.add_scalar(f'Inf WER Input Text', wer_input_text, batch_idx)
 
             # compute average similarity
             similarity_avg = np.mean(similarity_list)
@@ -1102,8 +1141,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
             return {
                 'sv_avg_cossim': similarity_avg,
-                'cer_transcript': cer_glob,
-                'wer_transcript': wer_glob,
+                'cer_gtaudio': cer_gtaudio,
+                'wer_gtaudio': wer_gtaudio,
+                'cer_input_text': cer_input_text,
+                'wer_input_text': wer_input_text,
             }
 
     def predict_step_old(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
@@ -1200,7 +1241,6 @@ class SimplestModule(torch.nn.Module):
         )
         # dec_prediction = torch.argmax(dec_logits, dim=-1, keepdim=True)
         out = torch.cat([dec_hidden, dec_logits, layer_index_tensor], dim=-1) * mask.T.unsqueeze(-1)
-        # import ipdb; ipdb.set_trace()
         out = torch.nn.functional.relu(self.conv(out.transpose(1, 2)))
         out = self.norm(out.transpose(1, 2))
         out = self.dropout(out) * mask.T.unsqueeze(-1)
