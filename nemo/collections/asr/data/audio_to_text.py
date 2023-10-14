@@ -41,6 +41,7 @@ from nemo.utils.data_utils import (
     is_tarred_path,
 )
 from nemo.utils.get_rank import is_global_rank_zero
+import random
 
 __all__ = [
     'AudioToCharDataset',
@@ -797,6 +798,9 @@ class _TarredInstructionTuningDataset(IterableDataset):
             world_size=world_size,
             global_rank=global_rank,
         )
+
+        custom_rng = random.Random()
+        custom_rng.shuffle(audio_tar_filepaths)
 
         self.sample_rate = sample_rate
 
