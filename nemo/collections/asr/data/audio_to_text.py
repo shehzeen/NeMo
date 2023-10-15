@@ -799,8 +799,13 @@ class _TarredInstructionTuningDataset(IterableDataset):
             global_rank=global_rank,
         )
 
-        custom_rng = random.Random()
-        custom_rng.shuffle(audio_tar_filepaths)
+        if shuffle_n > 0:
+            # Only shuffle training data tar files
+            print("Shuffling Tar files")
+            custom_rng = random.Random()
+            custom_rng.shuffle(audio_tar_filepaths)
+            print("Done shuffling Tar files")
+            print(audio_tar_filepaths[:10])
 
         self.sample_rate = sample_rate
 
