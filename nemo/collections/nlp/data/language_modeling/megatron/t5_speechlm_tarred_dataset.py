@@ -378,7 +378,7 @@ class T5SpeechLMTarredDataset(_TarredInstructionTuningDataset):
             # TODO: Remove hardcoding
             num_question_offset = 4 # For "Text to Speech this"
             
-            cross_attention_prior = torch.ones(dec_labels_len, enc_len) + self.cross_attention_epsilon
+            cross_attention_prior = torch.zeros(dec_labels_len, enc_len) + self.cross_attention_epsilon
             if self.use_attention_prior:
                 cross_attention_question_prior = torch.from_numpy(
                     beta_binomial_prior_distribution(
