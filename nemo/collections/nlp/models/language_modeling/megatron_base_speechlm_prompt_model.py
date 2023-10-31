@@ -363,6 +363,9 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
                 num_workers=self.cfg.data.num_workers,
                 pin_memory=True,
             )
+        elif self.cfg.data.get('', None):
+            self._train_ds, self._train_dl = self.build_recognition_multitask_dataset(
+            )
 
     def setup_validation_data(self, validation_data_config=None):
         if self.cfg.data.get('validation_ds', None):
