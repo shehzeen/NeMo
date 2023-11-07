@@ -178,13 +178,13 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
                 "prompt_template_fields": re.findall("\{(.*?)\}", task.prompt_template),
                 "answer_only_loss": task.get("answer_only_loss", False),
                 "answer_field": task.get("answer_field", None),
-                "truncate_field": task.truncate_field,
-                "total_virtual_tokens": task.total_virtual_tokens,
-                "virtual_token_splits": task.virtual_token_splits,
+                "truncate_field": task.get('truncate_field', None),
+                "total_virtual_tokens": task.get("total_virtual_tokens", 0),
+                "virtual_token_splits": task.get("virtual_token_splits", None),
                 "task_id_num": task_id_num,
             }
 
-            self.max_virtual_tokens = max(self.max_virtual_tokens, task.total_virtual_tokens)
+            self.max_virtual_tokens = max(self.max_virtual_tokens, task.get("total_virtual_tokens", 0))
             self.task_id_num_to_name[task_id_num] = task.taskname
             task_id_num += 1
 
@@ -192,10 +192,10 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
         # Num virtual tokens for new tasks don't need to match num used for previously tuned tasks
         if self.new_tasks:
             new_task_name = self.new_tasks[0]
-            self.total_new_task_virtual_tokens = self.task_templates[new_task_name]["total_virtual_tokens"]
+            self.total_new_task_virtual_tokens = self.task_templates[new_task_name].get("total_virtual_tokens", 0)
 
             assert all(
-                self.task_templates[taskname]["total_virtual_tokens"] == self.total_new_task_virtual_tokens
+                self.task_templates[taskname].get("total_virtual_tokens", 0) == self.total_new_task_virtual_tokens
                 for taskname in self.new_tasks
             ), "Total virtual tokens for each task tuned simultaneously must match. If you want to use a different number of virtual tokens for different tasks, tune them separately."
 
@@ -363,8 +363,15 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
                 num_workers=self.cfg.data.num_workers,
                 pin_memory=True,
             )
-        elif self.cfg.data.get('', None):
+        elif self.cfg.data.get('train_ds_recog_multitask', None):
             self._train_ds, self._train_dl = self.build_recognition_multitask_dataset(
+                file_path=self.cfg.data.train_ds_recog_multitask,
+                batch_size=self.cfg.global_batch_size,
+                for_train=True,
+                drop_last=True,
+                shuffle=self.cfg.data.shuffle,
+                num_workers=self.cfg.data.num_workers,
+                pin_memory=True,
             )
 
     def setup_validation_data(self, validation_data_config=None):
@@ -386,6 +393,16 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
                 for_train=True,
                 drop_last=self.cfg.get("validation_drop_last", True),
                 shuffle=0,
+                num_workers=self.cfg.data.num_workers,
+                pin_memory=True,
+            )
+        elif self.cfg.data.get('validation_ds_recog_multitask', None):
+            self._validation_ds, self._validation_dl = self.build_recognition_multitask_dataset(
+                file_path=self.cfg.data.validation_ds_recog_multitask,
+                batch_size=self.cfg.get("validation_global_batch_size", self.cfg.global_batch_size),
+                for_train=True,
+                drop_last=self.cfg.get("validation_drop_last", True),
+                shuffle=False,
                 num_workers=self.cfg.data.num_workers,
                 pin_memory=True,
             )

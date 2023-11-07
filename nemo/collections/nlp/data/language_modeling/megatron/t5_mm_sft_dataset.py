@@ -22,10 +22,12 @@ import torch
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.collections.nlp.data.language_modeling.megatron.gpt_sft_dataset import GPTSFTDataset
 from nemo.utils import logging
+from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
+from nemo.collections.nlp.modules.common.megatron.utils import build_position_ids
 
-__all__ = ['MMGPTSFTDataset']
+__all__ = ['MMT5SFTDataset']
 
-class MMGPTSFTDataset(GPTSFTDataset):
+class MMT5SFTDataset(GPTSFTDataset):
     """
     MultiModal GPT STF Dataset
     """
@@ -454,7 +456,9 @@ class MMGPTSFTDataset(GPTSFTDataset):
             for i, (ids, key) in enumerate(zip(template_ids, template_ids_keys)):
                 if key in truncation_fields:
                     truncation_length = truncation_length_list.pop()
-                    assert len(ids) >= truncation_length, f'{key} is not long enough to truncate.'
+                    # assert len(ids) >= truncation_length, f'{key} is not long enough to truncate.'
+                    if len(ids) < truncation_length:
+                        continue
                     if self.truncation_method == 'left':
                         window_offset = truncation_length
                     elif self.truncation_method == 'right':
@@ -572,6 +576,8 @@ class MMGPTSFTDataset(GPTSFTDataset):
 
         # store metadata in dataset, in case user may have keys required in the prediction json files
         metadata = {k: v for k, v in example.items() if k not in prompt_template_keys}
+        context_ids = context_ids[: self.max_seq_length-2] #TODO: Check why it is not truncated correctly
+        answer_ids = answer_ids[: self.max_seq_length-2]
         processed_example = {
             'input_ids': input_ids,
             'answer_start_idx': answer_start_idx,
@@ -618,12 +624,24 @@ class MMGPTSFTDataset(GPTSFTDataset):
             item = [x + [pad_id] * (max_length - len(x)) for x in item]
         return item
     
+    def get_position_ids(self, virtual_token, context_and_qquestion):
+        enc_input = []
+        enc_input.append(virtual_token)
+        if context_and_qquestion.dim() > 2:
+            enc_input.append(context_and_qquestion[:, 0, :])
+        else:
+            enc_input.append(context_and_qquestion)
+
+        enc_input = torch.cat(enc_input, dim=1)
+
+        return build_position_ids(enc_input).contiguous()
     
     def collate_fn(self, batch):
         input_ids = [item['input_ids'][:-1] for item in batch]
         labels = [item['input_ids'][1:] for item in batch]
         contexts = [item['context_ids'] for item in batch]
         context_lengths = torch.LongTensor([item['context_length'] for item in batch])
+        max_context_length = max(context_lengths).item()
         answers = [item['answer_ids'] for item in batch]
         loss_mask = [self._build_loss_mask(item)[1:] for item in batch]
         metadata = [item['metadata'] for item in batch]
@@ -643,42 +661,82 @@ class MMGPTSFTDataset(GPTSFTDataset):
         input_ids = torch.LongTensor(
             self._collate_item(input_ids, max_length=max_length, pad_id=self.tokenizer.eos_id)
         )
-        labels = torch.LongTensor(self._collate_item(labels, max_length=max_length, pad_id=self.tokenizer.eos_id))
-        loss_mask = torch.LongTensor(self._collate_item(loss_mask, max_length=max_length, pad_id=0))
-        contexts = torch.LongTensor(self._collate_item(contexts, max_length=max_length, pad_id=self.tokenizer.eos_id))
-        answers = torch.LongTensor(self._collate_item(answers, max_length=max_length, pad_id=self.tokenizer.eos_id))
 
-        # pass first codebook through regular GPT pipeline and rest through audio pipeline
-        # GPT related batch
-        processed_batch = {
-            'tokens': input_ids[:,:, 0],
-            'labels': labels[:,:, 0],
-            'attention_mask': attention_mask,
-            'loss_mask': loss_mask,
-            'position_ids': position_ids,
-            'contexts': contexts[:,:, 0],
-            'context_lengths': context_lengths,
-            'answers': answers[:,:, 0],
-            'metadata': metadata,
-        }
+        answer_lens = torch.LongTensor([len(x) for x in answers])
+        max_answer_len = max(answer_lens).item()
+        dec_input_mask = get_mask_from_lengths(answer_lens-1)
+        dec_label_mask = get_mask_from_lengths(answer_lens-1)
 
-        # audio related batch
-        if self.num_audio_codebooks >1 :
-            processed_batch_audio = {
-                'additional_tokens': input_ids[:,:, 1:],    
-                'additional_tokens_mask': (input_ids[:,:, 1:] >= self.audio_token_offset).float(), # TODO: is this the correct dtype
-                'additional_contexts': contexts[:,:, 1:],       # have to include additional_labels when doing TTS, ignoring for now
-                'additional_contexts_mask': (contexts[:,:, 1:] >= self.audio_token_offset).float(),
-            }
-        else:
-            processed_batch_audio = {
-                'additional_tokens': torch.empty(0, dtype=input_ids.dtype),
-                'additional_tokens_mask': torch.empty(0, dtype=torch.float32),      # may be change this dtype to model/trainer dtype? 
-                'additional_contexts': torch.empty(0, dtype=contexts.dtype),
-                'additional_contexts_mask': torch.empty(0, dtype=torch.float32),
-            }
+        # labels = torch.LongTensor(self._collate_item(labels, max_length=max_length, pad_id=self.tokenizer.eos_id))
+        # loss_mask = torch.LongTensor(self._collate_item(loss_mask, max_length=max_length, pad_id=0))
+        contexts = torch.LongTensor(self._collate_item(contexts, max_length=max_context_length, pad_id=self.tokenizer.pad_id))
+        answers = torch.LongTensor(self._collate_item(answers, max_length=max_answer_len, pad_id=self.tokenizer.pad_id))
 
-        # merge both 
-        processed_batch.update(processed_batch_audio)
+        dec_input = answers[:, :-1]
+        dec_labels = answers[:, 1:]
+        
+        
+        enc_mask = get_mask_from_lengths(context_lengths + 1) # +1 for virtual token
+        
 
-        return processed_batch
+        speech_mask = torch.zeros(dec_label_mask.shape)
+        taskname_ids = torch.LongTensor([-1 for _ in range(dec_input.shape[0])])
+        dummy_attention_prior = torch.zeros(dec_input.shape[0], dec_input.shape[1])
+        dummy_virtual_tokens = torch.zeros_like(contexts)[:,:1,0].long()
+        
+        for _i in range(1, 8):
+            _mask = (contexts[:,:,_i] >= self.audio_token_offset).long()
+            offset_tensor = torch.ones_like(contexts[:,:,_i]).long() * self.audio_token_offset
+            offset_tensor = offset_tensor * _mask
+            contexts[:,:,_i] = contexts[:,:,_i] - offset_tensor
+
+        position_ids = self.get_position_ids(dummy_virtual_tokens, contexts.permute(0, 2, 1))
+
+        return (
+            dummy_virtual_tokens,
+            contexts.permute(0, 2, 1),
+            enc_mask,
+            dec_input.permute(0, 2, 1),
+            dec_input_mask,
+            dec_labels.permute(0, 2, 1),
+            dec_label_mask,
+            position_ids,
+            taskname_ids,
+            speech_mask,
+            context_lengths,
+            dummy_attention_prior,
+        )
+        # # pass first codebook through regular GPT pipeline and rest through audio pipeline
+        # # GPT related batch
+        # processed_batch = {
+        #     'tokens': input_ids[:,:, 0],
+        #     'labels': labels[:,:, 0],
+        #     'attention_mask': attention_mask,
+        #     'loss_mask': loss_mask,
+        #     'position_ids': position_ids,
+        #     'contexts': contexts[:,:, 0],
+        #     'context_lengths': context_lengths,
+        #     'answers': answers[:,:, 0],
+        #     'metadata': metadata,
+        # }
+
+        # # audio related batch
+        # if self.num_audio_codebooks >1 :
+        #     processed_batch_audio = {
+        #         'additional_tokens': input_ids[:,:, 1:],    
+        #         'additional_tokens_mask': (input_ids[:,:, 1:] >= self.audio_token_offset).float(), # TODO: is this the correct dtype
+        #         'additional_contexts': contexts[:,:, 1:],       # have to include additional_labels when doing TTS, ignoring for now
+        #         'additional_contexts_mask': (contexts[:,:, 1:] >= self.audio_token_offset).float(),
+        #     }
+        # else:
+        #     processed_batch_audio = {
+        #         'additional_tokens': torch.empty(0, dtype=input_ids.dtype),
+        #         'additional_tokens_mask': torch.empty(0, dtype=torch.float32),      # may be change this dtype to model/trainer dtype? 
+        #         'additional_contexts': torch.empty(0, dtype=contexts.dtype),
+        #         'additional_contexts_mask': torch.empty(0, dtype=torch.float32),
+        #     }
+
+        # # merge both 
+        # processed_batch.update(processed_batch_audio)
+
+        # return processed_batch
