@@ -417,7 +417,7 @@ class MMT5SFTDataset(GPTSFTDataset):
         return template_strings, template_strings_keys
     
 
-    def _multiple_truncation(self, template_ids: List[List[int]], template_ids_keys: List[str], truncation_fields: List[str]):
+    def _get_context_and_label_ids(self, template_ids: List[List[int]], template_ids_keys: List[str], truncation_fields: List[str]):
         """
         Calculate total tokens and truncate multiple contexts in truncation_fields.
         
@@ -429,46 +429,7 @@ class MMT5SFTDataset(GPTSFTDataset):
             context_ids (List[int]): all context ids.
             label_ids (List[int]): all label ids.
         """
-        context_ids = template_ids[:-1]
-        label_ids = template_ids[-1]
-        total_ids = (
-            self.virtual_tokens
-            + sum(len(ids) for ids in context_ids)
-            + max(len(label_ids), self.tokens_to_generate)
-            + self.add_bos
-            + self.add_sep
-            + self.add_eos  # Only training need to consider eos token
-        )
-
-        if total_ids > self.max_seq_length:
-            truncation_length_total = total_ids - self.max_seq_length
-            num_fields = len(truncation_fields)
-            # sorted equal divide length to each field
-            # examples:
-            #   truncation_length_total = 3
-            #   num_fields = 11
-            #   truncation_length_list = [3,4,4]
-            truncation_length_list = [
-                truncation_length_total // num_fields + (1 if i < truncation_length_total % num_fields else 0)
-                for i in range(num_fields)[::-1]
-            ]
-
-            for i, (ids, key) in enumerate(zip(template_ids, template_ids_keys)):
-                if key in truncation_fields:
-                    truncation_length = truncation_length_list.pop()
-                    # assert len(ids) >= truncation_length, f'{key} is not long enough to truncate.'
-                    if len(ids) < truncation_length:
-                        continue
-                    if self.truncation_method == 'left':
-                        window_offset = truncation_length
-                    elif self.truncation_method == 'right':
-                        window_offset = 0
-                    else:
-                        raise ValueError(f'{self.truncation_method} is not supported')
-
-                    window_length = len(ids) - truncation_length
-                    template_ids[i] = ids[window_offset : window_offset + window_length]
-
+        
         context_ids = [i for ids in template_ids[:-1] for i in ids]
         label_ids = template_ids[-1]
         return context_ids, label_ids
@@ -542,7 +503,7 @@ class MMT5SFTDataset(GPTSFTDataset):
         # pad all entries to same dimension
         template_ids = self._pad_all_to_same_dims(template_ids, pad_id=self.tokenizer.pad_id)
         
-        context_ids, answer_ids = self._multiple_truncation(template_ids, template_strings_keys, truncation_fields=truncation_keys)
+        context_ids, answer_ids = self._get_context_and_label_ids(template_ids, template_strings_keys, truncation_fields=truncation_keys)
 
         if self.virtual_tokens:
             # (@adithyare) we are going to insert "pad/eos" tokens in the beginning of the text and context
@@ -570,16 +531,17 @@ class MMT5SFTDataset(GPTSFTDataset):
         if self.add_eos:
             input_ids = input_ids + [[self.tokenizer.eos_id] * self.num_audio_codebooks]
 
-        if len(input_ids) > self.max_seq_length:
-            logging.warning(f'Input ids length {len(input_ids)} exceed max sequence length {self.max_seq_length}')
-            input_ids = input_ids[: self.max_seq_length]
-
         # store metadata in dataset, in case user may have keys required in the prediction json files
         metadata = {k: v for k, v in example.items() if k not in prompt_template_keys}
-        context_ids = context_ids[: self.max_seq_length-2] #TODO: Check why it is not truncated correctly
-        answer_ids = answer_ids[: self.max_seq_length-2]
+        if len(context_ids) > self.max_seq_length:
+            logging.warning(f'context_ids {len(context_ids)} exceed max sequence length {self.max_seq_length}')
+            context_ids = context_ids[: self.max_seq_length-2]
+        if len(answer_ids) > self.max_seq_length:
+            logging.warning(f'answer_ids {len(answer_ids)} exceed max sequence length {self.max_seq_length}')
+            answer_ids = answer_ids[: self.max_seq_length-2]
+
         processed_example = {
-            'input_ids': input_ids,
+            'input_ids': input_ids[:self.max_seq_length], # Not used by the T5 model.
             'answer_start_idx': answer_start_idx,
             'context_ids': context_ids,
             'context_length': len(context_ids),
@@ -706,37 +668,3 @@ class MMT5SFTDataset(GPTSFTDataset):
             context_lengths,
             dummy_attention_prior,
         )
-        # # pass first codebook through regular GPT pipeline and rest through audio pipeline
-        # # GPT related batch
-        # processed_batch = {
-        #     'tokens': input_ids[:,:, 0],
-        #     'labels': labels[:,:, 0],
-        #     'attention_mask': attention_mask,
-        #     'loss_mask': loss_mask,
-        #     'position_ids': position_ids,
-        #     'contexts': contexts[:,:, 0],
-        #     'context_lengths': context_lengths,
-        #     'answers': answers[:,:, 0],
-        #     'metadata': metadata,
-        # }
-
-        # # audio related batch
-        # if self.num_audio_codebooks >1 :
-        #     processed_batch_audio = {
-        #         'additional_tokens': input_ids[:,:, 1:],    
-        #         'additional_tokens_mask': (input_ids[:,:, 1:] >= self.audio_token_offset).float(), # TODO: is this the correct dtype
-        #         'additional_contexts': contexts[:,:, 1:],       # have to include additional_labels when doing TTS, ignoring for now
-        #         'additional_contexts_mask': (contexts[:,:, 1:] >= self.audio_token_offset).float(),
-        #     }
-        # else:
-        #     processed_batch_audio = {
-        #         'additional_tokens': torch.empty(0, dtype=input_ids.dtype),
-        #         'additional_tokens_mask': torch.empty(0, dtype=torch.float32),      # may be change this dtype to model/trainer dtype? 
-        #         'additional_contexts': torch.empty(0, dtype=contexts.dtype),
-        #         'additional_contexts_mask': torch.empty(0, dtype=torch.float32),
-        #     }
-
-        # # merge both 
-        # processed_batch.update(processed_batch_audio)
-
-        # return processed_batch

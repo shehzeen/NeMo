@@ -68,49 +68,44 @@ model:
   language_model_path: ??? # Path to the pretrained T5 language model .nemo file, always required
   save_nemo_on_validation_end: True # Saves an inference ready .nemo file every time a checkpoint is saved during training. 
   existing_tasks: []
-  new_tasks: ["squad"] 
+  new_tasks: ["asr", "target_speaker_asr", "speaker_verification", "speaker_attributed_asr", "translation"] 
 
 
   task_templates: 
-  - taskname: "squad" # Ignore this task, just kept for some backward compatibility
-    prompt_template: "<|VIRTUAL_PROMPT_0|> {context} {question} {answer}" 
-    total_virtual_tokens: 3
-    virtual_token_splits: [3] 
-    truncate_field: context
-    answer_field: answer
-    truncation_keys: "context"
-    audio_keys: "context"
-    answer_key: "answer"
-
   - taskname: "asr"
     prompt_template: "Context: {audio_codes} Question: {question} Answer: {text}"
     truncation_keys: "audio_codes"
     audio_keys: "audio_codes"
     answer_key: "text"
+    total_virtual_tokens: 1
 
   - taskname: "target_speaker_asr"
     prompt_template: "Context: {audio_codes} SpeakerPrompt: {speaker_prompt} Question: {question} Answer: {text}"
     truncation_keys: "audio_codes"
     audio_keys: "audio_codes,speaker_prompt"
     answer_key: "text"
+    total_virtual_tokens: 1
 
   - taskname: "speaker_verification"
     prompt_template: "Context: AudioSample_1: {audio_codes1} AudioSample_2: {audio_codes2} Question: {question} Answer: {answer}"
     truncation_keys: "audio_codes1"
     audio_keys: "audio_codes1,audio_codes2"
     answer_key: "answer"
+    total_virtual_tokens: 1
 
   - taskname: "speaker_attributed_asr"
     prompt_template: "Context: {audio_codes1}{audio_codes2} Speaker1_Name: {speaker1_id} Speaker1_Prompt: {speaker1_prompt} Speaker2_Name: {speaker2_id} Speaker2_Prompt: {speaker2_prompt} Question: {question} Answer: {answer}"
     truncation_keys: "audio_codes1,audio_codes2"
     audio_keys: "audio_codes1,audio_codes2,speaker1_prompt,speaker2_prompt"
     answer_key: "answer"
+    total_virtual_tokens: 1
 
   - taskname: "translation"
     prompt_template: "Context: {context} Question: {question} Answer: {answer}"
     truncation_keys: "context"
     audio_keys: null
     answer_key: "answer"
+    total_virtual_tokens: 1
 
   p_tuning: # P-tuning specific params
       encoder_type: "mlp" # Either "mlp" or "lstm", mlp is default

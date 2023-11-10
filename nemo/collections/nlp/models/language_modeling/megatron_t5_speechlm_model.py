@@ -406,6 +406,31 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             score /= text_labels.size()[0]
                             print(f"wer score : {score}")
                             self.logger.experiment.add_scalar('WER', score, self.global_step)
+
+                            input_token_list = [
+                                context_and_question_tokens[0, 0, i].item()
+                                for i in range(context_and_question_tokens.shape[2])
+                            ]
+                            input_text_token_list = [
+                                (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < self.speech_offset
+                            ]
+                            context_token_timesteps = [
+                                ti for ti, t in enumerate(input_token_list) if t > self.speech_offset
+                            ]
+                            _context_tokens = context_and_question_tokens[0][:, context_token_timesteps[0]:context_token_timesteps[-1]].clone()
+                            _context_tokens[0] = _context_tokens[0] - self.speech_offset
+                            _context_tokens = torch.clamp(_context_tokens, min=0, max=1023)
+                            _context_wav = self.additional_models['encodec'].decode([[_context_tokens[None], None]])[
+                                0, 0
+                            ]
+                            self.logger.experiment.add_audio("Context Wav", _context_wav, self.global_step, 24000)
+                            input_text = self.frozen_model.tokenizer.ids_to_text([v[1] for v in input_text_token_list])
+                            self.logger.experiment.add_text("Input Text", input_text, self.global_step)
+                            
+                            label_token_list = [labels[0,0,i].item() for i in range(labels.shape[2])]
+                            label_token_list = [t for t in label_token_list if t != 0 and t < self.speech_offset]
+                            label_text = self.frozen_model.tokenizer.ids_to_text(label_token_list)
+                            self.logger.experiment.add_text("Label Text", label_text, self.global_step)
                         else:
                             audio_len = (labels[0][0] != 0).sum().item()
                             labels_to_1024 = self.convert_tokens_to_range(labels[0, :, 0:audio_len])
@@ -1002,11 +1027,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             task_templates=self.cfg.data.get('task_templates', None),
         )
         
+        rank = parallel_state.get_data_parallel_rank()
         world_size = parallel_state.get_data_parallel_world_size()
         
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset, num_replicas=world_size, rank=rank, shuffle=shuffle, seed=self.cfg.seed
+        )
+
         dataloader = torch.utils.data.DataLoader(
             dataset,
             collate_fn=dataset.collate_fn,
+            sampler=sampler,
             batch_size=batch_size // world_size,
             drop_last=drop_last,
             num_workers=num_workers,
@@ -1015,12 +1046,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             if num_workers > 0
             else False,  # (@adithyare and @eharper) We need to set this to True to get around issues with spawn=True
         )
+
         print('build success', len(dataloader), file_path)
 
-        # import ipdb; ipdb.set_trace()
         return dataset, dataloader
-        
-
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         with torch.no_grad():
