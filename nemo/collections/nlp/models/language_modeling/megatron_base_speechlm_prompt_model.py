@@ -365,7 +365,8 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
             )
         elif self.cfg.data.get('train_ds_recog_multitask', None):
             self._train_ds, self._train_dl = self.build_recognition_multitask_dataset(
-                file_path=self.cfg.data.train_ds_recog_multitask,
+                file_paths=self.cfg.data.train_ds_recog_multitask,
+                concat_sampling_probabilities=self.cfg.data.train_ds_concat_sampling_probabilities,
                 batch_size=self.cfg.global_batch_size,
                 for_train=True,
                 drop_last=True,
@@ -398,9 +399,10 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
             )
         elif self.cfg.data.get('validation_ds_recog_multitask', None):
             self._validation_ds, self._validation_dl = self.build_recognition_multitask_dataset(
-                file_path=self.cfg.data.validation_ds_recog_multitask,
+                file_paths=self.cfg.data.validation_ds_recog_multitask,
+                concat_sampling_probabilities=None,
                 batch_size=self.cfg.get("validation_global_batch_size", self.cfg.global_batch_size),
-                for_train=True,
+                for_train=False,
                 drop_last=self.cfg.get("validation_drop_last", True),
                 shuffle=False,
                 num_workers=self.cfg.data.num_workers,
@@ -426,6 +428,17 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
                 for_train=False,
                 drop_last=False,
                 shuffle=0,
+                num_workers=self.cfg.data.num_workers,
+                pin_memory=True,
+            )
+        elif self.cfg.data.get('test_ds_recog_multitask', None):
+            self._test_ds, self._test_dl = self.build_recognition_multitask_dataset(
+                file_paths=self.cfg.data.test_ds_recog_multitask,
+                concat_sampling_probabilities=None,
+                batch_size=self.cfg.get("validation_global_batch_size", self.cfg.global_batch_size),
+                for_train=False,
+                drop_last=self.cfg.get("validation_drop_last", True),
+                shuffle=False,
                 num_workers=self.cfg.data.num_workers,
                 pin_memory=True,
             )

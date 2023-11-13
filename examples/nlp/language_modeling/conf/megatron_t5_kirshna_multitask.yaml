@@ -117,8 +117,9 @@ model:
     new_prompt_init_text: ['some init text goes here'] # some init text if init method is text, or None if init method is random
 
   data:
-    train_ds_recog_multitask: ["/data/LibriSpeech/dev_filtered.json"]
+    train_ds_recog_multitask: ["/data/LibriSpeech/dev_filtered.json", "/data/LibriSpeech/dev_filtered.json"]
     validation_ds_recog_multitask: ["/data/LibriSpeech/dev_filtered.json"]
+    train_ds_concat_sampling_probabilities: [0.5, 0.5]
     
     sample_rate: 24000
     
