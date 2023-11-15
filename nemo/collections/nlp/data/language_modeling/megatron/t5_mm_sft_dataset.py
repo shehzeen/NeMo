@@ -531,6 +531,10 @@ class MMT5SFTDataset(GPTSFTDataset):
         if self.add_eos:
             input_ids = input_ids + [[self.tokenizer.eos_id] * self.num_audio_codebooks]
 
+        # Add EOS and BOS Ids to answer 
+        answer_ids = answer_ids + [[self.tokenizer.eos_id] * self.num_audio_codebooks]
+        answer_ids = [[self.tokenizer.bos_id] * self.num_audio_codebooks] + answer_ids
+        
         # store metadata in dataset, in case user may have keys required in the prediction json files
         metadata = {k: v for k, v in example.items() if k not in prompt_template_keys}
         if len(context_ids) > self.max_seq_length:
