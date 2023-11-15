@@ -537,10 +537,10 @@ class MMT5SFTDataset(GPTSFTDataset):
         
         # store metadata in dataset, in case user may have keys required in the prediction json files
         metadata = {k: v for k, v in example.items() if k not in prompt_template_keys}
-        if len(context_ids) > self.max_seq_length:
+        if len(context_ids) > (self.max_seq_length-2):
             logging.warning(f'context_ids {len(context_ids)} exceed max sequence length {self.max_seq_length}')
             context_ids = context_ids[: self.max_seq_length-2]
-        if len(answer_ids) > self.max_seq_length:
+        if len(answer_ids) > (self.max_seq_length-2):
             logging.warning(f'answer_ids {len(answer_ids)} exceed max sequence length {self.max_seq_length}')
             answer_ids = answer_ids[: self.max_seq_length-2]
 
