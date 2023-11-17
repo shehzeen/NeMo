@@ -777,7 +777,13 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                             )  # T, B, 1024
 
                     token_logits = token_logits.transpose(0, 1).contiguous()  # (B, T, 30208)
-                    speech_logits = torch.stack(speech_logits_list, dim=-1)  # T, B, 1024, 7
+                    if len(speech_logits_list) > 0:
+                        speech_logits = torch.stack(speech_logits_list, dim=-1)  # T, B, 1024, 7
+                    else:
+                        speech_logits = torch.ones(token_logits.shape[1], token_logits.shape[0], 1024, speech_layers).to(
+                            token_logits.device
+                        ) # dummy speech logits
+
                     speech_logits = speech_logits.transpose(0, 1).contiguous()  # (B, T, 1024, 7)
 
                     _si = self.speech_offset

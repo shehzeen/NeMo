@@ -1110,6 +1110,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 dec_input_mask, (0, max_inference_timesteps - dec_input_mask.shape[1]), value=1
             )
 
+            hyp_pred_transcript_list = []
+            gt_transcript_list = []
+
             for t in range(dec_input.shape[2] - 1):
                 if t % 10 == 0:
                     print("Timestep {}".format(t))
@@ -1171,6 +1174,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             print("End detected for item {}".format(_b) + " at timestep {}".format(t))
                             end_indices[_b] = t
 
+
                 output_token_list.append(output_tokens_curr_timestep)
 
                 if torch.count_nonzero(speech_mask) > 0:
@@ -1181,13 +1185,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     dec_input[:, :, t + 1] = dec_input_next_timestep * 1
                 else:
                     dec_input[:, 0, t + 1] = output_tokens_curr_timestep.squeeze(1)
+                
+                if len(end_indices) == token_preds.shape[0]:
+                    print("All items ended")
+                    break
 
             output_tokens_combined = torch.stack(output_token_list)  # (T, B, 8) if speech else (T, B)
             if torch.count_nonzero(speech_mask) > 0:
                 output_tokens_combined = output_tokens_combined.permute(1, 2, 0)  # (B, 8, T)
             else:
                 output_tokens_combined = output_tokens_combined.squeeze(2)
-                output_tokens_combined = output_tokens_combined.permute(1, 0)  # (B, T)
+                output_tokens_combined = output_tokens_combined.permute(1, 0)  # (B, T)    
 
             # Layerwise token error rate
             ter_dict = {}
@@ -1195,24 +1203,23 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 ter_dict[i] = {'hypothesis': [], 'gt': []}
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            nemo_sv_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large')
-            nemo_sv_model = nemo_sv_model.to(device)
-            nemo_sv_model.eval()
-
-            asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
-                model_name="stt_en_conformer_transducer_large"
-            )
-            asr_model = asr_model.to(device)
-            asr_model.eval()
-            _exp_dir_path = self.logger.save_dir
-            _exp_dir_path = _exp_dir_path + '/Sample_Audios'
-            if not os.path.exists(_exp_dir_path):
-                os.mkdir(_exp_dir_path)
-            hyp_pred_transcript_list = []
-            gt_transcript_list = []
             similarity_list = []
 
+            if torch.count_nonzero(speech_mask) > 0:
+                nemo_sv_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large')
+                nemo_sv_model = nemo_sv_model.to(device)
+                nemo_sv_model.eval()
+
+                asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
+                    model_name="stt_en_conformer_transducer_large"
+                )
+                asr_model = asr_model.to(device)
+                asr_model.eval()
+                _exp_dir_path = self.logger.save_dir
+                _exp_dir_path = _exp_dir_path + '/Sample_Audios'
+                if not os.path.exists(_exp_dir_path):
+                    os.mkdir(_exp_dir_path)
+            
             # predicting audio
             batch_size = output_tokens_combined.shape[0]
             wer_score = 0
@@ -1292,20 +1299,51 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         ter_dict[layer_idx]['gt'].append(dec_input_to_1024[layer_idx].cpu().numpy().tolist())
 
                 else:
-                    r = labels[i, 0].long()
-                    nzm = r != 0
-                    r = r.tolist()[:-1]
-                    nzm = nzm[:-1]
-                    h = output_tokens_combined[i].long() * nzm
-                    h = h.tolist()
-                    cur_wer_score = editdistance.eval(r, h)
-                    self.logger.experiment.add_scalar('WER', cur_wer_score, step)
-                    print(f"current wer score : {cur_wer_score}")
-                    wer_score += cur_wer_score
-            if wer_score > 0:
-                wer_score /= batch_size
-                self.logger.experiment.add_scalar('AVG WER', wer_score, step)
-                print(f"average wer score : {wer_score}")
+                    _pred_token_list = []
+                    for _j in range(end_indices[i]):
+                        _pred_token_list.append(output_tokens_combined[i][_j].item())
+                    pred_text = self.frozen_model.tokenizer.ids_to_text(_pred_token_list)
+                    self.logger.experiment.add_text("Predicted Text", pred_text, step)
+                    
+                    context_tokens_audio_codebook = context_and_question_tokens[i][1]
+                    audio_start_index = context_tokens_audio_codebook.nonzero()[0][0].item()
+                    audio_end_index = context_tokens_audio_codebook.nonzero()[-1][0].item()
+                    context_audio_tokens = context_and_question_tokens[i][:,audio_start_index:audio_end_index]
+                    context_audio_tokens[0] = context_audio_tokens[0] - self.speech_offset
+                    context_audio_tokens = torch.clamp(context_audio_tokens, min=0, max=1023)
+                    
+                    context_audio_wav = self.additional_models['encodec'].decode([[context_audio_tokens[None], None]])[0, 0]
+
+                    context_question_tokens = context_and_question_tokens[i][0][audio_end_index+1:]
+                    context_question_token_list = [_t.item() for _t in context_question_tokens if _t > 0]
+                    context_question_text = self.frozen_model.tokenizer.ids_to_text(context_question_token_list)
+                    
+                    self.logger.experiment.add_text("Context Question Text", context_question_text, step)
+                    self.logger.experiment.add_audio("Context Wav", context_audio_wav, step, 24000)
+
+                    label_tokens = labels[i][0]
+                    label_token_list = [_t.item() for _t in label_tokens if _t > 0]
+                    label_text = self.frozen_model.tokenizer.ids_to_text(label_token_list)
+                    self.logger.experiment.add_text("Label Text", label_text, step)
+
+                    hyp_pred_transcript_list.append(pred_text)
+                    gt_transcript_list.append(label_text)
+                    pass
+                    # TODO Some bug in calculation
+                    # r = labels[i, 0].long()
+                    # nzm = r != 0
+                    # r = r.tolist()[:-1]
+                    # nzm = nzm[:-1]
+                    # h = output_tokens_combined[i].long() * nzm
+                    # h = h.tolist()
+                    # cur_wer_score = editdistance.eval(r, h)
+                    # self.logger.experiment.add_scalar('WER', cur_wer_score, step)
+                    # print(f"current wer score : {cur_wer_score}")
+                    # wer_score += cur_wer_score
+            # if wer_score > 0:
+            #     wer_score /= batch_size
+            #     self.logger.experiment.add_scalar('AVG WER', wer_score, step)
+            #     print(f"average wer score : {wer_score}")
 
             # compute token error rate for each layer
             for layer_idx in range(8):
@@ -1319,8 +1357,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             self.logger.experiment.add_scalar(f'Inf WER Transcript', wer_glob, batch_idx)
 
             # compute average similarity
-            similarity_avg = np.mean(similarity_list)
-            self.logger.experiment.add_scalar(f'Inf SV Avg Cossim', similarity_avg, batch_idx)
+            similarity_avg = 0.0
+            if len(similarity_list) > 0:
+                similarity_avg = np.mean(similarity_list)
+                self.logger.experiment.add_scalar(f'Inf SV Avg Cossim', similarity_avg, batch_idx)
 
             return {
                 'sv_avg_cossim': similarity_avg,
