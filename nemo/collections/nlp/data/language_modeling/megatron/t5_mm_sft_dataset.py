@@ -508,32 +508,32 @@ class MMT5SFTDataset(GPTSFTDataset):
         if self.virtual_tokens:
             # (@adithyare) we are going to insert "pad/eos" tokens in the beginning of the text and context
             # these pad/eos tokens are placeholders for virtual tokens
-            context_ids = [[self.tokenizer.eos_id] * self.num_audio_codebooks] * self.virtual_tokens + context_ids
+            context_ids =  [[self.tokenizer.eos_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1)] * self.virtual_tokens + context_ids
 
         input_ids = context_ids
         answer_start_idx = len(input_ids)
 
         # Adds bos token in the start
         if self.add_bos:
-            context_ids = [[self.tokenizer.bos_id] * self.num_audio_codebooks ]+ context_ids
-            input_ids = [[self.tokenizer.bos_id] * self.num_audio_codebooks ]+ input_ids
+            context_ids = [[self.tokenizer.bos_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1) ]+ context_ids
+            input_ids = [[self.tokenizer.bos_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1) ]+ input_ids
             answer_start_idx += 1
 
         # Adds sep token between text/prompt and answer
         if self.add_sep:
-            context_ids = context_ids + [[self.sep_id] * self.num_audio_codebooks]
-            input_ids = input_ids + [[self.sep_id] * self.num_audio_codebooks]
+            context_ids = context_ids + [[self.tokenizer.sep_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1)]
+            input_ids = input_ids + [[self.tokenizer.sep_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1)]
             answer_start_idx += 1
 
         input_ids = input_ids + answer_ids
 
         # Only training need to consider eos token
         if self.add_eos:
-            input_ids = input_ids + [[self.tokenizer.eos_id] * self.num_audio_codebooks]
+            input_ids = input_ids + [[self.tokenizer.eos_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1)]
 
-        # Add EOS and BOS Ids to answer 
-        answer_ids = answer_ids + [[self.tokenizer.eos_id] * self.num_audio_codebooks]
-        answer_ids = [[self.tokenizer.bos_id] * self.num_audio_codebooks] + answer_ids
+        # Add EOS and BOS Ids to answer. Add eos, bos id to the first codebook, zeros (pad_id) to the others
+        answer_ids = answer_ids + [[self.tokenizer.eos_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1)]
+        answer_ids = [[self.tokenizer.bos_id] + [self.tokenizer.pad_id] * (self.num_audio_codebooks-1) ] + answer_ids
         
         # store metadata in dataset, in case user may have keys required in the prediction json files
         metadata = {k: v for k, v in example.items() if k not in prompt_template_keys}

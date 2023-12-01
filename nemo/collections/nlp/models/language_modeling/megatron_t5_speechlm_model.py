@@ -19,6 +19,7 @@ import editdistance
 import numpy as np
 import soundfile as sf
 import torch
+import json
 from encodec import EncodecModel
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
@@ -451,7 +452,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                 for i in range(context_and_question_tokens.shape[2])
                             ]
                             input_token_list = [
-                                (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < 30000
+                                (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < self.speech_offset
                             ]
                             context_end_step = input_token_list[0][0]
                             _context_tokens = context_and_question_tokens[0][:, :context_end_step].clone()
@@ -506,7 +507,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             speech_logits = torch.stack(speech_logits_list, dim=-1)  # (t, b, 1024, 7)
                             token_logits_example = token_logits[:, 0, :] * 1
                             speech_logits_example = speech_logits[:, 0, :, :] * 1
-                            first_layer_tokens = token_logits_example.argmax(dim=1) - 30000
+                            first_layer_tokens = token_logits_example.argmax(dim=1) - self.speech_offset
                             other_layer_tokens = []
                             for _i in range(speech_logits_example.shape[2]):
                                 other_layer_tokens.append(speech_logits_example[:, :, _i].argmax(dim=1))
@@ -693,6 +694,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         total_correct_predictions = torch.sum(correct_predictions)
         total_predictions = torch.sum(loss_mask)
         first_layer_accuracy = total_correct_predictions / total_predictions
+        
         first_layer_loss = torch.nn.functional.cross_entropy(
             first_layer_logits.permute(1, 2, 0), labels_first_layer, reduction='none'
         )  # (bs,t)
@@ -868,10 +870,22 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     average_metrics[key].append(output[key])
 
         for key in average_metrics:
-            average_metrics[key] = np.mean(average_metrics[key])
-            logging.info(f'Test {key}: {average_metrics[key]}')
-            self.log(f'test_{key}', average_metrics[key], prog_bar=True, rank_zero_only=True, batch_size=1)
-            self.logger.experiment.add_scalar(f'Inf Cumulative {key}', average_metrics[key], 0)
+            if key != 'eval_records':
+                average_metrics[key] = np.mean(average_metrics[key])
+                logging.info(f'Test {key}: {average_metrics[key]}')
+                self.log(f'test_{key}', average_metrics[key], prog_bar=True, rank_zero_only=True, batch_size=1)
+                self.logger.experiment.add_scalar(f'Inf Cumulative {key}', average_metrics[key], 0)
+            else:
+                test_json = ""
+                for records in average_metrics['eval_records']:
+                    for record in records:
+                        test_json += json.dumps(record)
+                        test_json += "\n"
+                if len(test_json) > 1:
+                    test_json = test_json[:-1]
+                    _exp_dir_path = self.logger.save_dir
+                    with open(os.path.join(_exp_dir_path, "test_records.json"), 'w') as f:
+                        f.write(test_json)
 
     def build_virtual_prompt_dataset(
         self, dataset_paths, batch_size, for_train, drop_last, shuffle, num_workers, pin_memory
@@ -1113,6 +1127,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             hyp_pred_transcript_list = []
             gt_transcript_list = []
 
+            
             for t in range(dec_input.shape[2] - 1):
                 if t % 10 == 0:
                     print("Timestep {}".format(t))
@@ -1223,6 +1238,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             # predicting audio
             batch_size = output_tokens_combined.shape[0]
             wer_score = 0
+            eval_records = []
             for i in range(batch_size):
                 audio_len = (labels[i][0] != 0).sum().item()
                 step = batch_idx * batch_size + i
@@ -1279,7 +1295,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         for j in range(context_and_question_tokens.shape[2])
                     ]
                     input_token_list = [
-                        (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < 30000
+                        (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < self.speech_offset
                     ]
                     context_end_step = input_token_list[0][0]
                     _context_tokens = context_and_question_tokens[i][:, :context_end_step].clone()
@@ -1326,6 +1342,22 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     label_text = self.frozen_model.tokenizer.ids_to_text(label_token_list)
                     self.logger.experiment.add_text("Label Text", label_text, step)
 
+                    _item_task = "asr"
+                    if '[ Transcribe in English ] Answer' in context_question_text:
+                        _item_task = "asr"
+                    elif '[ Transcribe in English ; Tag each word with respective' in context_question_text:
+                        _item_task = "speaker_attributed_asr"
+                    elif 'Are they both spoken by the same speaker' in context_question_text:
+                        _item_task = "speaker_verification"
+                    else:
+                        raise NotImplementedError("Unknown task")
+
+                    eval_records.append({
+                        'pred' : pred_text,
+                        'label' : label_text,
+                        'task' : _item_task
+                    })
+
                     hyp_pred_transcript_list.append(pred_text)
                     gt_transcript_list.append(label_text)
                     pass
@@ -1366,6 +1398,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 'sv_avg_cossim': similarity_avg,
                 'cer_transcript': cer_glob,
                 'wer_transcript': wer_glob,
+                'eval_records' : eval_records,
             }
 
     def predict_step_old(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
