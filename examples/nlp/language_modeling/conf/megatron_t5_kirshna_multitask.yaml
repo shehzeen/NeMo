@@ -68,7 +68,7 @@ model:
   language_model_path: ??? # Path to the pretrained T5 language model .nemo file, always required
   save_nemo_on_validation_end: True # Saves an inference ready .nemo file every time a checkpoint is saved during training. 
   existing_tasks: []
-  new_tasks: ["asr", "target_speaker_asr", "speaker_verification", "speaker_attributed_asr", "translation"] 
+  new_tasks: ["asr", "target_speaker_asr", "speaker_verification", "speaker_attributed_asr", "translation", "s2t_translation"]
 
 
   task_templates: 
@@ -101,10 +101,17 @@ model:
     total_virtual_tokens: 1
 
   - taskname: "translation"
-    prompt_template: "Context: {context} Question: {question} Answer: {answer}"
-    truncation_keys: "context"
+    prompt_template: "Context: {source} Question: {question} Answer: {target}"
+    truncation_keys: "source,target"
     audio_keys: null
-    answer_key: "answer"
+    answer_key: "target"
+    total_virtual_tokens: 1
+
+  - taskname: "s2t_translation"
+    prompt_template: "Context: {audio_codes} Question: {question} Answer: {text}"
+    truncation_keys: "audio_codes"
+    audio_keys: "audio_codes"
+    answer_key: "text"
     total_virtual_tokens: 1
 
   p_tuning: # P-tuning specific params
