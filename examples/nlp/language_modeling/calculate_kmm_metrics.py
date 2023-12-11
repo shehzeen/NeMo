@@ -40,7 +40,7 @@ TASKS = ['asr', 'speaker_verification', 'speaker_attributed_asr', 'translation']
 # TASKS = ['translation']
 
 
-pred_label_manifest_path='/Data/Experiments/KMM_Inference/test_records.json'
+pred_label_manifest_path='/Data/Experiments/KMM_InferenceAll/test_records.json'
 
 def get_speaker_specific_transcript(transcript):
     transcript = transcript.split()
