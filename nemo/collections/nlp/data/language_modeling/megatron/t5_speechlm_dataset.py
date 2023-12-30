@@ -337,18 +337,20 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         end_token_index = -1
         if ("Text to speech this" in question_in_manifest) and (doc["context_type"] == "SPEECH"):
             total_context_len = context_tokens[0].size()[1]
-            reduced_len = min(
-                400,
-                int(total_context_len * 0.2)
-                if total_context_len > 600
-                else int(total_context_len * random.uniform(0.2, 0.5)),
-            )
+            reduced_len = min(300, total_context_len-1)
+            # reduced_len = min(
+            #     400,
+            #     int(total_context_len * 0.2)
+            #     if total_context_len > 600
+            #     else int(total_context_len * random.uniform(0.2, 0.5)),
+            # )
             start_token_index = random.randint(
                 0, total_context_len - reduced_len
             )  # start index can be greater than 440
-            context_tokens[0] = context_tokens[0][
-                :, start_token_index : min(start_token_index + 440, start_token_index + reduced_len)
-            ]
+            # context_tokens[0] = context_tokens[0][
+            #     :, start_token_index : min(start_token_index + 440, start_token_index + reduced_len)
+            # ]
+            context_tokens[0] = context_tokens[0][:, start_token_index : start_token_index + reduced_len]
         elif "Next token prediction" in question_in_manifest:
             total_context_len = context_tokens[0].size()[1]
             end_token_index = int(total_context_len * random.uniform(0.01, 0.2))
