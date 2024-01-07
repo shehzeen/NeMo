@@ -449,7 +449,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             if alignment_loss is not None:
                 self.logger.experiment.add_scalar('train_alignment_loss', alignment_loss, self.global_step)
 
-            if self.trainer.global_step % 100 == 0:
+            if self.trainer.global_step % 500 == 0:
                 with torch.no_grad():
                     with torch.cuda.amp.autocast(enabled=False):
                         # Encodec does not work with fp16, so we disable autocast for logging audio
