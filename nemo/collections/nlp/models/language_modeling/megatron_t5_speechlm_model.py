@@ -138,10 +138,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.frozen_model.enc_dec_model.num_cross_attention_heads = num_cross_attention_heads
 
         self.alignment_loss_start_step = 0
+        self.alignment_loss_end_step = float('inf')
         if cfg.get('use_alignment_loss', False):
             alignment_loss_scale = cfg.get('alignment_loss_scale', 1.0)
             self.frozen_model.enc_dec_model.forward_sum_loss = ForwardSumLoss(loss_scale=alignment_loss_scale)
+            self.frozen_model.enc_dec_model.alignment_text_end_offset = cfg.get('alignment_text_end_offset', 0)
+            self.frozen_model.enc_dec_model.align_every_n_head = cfg.get('align_every_n_head', 1)
+            self.frozen_model.enc_dec_model.alignment_decoder_layerids = cfg.get('alignment_decoder_layerids', list(range(0,12)))
             self.alignment_loss_start_step = cfg.get('alignment_loss_start_step', 0)
+            self.alignment_loss_end_step = cfg.get('alignment_loss_end_step', float('inf'))
 
         # Parallel output is used only for vocab parallel cross entropy.
         self.frozen_model.enc_dec_model.parallel_output = (
@@ -607,7 +612,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 output_tensor, out_logits, curr_step = loss_args
                 alignment_loss = out_logits[3]
                 loss = self.frozen_model.loss_func(loss_mask, output_tensor)
-                if (alignment_loss is not None) and (curr_step > self.alignment_loss_start_step):
+                if (alignment_loss is not None) and (curr_step > self.alignment_loss_start_step) and (curr_step < self.alignment_loss_end_step):
                     print("Adding alignment loss", curr_step, self.alignment_loss_start_step)
                     loss = loss + alignment_loss
                 reduced_loss = average_losses_across_data_parallel_group([loss])
