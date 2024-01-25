@@ -188,6 +188,12 @@ class SentencePieceTokenizer(TokenizerSpec):
                     self.id_to_special_token[self.vocab_size] = token
                     self.vocab_size += 1
 
+    def update_phone_tokens(self):
+        for i, word in enumerate(self.vocab):
+            if word.startswith("p{"):
+                self.special_token_to_id[word] = i
+                self.id_to_special_token[i] = word
+
     @property
     def pad_id(self):
         if self.legacy:

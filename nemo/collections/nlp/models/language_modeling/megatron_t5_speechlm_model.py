@@ -333,15 +333,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             t5_cfg.micro_batch_size = cfg.get('micro_batch_size', 4)
             t5_cfg.global_batch_size = cfg.get('global_batch_size', 4)
             t5_cfg.precision = trainer.precision
-            # TODO: Remove hardcoding
-            if cfg.data.get('speech_offset', 30000) > 250000:
-                # multilingual model
-                t5_cfg.tokenizer.num_sentinel_tokens = 260096 - 250112
-            else:
-                # english model
-                t5_cfg.tokenizer.num_sentinel_tokens = 39184 - 29056  # cfg.num_speech_tokens 39168
+            t5_cfg.tokenizer.num_sentinel_tokens = cfg.get('num_sentinel_tokens', 39184 - 29056)
             t5_cfg.seq_length = cfg.data.max_seq_length
             t5_cfg.max_position_embeddings = cfg.data.max_seq_length
+            if cfg.get('override_token_model', None):
+                t5_cfg.tokenizer.model = cfg['override_token_model']
 
         self.frozen_model = MegatronT5Model.restore_from(
             cfg.get('language_model_path'),
@@ -349,6 +345,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             override_config_path=t5_cfg,
             save_restore_connector=NLPSaveRestoreConnector(),
         )
+
+        if not cfg.get('english_only_model', False):
+            self.frozen_model.tokenizer.update_phone_tokens()
+
         print(f"self.frozen_model {self.frozen_model}")
 
     def fwd_bwd_step(self, dataloader_iter, batch_idx, forward_only):
@@ -1015,6 +1015,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             context_pattern=self.cfg.data.get('context_pattern', 'parallel'),
             context_duration_min=self.cfg.data.get('context_duration_min', 3.0),
             context_duration_max=self.cfg.data.get('context_duration_max', 5.0),
+            g2p=self.cfg.data.get('g2p', None),
+            skip_datasets=self.cfg.data.get('skip_datasets', []),
+            english_only_model=self.cfg.get('english_only_model', False),
         )
 
         rank = parallel_state.get_data_parallel_rank()

@@ -40,6 +40,7 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     get_base_dir,
 )
 from nemo.utils import logging
+from nemo.collections.common.tokenizers.text_to_speech.tokenizer_utils import any_locale_text_preprocessing
 
 __all__ = ['T5SpeechLMDataset']
 
@@ -129,6 +130,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         context_pattern: Optional[str] = "parallel",
         context_duration_min: Optional[float] = 3.0,
         context_duration_max: Optional[float] = 5.0,
+        skip_datasets: Optional[List[str]] = [], # substrings of dataset names to skip
+        english_only_model: Optional[bool] = False,
         **kwargs,
     ):
         """
@@ -179,6 +182,19 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         self.context_pattern = context_pattern
         self.context_duration_min = context_duration_min
         self.context_duration_max = context_duration_max
+        self.english_only_model = english_only_model
+
+        self.g2p = {"fr": lambda x: x}
+        if kwargs.get("g2p", None):
+            if "english" in kwargs["g2p"]:
+                english_g2p = instantiate(kwargs["g2p"]["english"])
+                self.g2p["en"] =lambda x: english_g2p(x)
+            if "spanish" in kwargs["g2p"]:
+                spanish_g2p = instantiate(kwargs["g2p"]["spanish"])
+                self.g2p["es"] = lambda x: spanish_g2p(x)
+            if "mandarin" in kwargs["g2p"]:
+                mandarin_g2p = instantiate(kwargs["g2p"]["mandarin"])
+                self.g2p["zh"] = lambda x: mandarin_g2p(x)
 
         # Initialize sup_data_path, sup_data_types and run preprocessing methods for every supplementary data type
         if sup_data_path is not None:
@@ -187,12 +203,15 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
 
         self.codec_folder = kwargs.pop('codec_folder', None)
         self.train_task = train_task
-        if self.codec_folder is None:
+        if self.codec_folder is None and sup_data_path is not None:
             self.codec_folder = Path(self.sup_data_path) / "codec"
         elif isinstance(self.codec_folder, str):
             self.codec_folder = Path(self.codec_folder)
+        
+        if self.codec_folder is not None:
+            self.codec_folder.mkdir(exist_ok=True, parents=True)
 
-        self.codec_folder.mkdir(exist_ok=True, parents=True)
+        self.skip_datasets = skip_datasets
 
         super().__init__(
             datasets=datasets,
@@ -296,13 +315,23 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             else:
                 approx_answer_len = len(doc["answer"].split(' ')) + 3
 
-            if (
-                approx_context_len + approx_question_len < self.max_seq_length
-                and approx_answer_len < self.max_seq_length
-            ):
-                self.examples.append(doc)
+            skip_record = False
+            for skip_dataset in self.skip_datasets:
+                if skip_dataset in doc['answer']:
+                    skip_record = True
+
+            if not skip_record:        
+                if (
+                    approx_context_len + approx_question_len < self.max_seq_length
+                    and approx_answer_len < self.max_seq_length
+                ):
+                    self.examples.append(doc)
+                else:
+                    print(f"skipped for {approx_context_len + approx_question_len} {approx_answer_len} len")
+                    skipped += 1
             else:
-                print(f"skipped for {approx_context_len + approx_question_len} {approx_answer_len} len")
+                print("Skipping", doc['answer'])
+                logging.debug(f"skipped for {doc['answer']} as it is in skip_datasets")
                 skipped += 1
 
         print(f"After Process len(self.examples) {len(self.examples)} TTS = {tts} ASR = {asr}")
@@ -567,10 +596,19 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         input_ids = self.tokenizer.text_to_ids(text)
         return input_ids
 
-    def _get_phoneme_tokens(self, text):
-        input_ids = phoneme_tokenizer.encode(text)
-        input_ids_adjusted = [_id + self.lm_vocab_size for _id in input_ids]
-        return input_ids_adjusted
+    def _get_phoneme_tokens(self, text, lang="en"):
+        if self.english_only_model:
+            input_ids = phoneme_tokenizer.encode(text)
+            input_ids_adjusted = [_id + self.lm_vocab_size for _id in input_ids]
+            return input_ids_adjusted
+        else:
+            text = any_locale_text_preprocessing(text)
+            input_ids = self.g2p[lang](text)
+            input_ids_adjusted = []
+            for i in input_ids:
+                input_ids_adjusted.append(f"p{{{i}}}")
+            input_ids_adjusted = self.tokenizer.text_to_ids("".join(input_ids_adjusted))
+            return input_ids_adjusted
 
     def _pad_wav_to_multiple(self, wav):
         if self.pad_multiple > 1:
@@ -693,8 +731,9 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         elif doc[f"{field}_type"] == 'TEXT':
             _text = field_data.strip(" ")
             if _text.startswith("Phoneme TTS"):
+                lang = doc.get("lang", "en")
                 instruction_tokens = self._get_text_tokens("Phoneme TTS")
-                field_tokens = self._get_phoneme_tokens(_text.replace("Phoneme TTS ", ""))
+                field_tokens = self._get_phoneme_tokens(_text.replace("Phoneme TTS ", ""), lang=lang)
                 field_tokens = instruction_tokens + field_tokens
             elif _text.startswith("Edit Speech"):
                 # Always use phoneme tokenizer for edit speech
