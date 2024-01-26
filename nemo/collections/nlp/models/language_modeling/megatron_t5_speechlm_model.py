@@ -138,10 +138,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.frozen_model.enc_dec_model.num_cross_attention_heads = num_cross_attention_heads
 
         self.alignment_loss_start_step = 0
+        self.alignment_loss_end_step = float('inf')
         if cfg.get('use_alignment_loss', False):
             alignment_loss_scale = cfg.get('alignment_loss_scale', 1.0)
             self.frozen_model.enc_dec_model.forward_sum_loss = ForwardSumLoss(loss_scale=alignment_loss_scale)
+            self.frozen_model.enc_dec_model.alignment_text_end_offset = cfg.get('alignment_text_end_offset', 0)
+            self.frozen_model.enc_dec_model.align_every_n_head = cfg.get('align_every_n_head', 1)
+            self.frozen_model.enc_dec_model.alignment_decoder_layerids = cfg.get('alignment_decoder_layerids', list(range(0,12)))
             self.alignment_loss_start_step = cfg.get('alignment_loss_start_step', 0)
+            self.alignment_loss_end_step = cfg.get('alignment_loss_end_step', float('inf'))
 
         # Parallel output is used only for vocab parallel cross entropy.
         self.frozen_model.enc_dec_model.parallel_output = (
@@ -328,15 +333,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             t5_cfg.micro_batch_size = cfg.get('micro_batch_size', 4)
             t5_cfg.global_batch_size = cfg.get('global_batch_size', 4)
             t5_cfg.precision = trainer.precision
-            # TODO: Remove hardcoding
-            if cfg.data.get('speech_offset', 30000) > 250000:
-                # multilingual model
-                t5_cfg.tokenizer.num_sentinel_tokens = 260096 - 250112
-            else:
-                # english model
-                t5_cfg.tokenizer.num_sentinel_tokens = 39184 - 29056  # cfg.num_speech_tokens 39168
+            t5_cfg.tokenizer.num_sentinel_tokens = cfg.get('num_sentinel_tokens', 39184 - 29056)
             t5_cfg.seq_length = cfg.data.max_seq_length
             t5_cfg.max_position_embeddings = cfg.data.max_seq_length
+            if cfg.get('override_token_model', None):
+                t5_cfg.tokenizer.model = cfg['override_token_model']
 
         self.frozen_model = MegatronT5Model.restore_from(
             cfg.get('language_model_path'),
@@ -344,6 +345,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             override_config_path=t5_cfg,
             save_restore_connector=NLPSaveRestoreConnector(),
         )
+
+        if not cfg.get('english_only_model', False):
+            self.frozen_model.tokenizer.update_phone_tokens()
+
         print(f"self.frozen_model {self.frozen_model}")
 
     def fwd_bwd_step(self, dataloader_iter, batch_idx, forward_only):
@@ -449,7 +454,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             if alignment_loss is not None:
                 self.logger.experiment.add_scalar('train_alignment_loss', alignment_loss, self.global_step)
 
-            if self.trainer.global_step % 100 == 0:
+            if self.trainer.global_step % 500 == 0:
                 with torch.no_grad():
                     with torch.cuda.amp.autocast(enabled=False):
                         # Encodec does not work with fp16, so we disable autocast for logging audio
@@ -607,7 +612,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 output_tensor, out_logits, curr_step = loss_args
                 alignment_loss = out_logits[3]
                 loss = self.frozen_model.loss_func(loss_mask, output_tensor)
-                if (alignment_loss is not None) and (curr_step > self.alignment_loss_start_step):
+                if (alignment_loss is not None) and (curr_step > self.alignment_loss_start_step) and (curr_step < self.alignment_loss_end_step):
                     print("Adding alignment loss", curr_step, self.alignment_loss_start_step)
                     loss = loss + alignment_loss
                 reduced_loss = average_losses_across_data_parallel_group([loss])
@@ -1010,6 +1015,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             context_pattern=self.cfg.data.get('context_pattern', 'parallel'),
             context_duration_min=self.cfg.data.get('context_duration_min', 3.0),
             context_duration_max=self.cfg.data.get('context_duration_max', 5.0),
+            g2p=self.cfg.data.get('g2p', None),
+            skip_datasets=self.cfg.data.get('skip_datasets', []),
+            english_only_model=self.cfg.get('english_only_model', False),
         )
 
         rank = parallel_state.get_data_parallel_rank()
