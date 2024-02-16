@@ -121,7 +121,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         return_all_crossattention_probs = cfg.get('return_all_crossattention_probs', False)
         num_cross_attention_heads = cfg.get('num_cross_attention_heads', 12)
         self.lm_vocab_size = cfg.get('lm_vocab_size', 30000)
+        self.context_conditioning = cfg.get('context_conditioning', "encoder")
+        self.context_duration_min = cfg.data.get('context_duration_min', 0)
+        self.context_duration_max = cfg.data.get('context_duration_max', 0)
+        self.codebook_fps = cfg.data.get('codebook_fps', 75)
+        self.decoder_context_len = 0
+        if self.context_conditioning == "decoder":
+            assert self.context_duration_min == self.context_duration_max, "Decoder context duration must be fixed"
+            self.decoder_context_len = int(self.codebook_fps * self.context_duration_min)
+
         self.context_pattern = cfg.data.get('context_pattern', 'parallel')
+        
 
         self.speech_offset = speech_offset
         self.speech_codebook_size = speech_codebook_size
@@ -139,6 +149,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.frozen_model.enc_dec_model.attn_prior_end_step = attn_prior_end_step
         self.frozen_model.enc_dec_model.return_all_crossattention_probs = return_all_crossattention_probs
         self.frozen_model.enc_dec_model.num_cross_attention_heads = num_cross_attention_heads
+        self.frozen_model.enc_dec_model.context_conditioning = self.context_conditioning
+        self.frozen_model.enc_dec_model.decoder_context_len = self.decoder_context_len
 
         self.alignment_loss_start_step = 0
         self.alignment_loss_end_step = float('inf')
@@ -1267,6 +1279,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             g2p=self.cfg.data.get('g2p', None),
             skip_datasets=self.cfg.data.get('skip_datasets', []),
             english_only_model=self.cfg.get('english_only_model', False),
+            context_conditioning=self.cfg.get('context_conditioning', "encoder"),
         )
 
         rank = parallel_state.get_data_parallel_rank()
