@@ -845,9 +845,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.eval()
         gbs = self.cfg.get('validation_global_batch_size', self.cfg.global_batch_size)
         self._reconfigure_and_process_inference_batch(virtual_tokens.size(0), gbs)
-        # loss_mean = self.fwd_bwd_step(
-        #     itertools.chain([batch]), batch_idx, forward_only=True
-        # )  # comment this out and add custom forward function to calculate WER
+        loss_mean = self.fwd_bwd_step(
+            itertools.chain([batch]), batch_idx, forward_only=True
+        )  # comment this out and add custom forward function to calculate WER
         # # logging.info (f'loss_mean {loss_mean}')
 
         if batch_idx == 0 and self.is_rank_zero:
@@ -1038,8 +1038,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         first_layer_loss = torch.sum(first_layer_loss * loss_mask) / total_predictions
 
         metrics = {
-            # 'loss': loss_mean * 0.14 if torch.count_nonzero(speech_mask) > 0 else loss_mean,
-            # 'loss': loss_fnc(output_loss),
+            'loss': loss_mean,
             'first_layer_accuracy': first_layer_accuracy,
             'first_layer_loss': first_layer_loss,
         }
@@ -1066,7 +1065,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             metrics[f'speech_loss_{i+1}'] = loss_i
             loss_total += loss_i
 
-        metrics['loss'] = loss_total
+        metrics['loss_total_check'] = loss_total
         self.validation_step_outputs.append(metrics)
         self.train(mode=mode)
         self.frozen_model.train()
@@ -1078,7 +1077,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             if parallel_state.is_pipeline_last_stage():
                 # only the last pipeline parallel stages return loss
                 averaged_loss = torch.stack([item['loss'] for item in outputs]).mean()
-                # averaged_loss_total_check = torch.stack([item['loss_total_check'] for item in outputs]).mean()
+                averaged_loss_total_check = torch.stack([item['loss_total_check'] for item in outputs]).mean()
                 averaged_first_layer_accuracy = torch.stack([item['first_layer_accuracy'] for item in outputs]).mean()
 
                 self.log(
@@ -1088,9 +1087,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     rank_zero_only=True,
                     batch_size=1,
                 )
-                # self.log(
-                #     'val_loss_total_check', averaged_loss_total_check, prog_bar=True, rank_zero_only=True, batch_size=1
-                # )
+                self.log(
+                    'val_loss_total_check', averaged_loss_total_check, prog_bar=True, rank_zero_only=True, batch_size=1
+                )
                 logging.info(f'Validation first_layer_accuracy: {averaged_first_layer_accuracy}')
                 logging.info(f'Validation loss_total_check: {averaged_loss_total_check}')
 
@@ -1121,12 +1120,12 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         else:
             if len(outputs) > 0:
                 averaged_loss = torch.stack([item['loss'] for item in outputs]).mean()
-                # averaged_loss_total_check = torch.stack([item['loss_total_check'] for item in outputs]).mean()
+                averaged_loss_total_check = torch.stack([item['loss_total_check'] for item in outputs]).mean()
                 logging.info(f'Validation loss: {averaged_loss}')
                 self.log('val_loss', averaged_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
-                # self.log(
-                #     'val_loss_total_check', averaged_loss_total_check, prog_bar=True, rank_zero_only=True, batch_size=1
-                # )
+                self.log(
+                    'val_loss_total_check', averaged_loss_total_check, prog_bar=True, rank_zero_only=True, batch_size=1
+                )
 
                 averaged_first_layer_accuracy = torch.stack([item['first_layer_accuracy'] for item in outputs]).mean()
                 logging.info(f'Validation first_layer_accuracy: {averaged_first_layer_accuracy}')
