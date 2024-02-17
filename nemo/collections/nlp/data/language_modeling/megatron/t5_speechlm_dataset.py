@@ -301,7 +301,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 print("modifying doc")
                 assert ";" not in doc['context'], "Multiple contexts not supported in decoder conditioning"
                 doc['answer'] = "{};{}".format(doc['context'], doc['answer'])
-                doc['answer_duration'] = self.context_duration_min + doc['answer_duration'] + 0.5 # 0.5 is just to be safe
+                doc['answer_duration'] = self.context_duration_min + doc['answer_duration']
                 doc['answer_type'] = "CONTEXTANSWER"
                 doc['context_type'] = "DUMMYCONTEXT"
                 doc['context'] = "DUMMYCONTEXT"
@@ -348,9 +348,9 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 # approx len is equal to num of characters
                 approx_question_len = len(question_in_manifest)
 
-            if doc["answer_type"] in ["SPEECH", "AUDIOCODEC"]:
+            if doc["answer_type"] in ["SPEECH", "AUDIOCODEC", "CONTEXTANSWER"]:
                 assert "answer_duration" in doc, f"answer_duration key not in document {doc}"
-                approx_answer_len = doc["answer_duration"] * (self.codebook_fps + 1)
+                approx_answer_len = doc["answer_duration"] * (self.codebook_fps + 1) + 3 # +3 for EOS, BOS padding
                 if self.seq_pattern == "delay_parallel":
                     # In delay parallel, there is padding so add 8 frames
                     approx_answer_len = approx_answer_len + self.num_speech_codebooks
