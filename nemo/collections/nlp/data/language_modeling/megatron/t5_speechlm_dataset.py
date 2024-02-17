@@ -301,7 +301,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 print("modifying doc")
                 assert ";" not in doc['context'], "Multiple contexts not supported in decoder conditioning"
                 doc['answer'] = "{};{}".format(doc['context'], doc['answer'])
-                doc['answer_duration'] = self.context_duration_min + doc['answer_duration']
+                doc['answer_duration'] = self.context_duration_min + doc['answer_duration'] + 0.5 # 0.5 is just to be safe
                 doc['answer_type'] = "CONTEXTANSWER"
                 doc['context_type'] = "DUMMYCONTEXT"
                 doc['context'] = "DUMMYCONTEXT"
