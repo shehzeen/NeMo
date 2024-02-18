@@ -669,7 +669,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule, adapter_mixins.Adap
                 attn_prior_end_step = self.attn_prior_end_step
                 attn_prior_scaledown_start_step = self.attn_prior_scaledown_start_step
                 num_attention_heads = self.num_cross_attention_heads
-                assert attn_prior_scaledown_start_step < attn_prior_end_step
+                assert attn_prior_scaledown_start_step <= attn_prior_end_step
                 logging.debug(f"attn_prior_scaledown_start_step: {attn_prior_scaledown_start_step}, attn_prior_scaledown_start_step: {attn_prior_end_step}")
                 if global_step >= attn_prior_end_step:
                     decoder_cross_attention_relative_position_bias = None
