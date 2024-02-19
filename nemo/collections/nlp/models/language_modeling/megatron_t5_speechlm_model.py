@@ -1390,15 +1390,20 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             # pad dec_input (B, 8, T) to 1000 timesteps
             max_inference_timesteps = self.cfg.get('max_inference_timesteps', 1200)
             dec_input = torch.nn.functional.pad(dec_input, (0, max_inference_timesteps - dec_input.shape[2]), value=0)
-            dec_input[:,:,1:].zero_()
+            dec_input[:,:,self.decoder_context_len + 2:].zero_()
+            # import ipdb; ipdb.set_trace()
             dec_input_mask = torch.nn.functional.pad(
                 dec_input_mask, (0, max_inference_timesteps - dec_input_mask.shape[1]), value=1
             )
 
+
             end_inference_loop_at = None
             fwd_bwd_function = get_forward_backward_func()
             encoder_output = None
-            for t in range(dec_input.shape[2] - 1):
+            # start_step = self.decoder_context_len + 1
+            start_step = 0
+            
+            for t in range(start_step, dec_input.shape[2] - 1):
                 if t % 100 == 0:
                     logging.info("Timestep {}".format(t))
                 if t == end_inference_loop_at:
@@ -1407,7 +1412,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 # print(t)
                 # print(dec_input[:, :, : t + 1])
                 # import ipdb; ipdb.set_trace()
-                if t == 0:
+                if t == start_step:
                     # Run first step manually
                     output_logits, _, token_and_speech_logits = self.forward(
                         virtual_tokens,
@@ -1498,14 +1503,16 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                 output_token_list.append(output_tokens_curr_timestep)
 
-                if torch.count_nonzero(speech_mask) > 0:
-                    dec_input_next_timestep = output_tokens_curr_timestep * 1  # (B,8)
-                    dec_input_next_timestep[:, 0] = (
-                        dec_input_next_timestep[:, 0] + self.speech_offset
-                    )  # add offset to first codebook
-                    dec_input[:, :, t + 1] = dec_input_next_timestep * 1
-                else:
-                    dec_input[:, 0, t + 1] = output_tokens_curr_timestep.squeeze(1)
+                if t > self.decoder_context_len + 1:
+                    # Teacher force before that, then use predicted tokens
+                    if torch.count_nonzero(speech_mask) > 0:
+                        dec_input_next_timestep = output_tokens_curr_timestep * 1  # (B,8)
+                        dec_input_next_timestep[:, 0] = (
+                            dec_input_next_timestep[:, 0] + self.speech_offset
+                        )  # add offset to first codebook
+                        dec_input[:, :, t + 1] = dec_input_next_timestep * 1
+                    else:
+                        dec_input[:, 0, t + 1] = output_tokens_curr_timestep.squeeze(1)
                 # # TF
                 # if t+1 < 10:
                 #     dec_input[:, :, t + 1] = dec_input_raw[:, :, t+1]
@@ -1576,8 +1583,13 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 step = batch_idx * self.test_dataloader().batch_size + i
                 if torch.count_nonzero(speech_mask) > 0:
                     dec_input_to_1024 = self.convert_tokens_to_range(dec_input_raw[i, :, 0:audio_len])
-                    dec_input_wav = self.decode_wav_from_codec_model(dec_input_to_1024)
+                    dec_input_to_1024_answer = dec_input_to_1024[:,self.decoder_context_len+1:]
+                    dec_input_wav = self.decode_wav_from_codec_model(dec_input_to_1024_answer)
                     self.logger.experiment.add_audio("Inf Dec Input Wav", dec_input_wav, step, self.sample_rate)
+                    if self.decoder_context_len > 0:
+                        context_tokens = dec_input_to_1024[:, :self.decoder_context_len+1]
+                        context_wav = self.decode_wav_from_codec_model(context_tokens)
+                        self.logger.experiment.add_audio("Dec Context Wav", context_wav, step, self.sample_rate)
 
                     predicted_tokens = output_tokens_combined[i]
                     if i in end_indices:
@@ -1588,6 +1600,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     dec_inp_img = dec_input_to_1024.data.cpu().float().numpy()
 
                     predicted_tokens = self.convert_tokens_to_range(predicted_tokens, apply_offset_correction=False)
+                    predicted_tokens = predicted_tokens[:,self.decoder_context_len+1:]
                     predicted_wav = self.decode_wav_from_codec_model(predicted_tokens)
                     self.logger.experiment.add_audio("Inf Pred Wav", predicted_wav, step, self.sample_rate)
                     self.logger.experiment.add_image(
