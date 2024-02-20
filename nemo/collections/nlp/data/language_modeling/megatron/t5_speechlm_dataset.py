@@ -1095,7 +1095,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             "dec_input": torch.stack(dec_input_list) if len(dec_input_list) > 0 else None,
             "dec_input_mask": torch.stack(dec_input_mask_list) if len(dec_input_mask_list) > 0 else None,
             "dec_labels": torch.stack(dec_labels_list) if len(dec_labels_list) > 0 else None,
-            "dec_labels_mask": torch.stack(dec_labels_mask_list) if len(dec_labels_mask_list) > 0 else None,
+            "dec_labels_mask": dec_labels_mask,
             "speech_mask": torch.stack(speech_mask_list) if len(speech_mask_list) > 0 else None,
             "context_and_question_tokens_lens": context_and_question_tokens_len,
             "cross_attention_prior": torch.stack(cross_attention_prior_list)
