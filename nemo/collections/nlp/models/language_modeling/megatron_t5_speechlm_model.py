@@ -1494,7 +1494,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     output_tokens_curr_timestep = output_tokens_curr_timestep.view(output_logits.shape[0], self.num_speech_codebooks)
 
                 for _b in range(token_preds.shape[0]):
-                    if t > 10 and token_preds[_b] == self.tokenizer.eos_id:
+                    if t > self.decoder_context_len + 10 and token_preds[_b] == self.tokenizer.eos_id:
                         if _b not in end_indices:
                             logging.info("End detected for item {}".format(_b) + " at timestep {}".format(t))
                             end_indices[_b] = t
@@ -1570,6 +1570,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             # hyp_pred_transcript_list = []
             # gt_transcript_list = []
             similarity_list = []
+            pred_context_similarity_list = []
+            gt_context_similarity_list = []
             question_type = []
             # dataset_names = []
 
@@ -1590,6 +1592,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         context_tokens = dec_input_to_1024[:, :self.decoder_context_len+1]
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
                         self.logger.experiment.add_audio("Dec Context Wav", context_wav, step, self.sample_rate)
+                        context_wav_fp = os.path.join(_exp_dir_path, f'context_wav_{step}.wav')
+                        sf.write(context_wav_fp, context_wav.cpu().numpy(), self.sample_rate)
 
                     predicted_tokens = output_tokens_combined[i]
                     if i in end_indices:
@@ -1657,8 +1661,21 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         _context_tokens = self.convert_tokens_to_range(_context_tokens, pattern=self.context_pattern)
                         _context_wav = self.decode_wav_from_codec_model(_context_tokens)
                         self.logger.experiment.add_audio("Context Wav", _context_wav, step, self.sample_rate)
-                        audio_fp_context = os.path.join(_exp_dir_path, f'context_wav_{step}.wav')
-                        sf.write(audio_fp_context, _context_wav.cpu().numpy(), self.sample_rate)
+                        context_wav_fp = os.path.join(_exp_dir_path, f'context_wav_{step}.wav')
+                        sf.write(context_wav_fp, _context_wav.cpu().numpy(), self.sample_rate)
+                    
+                    spk_embedding_context = nemo_sv_model.get_embedding(context_wav_fp)
+                    spk_embedding_context = spk_embedding_context.cpu().detach().numpy().flatten()
+                    pred_similarity_context = np.dot(spk_embedding_context, spk_embedding_pred) / (
+                        np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_pred)
+                    )
+                    gt_similarity_context = np.dot(spk_embedding_context, spk_embedding_gt) / (
+                        np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_gt)
+                    )
+                    self.logger.experiment.add_scalar(f'Inf SV Cossim Context Pred', pred_similarity_context, step)
+                    self.logger.experiment.add_scalar(f'Inf SV Cossim Context GT', gt_similarity_context, step)
+                    pred_context_similarity_list.append(pred_similarity_context)
+                    gt_context_similarity_list.append(gt_similarity_context)
 
                     task_question = self.frozen_model.tokenizer.ids_to_text(
                         [v[1] for v in input_token_list if v[1] < self.lm_vocab_size]
@@ -1773,9 +1790,14 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
             # compute average similarity
             similarity_avg = np.mean(similarity_list)
+            pred_context_similarity_avg = np.mean(pred_context_similarity_list)
+            gt_context_similarity_avg = np.mean(gt_context_similarity_list)
+
             self.logger.experiment.add_scalar(f'Inf SV Avg Cossim', similarity_avg, batch_idx)
             self.predict_step_outputs.append({
                 'sv_avg_cossim': similarity_avg,
+                'sv_avg_cossim_context_pred': pred_context_similarity_avg,
+                'sv_avg_cossim_context_gt': gt_context_similarity_avg,
                 'cer_transcript': np.mean(cer_batch),
                 'wer_transcript': np.mean(wer_batch),
                 'cer_phoneme': np.mean(cer_phoneme) if len(cer_phoneme) > 0 else None,
