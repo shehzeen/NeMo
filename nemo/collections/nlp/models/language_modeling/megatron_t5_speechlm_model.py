@@ -1503,7 +1503,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                 output_token_list.append(output_tokens_curr_timestep)
 
-                if t > self.decoder_context_len + 1:
+                if self.decoder_context_len == 0 or t > self.decoder_context_len:
                     # Teacher force before that, then use predicted tokens
                     if torch.count_nonzero(speech_mask) > 0:
                         dec_input_next_timestep = output_tokens_curr_timestep * 1  # (B,8)
@@ -1604,7 +1604,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     dec_inp_img = dec_input_to_1024.data.cpu().float().numpy()
 
                     predicted_tokens = self.convert_tokens_to_range(predicted_tokens, apply_offset_correction=False)
-                    predicted_tokens = predicted_tokens[:,self.decoder_context_len+1:]
+                    if self.decoder_context_len > 0:
+                        predicted_tokens = predicted_tokens[:,self.decoder_context_len+1:]
                     predicted_wav = self.decode_wav_from_codec_model(predicted_tokens)
                     self.logger.experiment.add_audio("Inf Pred Wav", predicted_wav, step, self.sample_rate)
                     self.logger.experiment.add_image(
