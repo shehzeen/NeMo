@@ -298,7 +298,6 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
 
             if self.context_conditioning == "decoder":
                 # Modify doc to make combine context and anwer
-                print("modifying doc")
                 assert ";" not in doc['context'], "Multiple contexts not supported in decoder conditioning"
                 doc['answer'] = "{};{}".format(doc['context'], doc['answer'])
                 doc['answer_duration'] = self.context_duration_min + doc['answer_duration']

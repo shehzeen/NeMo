@@ -47,6 +47,7 @@ class AudioDataset(Dataset):
         max_same_speaker_audios=5,
         use_context_as_same_speaker_audio=False,
         pad_multiple=320,
+        audio_type="actual", # actual or noise or silence
     ):
         self.data = []
         speakerwise_records = {}
@@ -78,6 +79,7 @@ class AudioDataset(Dataset):
         self.speaker_list = list(self.speakerwise_records.keys())
 
         self.sample_rate = sample_rate
+        self.audio_type = audio_type
 
         # TODO: Using White Noise Perturbation right now (dont have noise manifest)
 
@@ -159,28 +161,49 @@ class AudioDataset(Dataset):
         return len(self.data)
 
     def _get_wav_from_filepath(self, audio_filepath, perturb=False):
-        features = AudioSegment.segment_from_file(
-            audio_filepath, target_sr=self.sample_rate, n_segments=-1, trim=False,
-        )
-        audio_samples = features.samples
-        audio = torch.tensor(audio_samples)
-        audio = torch.nn.functional.pad(audio, (0, self.pad_multiple - audio.size(0) % self.pad_multiple), value=0)
-        audio_length = torch.tensor(audio.size(0)).long()
+        if self.audio_type == "noise" or self.audio_type == "silence":
+            # Create a 6 second noise audio
+            if self.audio_type == "noise":
+                audio_samples = np.random.normal(0, 1, 6 * self.sample_rate)
+            else:
+                audio_samples = np.zeros(6 * self.sample_rate)
+            audio = torch.tensor(audio_samples).float()
+            audio = torch.nn.functional.pad(audio, (0, self.pad_multiple - audio.size(0) % self.pad_multiple), value=0)
+            audio_length = torch.tensor(audio.size(0)).long()
 
-        perturbed_audio = None
-        perturbed_audio_length = None
-        if perturb:
-            features_copy = copy.deepcopy(features)
-            self.noise_perturber.perturb(features_copy)
-            perturbed_audio_samples = features_copy.samples
-            perturbed_audio = torch.tensor(perturbed_audio_samples)
-            perturbed_audio = torch.nn.functional.pad(
-                perturbed_audio, (0, self.pad_multiple - perturbed_audio.size(0) % self.pad_multiple), value=0
+            perturbed_audio = None
+            perturbed_audio_length = None
+            if perturb:
+                perturbed_audio = audio * 1.0
+                perturbed_audio_length = (audio_length * 1.0).long()
+            
+            return audio, audio_length, perturbed_audio, perturbed_audio_length
+        elif self.audio_type == "actual":
+            features = AudioSegment.segment_from_file(
+                audio_filepath, target_sr=self.sample_rate, n_segments=-1, trim=False,
             )
-            perturbed_audio_length = torch.tensor(perturbed_audio.size(0)).long()
-            # import ipdb; ipdb.set_trace()
+            audio_samples = features.samples
+            audio = torch.tensor(audio_samples)
+            audio = torch.nn.functional.pad(audio, (0, self.pad_multiple - audio.size(0) % self.pad_multiple), value=0)
+            audio_length = torch.tensor(audio.size(0)).long()
 
-        return audio, audio_length, perturbed_audio, perturbed_audio_length
+            perturbed_audio = None
+            perturbed_audio_length = None
+            if perturb:
+                features_copy = copy.deepcopy(features)
+                self.noise_perturber.perturb(features_copy)
+                perturbed_audio_samples = features_copy.samples
+                perturbed_audio = torch.tensor(perturbed_audio_samples)
+                perturbed_audio = torch.nn.functional.pad(
+                    perturbed_audio, (0, self.pad_multiple - perturbed_audio.size(0) % self.pad_multiple), value=0
+                )
+                perturbed_audio_length = torch.tensor(perturbed_audio.size(0)).long()
+                # import ipdb; ipdb.set_trace()
+
+            return audio, audio_length, perturbed_audio, perturbed_audio_length
+        
+        else:
+            raise ValueError("Unknown audio type {}".format(self.audio_type))
 
     def pad_collate_fn(self, batch):
         final_batch = {}
@@ -396,6 +419,7 @@ def main():
     parser.add_argument('--shuffle', action='store_true')
     parser.add_argument('--split_into_train_val', action='store_true')
     parser.add_argument('--num_val_records', type=int, default=500)
+    parser.add_argument('--audio_type', type=str, default='actual')  # actual, noise or silence
     args = parser.parse_args()
 
     if args.codec_model == 'encodec':
@@ -437,6 +461,7 @@ def main():
         noise_manifest_path=args.noise_manifest,
         use_context_as_same_speaker_audio=args.use_context_as_same_speaker_audio,
         pad_multiple=int(codec_model_downsampling_factor),
+        audio_type=args.audio_type,
     )
 
     dataloader = torch.utils.data.DataLoader(
