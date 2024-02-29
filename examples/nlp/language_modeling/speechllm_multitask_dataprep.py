@@ -574,7 +574,7 @@ def main():
             tts_record = {
                 "audio_filepath": batch['audio_filepath'][sidx],
                 "text": batch['text'][sidx],
-                "question": batch['question'][sidx],
+                "question": batch['question'][sidx].replace("Phoneme TTS", "Text to speech this"),
                 "answer": target_codec_filepath,
                 "context": tts_contextpath,
                 "question_type": "TEXT",
