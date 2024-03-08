@@ -26,6 +26,7 @@ from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import open_dict
 from pytorch_lightning.trainer.trainer import Trainer
+import librosa
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate
@@ -52,6 +53,7 @@ from nemo.collections.tts.parts.utils.helpers import plot_alignment_to_numpy, pl
 from nemo.utils import AppState, logging
 from nemo.collections.tts.losses.aligner_loss import ForwardSumLoss
 from nemo.collections.tts.models import AudioCodecModel
+from transformers import AutoFeatureExtractor, WavLMForXVector
 
 try:
     from apex.transformer.pipeline_parallel.utils import (
@@ -1540,6 +1542,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             else:
                 nemo_sv_model = self.additional_models['nemo_sv_model']
 
+            if 'wavlm_sv_model' not in self.additional_models:
+                wavlm_feature_extractor = AutoFeatureExtractor.from_pretrained("microsoft/wavlm-base-plus-sv")
+                wavlm_model = WavLMForXVector.from_pretrained("microsoft/wavlm-base-plus-sv")
+                wavlm_model = wavlm_model.to(device)
+                wavlm_model.eval()
+                self.additional_models['wavlm_sv_model'] = wavlm_model
+                self.additional_models['wavlm_feature_extractor'] = wavlm_feature_extractor
+            else:
+                wavlm_model = self.additional_models['wavlm_sv_model']
+                wavlm_feature_extractor = self.additional_models['wavlm_feature_extractor']
+
             if 'asr_model' not in self.additional_models:
                 asr_model = self.cfg.get("asr_model_name", "stt_multilingual_fastconformer_hybrid_large_pc_blend_eu")
                 logging.info(f"Loading ASR Model: {asr_model}")
@@ -1570,8 +1583,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             # hyp_pred_transcript_list = []
             # gt_transcript_list = []
             similarity_list = []
+            wavlm_similarity_list = []
             pred_context_similarity_list = []
             gt_context_similarity_list = []
+            pred_context_similarity_list_wavlm = []
+            gt_context_similarity_list_wavlm = []
             question_type = []
             # dataset_names = []
 
@@ -1593,7 +1609,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
                         self.logger.experiment.add_audio("Dec Context Wav", context_wav, step, self.sample_rate)
                         context_wav_fp = os.path.join(_exp_dir_path, f'context_wav_{step}.wav')
-                        sf.write(context_wav_fp, context_wav.cpu().numpy(), self.sample_rate)
+                        context_wav_np = context_wav.cpu().numpy()
+                        sf.write(context_wav_fp, context_wav_np, self.sample_rate)
 
                     predicted_tokens = output_tokens_combined[i]
                     if i in end_indices:
@@ -1617,10 +1634,12 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                     # save predicted_wav and gt_wav to a wav files in dir_path
                     # asr_model_i = asr_model_zh if lang[i] == Lang.zh.value else asr_model
+                    pred_wav_np = predicted_wav.cpu().numpy()
+                    gt_wav_np = dec_input_wav.cpu().numpy()
                     audio_fp_pred = os.path.join(_exp_dir_path, f'predicted_wav_{step}.wav')
-                    sf.write(audio_fp_pred, predicted_wav.cpu().numpy(), self.sample_rate)
+                    sf.write(audio_fp_pred, pred_wav_np, self.sample_rate)
                     audio_fp_gt = os.path.join(_exp_dir_path, f'dec_input_wav_{step}.wav')
-                    sf.write(audio_fp_gt, dec_input_wav.cpu().numpy(), self.sample_rate)
+                    sf.write(audio_fp_gt, gt_wav_np, self.sample_rate)
 
 
                     # speaker verification evaluation
@@ -1631,8 +1650,14 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
                         np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
                     )
+                    
                     self.logger.experiment.add_scalar(f'Inf SV Cossim Individual Sample', similarity, step)
+
+                    # Resample pred_wav_np and gt_wav_np to 16kHz
+                    
+
                     similarity_list.append(similarity)
+                    
 
                     if lang[i] == Lang.zh.value:
                         audio_to_pred_zh.append({"step":i, "audio":audio_fp_pred})
@@ -1663,7 +1688,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         _context_wav = self.decode_wav_from_codec_model(_context_tokens)
                         self.logger.experiment.add_audio("Context Wav", _context_wav, step, self.sample_rate)
                         context_wav_fp = os.path.join(_exp_dir_path, f'context_wav_{step}.wav')
-                        sf.write(context_wav_fp, _context_wav.cpu().numpy(), self.sample_rate)
+                        context_wav_np = _context_wav.cpu().numpy()
+                        sf.write(context_wav_fp, context_wav_np, self.sample_rate)
                     
                     spk_embedding_context = nemo_sv_model.get_embedding(context_wav_fp)
                     spk_embedding_context = spk_embedding_context.cpu().detach().numpy().flatten()
@@ -1677,6 +1703,33 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     self.logger.experiment.add_scalar(f'Inf SV Cossim Context GT', gt_similarity_context, step)
                     pred_context_similarity_list.append(pred_similarity_context)
                     gt_context_similarity_list.append(gt_similarity_context)
+
+
+                    pred_wav_np_16 = librosa.resample(pred_wav_np, orig_sr=self.sample_rate, target_sr=16000)
+                    gt_wav_np_16 = librosa.resample(gt_wav_np, orig_sr=self.sample_rate, target_sr=16000)
+                    context_wav_np_16 = librosa.resample(context_wav_np, orig_sr=self.sample_rate, target_sr=16000)
+
+                    audio_fp_pred_16 = os.path.join(_exp_dir_path, f'predicted_wav_{step}_16khz.wav')
+                    sf.write(audio_fp_pred_16, pred_wav_np_16, 16000)
+                    audio_fp_gt_16 = os.path.join(_exp_dir_path, f'dec_input_wav_{step}_16khz.wav')
+                    sf.write(audio_fp_gt_16, gt_wav_np_16, 16000)
+                    context_wav_fp_16 = os.path.join(_exp_dir_path, f'context_wav_{step}_16khz.wav')
+                    sf.write(context_wav_fp_16, context_wav_np_16, 16000)
+
+                    wavlm_inputs = wavlm_feature_extractor([pred_wav_np_16, gt_wav_np_16, context_wav_np_16], sampling_rate=16000, return_tensors="pt", padding=True)
+                    wavlm_inputs = {k: v.to(device) for k, v in wavlm_inputs.items()}
+                    wavlm_embeddings = wavlm_model(**wavlm_inputs).embeddings
+                    wavlm_embeddings = torch.nn.functional.normalize(wavlm_embeddings, dim=-1).cpu()
+                    cosine_sim = torch.nn.CosineSimilarity(dim=-1)
+                    wavlm_similarity = cosine_sim(wavlm_embeddings[0], wavlm_embeddings[1]).item()
+                    self.logger.experiment.add_scalar(f'Inf WavLM Cossim Individual Sample', wavlm_similarity, step)
+                    wavlm_similarity_list.append(wavlm_similarity)
+
+                    wavlm_similarity_context_gt = cosine_sim(wavlm_embeddings[2], wavlm_embeddings[1]).item()
+                    wavlm_similarity_context_pred = cosine_sim(wavlm_embeddings[2], wavlm_embeddings[0]).item()
+
+                    gt_context_similarity_list_wavlm.append(wavlm_similarity_context_gt)
+                    pred_context_similarity_list_wavlm.append(wavlm_similarity_context_pred)
 
                     task_question = self.frozen_model.tokenizer.ids_to_text(
                         [v[1] for v in input_token_list if v[1] < self.lm_vocab_size]
@@ -1791,14 +1844,20 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
             # compute average similarity
             similarity_avg = np.mean(similarity_list)
+            wavlm_similarity_avg = np.mean(wavlm_similarity_list)
             pred_context_similarity_avg = np.mean(pred_context_similarity_list)
             gt_context_similarity_avg = np.mean(gt_context_similarity_list)
+            pred_context_similarity_avg_wavlm = np.mean(pred_context_similarity_list_wavlm)
+            gt_context_similarity_avg_wavlm = np.mean(gt_context_similarity_list_wavlm)
 
             self.logger.experiment.add_scalar(f'Inf SV Avg Cossim', similarity_avg, batch_idx)
             self.predict_step_outputs.append({
                 'sv_avg_cossim': similarity_avg,
+                'wavlm_avg_cossim': wavlm_similarity_avg,
                 'sv_avg_cossim_context_pred': pred_context_similarity_avg,
                 'sv_avg_cossim_context_gt': gt_context_similarity_avg,
+                'wavlm_avg_cossim_context_pred': pred_context_similarity_avg_wavlm,
+                'wavlm_avg_cossim_context_gt': gt_context_similarity_avg_wavlm,
                 'cer_transcript': np.mean(cer_batch),
                 'wer_transcript': np.mean(wer_batch),
                 'cer_phoneme': np.mean(cer_phoneme) if len(cer_phoneme) > 0 else None,
