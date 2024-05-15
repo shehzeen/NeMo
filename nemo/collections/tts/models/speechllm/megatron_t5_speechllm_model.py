@@ -1547,6 +1547,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             if 'nemo_sv_model' not in self.additional_models:
                 nemo_sv_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large')
                 nemo_sv_model = nemo_sv_model.to(device)
+                nemo_sv_model.encoder.disable_torch_distributed = True # For multi-gpu training validation
                 nemo_sv_model.eval()
                 self.additional_models['nemo_sv_model'] = nemo_sv_model
                 logging.info(f"Loaded SV Model: {nemo_sv_model}")
@@ -1562,6 +1563,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     model = nemo_asr.models.EncDecRNNTBPEModel
                 asr_model = model.from_pretrained(model_name=asr_model)
                 asr_model = asr_model.to(device)
+                asr_model.encoder.disable_torch_distributed = True # For multi-gpu training validation
                 asr_model.eval()
                 self.additional_models['asr_model'] = asr_model
                 logging.info(f"Loaded ASR Model: {asr_model}")
