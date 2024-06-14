@@ -607,6 +607,13 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                 self.logger.experiment.add_audio(
                                     "train_context_wav", _context_wav, self.global_step, self.sample_rate
                                 )
+                            else:
+                                question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
+                                if question_si > 0:
+                                    context_text = self.frozen_model.tokenizer.ids_to_text(
+                                        [v for v in input_token_list_all[:question_si] if v < self.lm_vocab_size]
+                                    )
+                                    self.logger.experiment.add_text("Train Context Text", context_text, self.global_step)
 
                             question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
                             question_ei = text_limits[0, 1].item() - virtual_tokens.shape[1]
@@ -1723,13 +1730,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         context_tokens = self.convert_tokens_to_range(context_tokens, pattern=self.context_pattern)
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
                     else:
-                        raise NotImplementedError("During prediction, there was no context found.")
-                    self.logger.experiment.add_audio("Context Wav", context_wav, step, self.sample_rate)
-                    context_wav_fp = os.path.join(_exp_dir_path, f'context_wav_{wav_num}.wav')
-                    sf.write(context_wav_fp, context_wav.cpu().numpy(), self.sample_rate)
+                        context_wav = None
+                        spk_embedding_context = spk_embedding_gt
+                        # raise NotImplementedError("During prediction, there was no context found.")
+                    if context_wav is not None:
+                        self.logger.experiment.add_audio("Context Wav", context_wav, step, self.sample_rate)
+                        context_wav_fp = os.path.join(_exp_dir_path, f'context_wav_{wav_num}.wav')
+                        sf.write(context_wav_fp, context_wav.cpu().numpy(), self.sample_rate)
 
-                    spk_embedding_context = nemo_sv_model.get_embedding(context_wav_fp)
-                    spk_embedding_context = spk_embedding_context.cpu().detach().numpy().flatten()
+                        spk_embedding_context = nemo_sv_model.get_embedding(context_wav_fp)
+                        spk_embedding_context = spk_embedding_context.cpu().detach().numpy().flatten()
+                        
                     pred_similarity_context = np.dot(spk_embedding_context, spk_embedding_pred) / (
                         np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_pred)
                     )

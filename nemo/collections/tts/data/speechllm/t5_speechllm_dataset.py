@@ -807,11 +807,13 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 instruction_tokens = self._get_text_tokens("Edit Speech")
                 field_tokens = self._get_phoneme_tokens(_text.replace("Edit Speech ", ""))
                 field_tokens = instruction_tokens + field_tokens
-            elif _text.startswith("| Language"):
+            elif _text.startswith("TEXT CONTEXT:"):
                 # Speaker id conditioning
                 field_tokens = self._get_text_tokens(_text)
                 # pad field tokens to fixed length
-                _fixed_context_len = 20
+                assert self.context_duration_min == self.context_duration_max, "TEXT CONTEXT only supports fixed context duration"
+                # To keep context length the same for audio or tex context
+                _fixed_context_len = int(self.context_duration_min * self.codebook_fps)
                 field_tokens = field_tokens + [self.tokenizer.pad_id] * (_fixed_context_len - len(field_tokens))
             else:
                 field_tokens = self._get_text_tokens(field_data.strip(" "))  # list of ids
@@ -865,23 +867,35 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             return [field_tokens]
         elif doc[f"{field}_type"] == 'CONTEXTANSWER':
             # Both Context and Answer are in the field
-            context_codec_path, answer_codec_path = field_data.split(";")
+            context_info, answer_codec_path = field_data.split(";")
             if self.codec_folder is not None:
-                context_codec_path = self.codec_folder / context_codec_path
+                context_codec_path = self.codec_folder / context_info
                 answer_codec_path = self.codec_folder / answer_codec_path
-            context_tokens = torch.load(context_codec_path).long()
-            answer_tokens = torch.load(answer_codec_path).long()
-            context_tokens[0] = (context_tokens[0] + self.speech_offset).long()
-            assert self.context_duration_min == self.context_duration_max, "CONTEXTANSWER only supports fixed context duration"
-            reference_codec_len = int(self.context_duration_min * self.codebook_fps)
-            assert context_tokens.shape[1] >= reference_codec_len, "CONTEXTANSWER context duration is less than min duration {} {} {}".format(context_tokens.shape[1], reference_codec_len, context_codec_path)
-            si = rng.randint(0, context_tokens.shape[1] - reference_codec_len)
-            context_tokens = context_tokens[:, si:si+reference_codec_len]
-            answer_tokens[0] = (answer_tokens[0] + self.speech_offset).long()
-            pad_tokens = torch.zeros(self.num_speech_codebooks, 1).long()
-            # padding between context and answer
-            field_tokens = torch.cat([context_tokens, pad_tokens, answer_tokens], dim=1)
-            field_tokens = [field_tokens]
+            if context_info.startswith("TEXT CONTEXT:"):
+                context_tokens = self._get_text_tokens(context_info.strip(" "))
+                # pad field tokens to fixed length
+                assert self.context_duration_min == self.context_duration_max, "TEXT CONTEXT only supports fixed context duration"
+                _fixed_context_len = int(self.context_duration_min * self.codebook_fps)
+                context_tokens = context_tokens + [self.tokenizer.pad_id] * (_fixed_context_len - len(context_tokens))
+
+                answer_tokens = torch.load(answer_codec_path).long()
+                answer_tokens[0] = (answer_tokens[0] + self.speech_offset).long()
+                field_tokens = context_tokens + [self.tokenizer.pad_id] + [answer_tokens]
+            else:
+                context_tokens = torch.load(context_codec_path).long()
+                context_tokens[0] = (context_tokens[0] + self.speech_offset).long()
+                assert self.context_duration_min == self.context_duration_max, "CONTEXTANSWER only supports fixed context duration"
+                reference_codec_len = int(self.context_duration_min * self.codebook_fps)
+                assert context_tokens.shape[1] >= reference_codec_len, "CONTEXTANSWER context duration is less than min duration {} {} {}".format(context_tokens.shape[1], reference_codec_len, context_codec_path)
+                si = rng.randint(0, context_tokens.shape[1] - reference_codec_len)
+                context_tokens = context_tokens[:, si:si+reference_codec_len]
+            
+                answer_tokens = torch.load(answer_codec_path).long()
+                answer_tokens[0] = (answer_tokens[0] + self.speech_offset).long()
+                pad_tokens = torch.zeros(self.num_speech_codebooks, 1).long()
+                # padding between context and answer
+                field_tokens = torch.cat([context_tokens, pad_tokens, answer_tokens], dim=1)
+                field_tokens = [field_tokens]
         elif doc[f"{field}_type"] == 'SEPARATIONCODECS':
             mixed_codec_path, reference_codec_paths = field_data.split(",")
             reference_codec_paths = reference_codec_paths.split(";")
