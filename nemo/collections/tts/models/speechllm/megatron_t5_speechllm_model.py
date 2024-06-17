@@ -1659,7 +1659,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     predicted_tokens = output_tokens_combined[i]  # Should not contain context even if decoder context
                     if i in end_indices:
                         logging.info(f"Clipping until end index for audio {i}")
-                        predicted_tokens = predicted_tokens[:, 0 : end_indices[i] + 1 - self.decoder_context_len]  # trim to audio length
+                        predicted_tokens = predicted_tokens[:, 0 : end_indices[i] - (1 + self.decoder_context_len)]  # trim to audio length
 
                     pred_img = predicted_tokens.data.cpu().float().numpy()
                     dec_inp_img = dec_input_to_1024.data.cpu().float().numpy()
