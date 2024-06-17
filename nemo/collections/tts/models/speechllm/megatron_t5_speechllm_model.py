@@ -576,7 +576,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             logging.info(f"wer score : {score}")
                             self.logger.experiment.add_scalar('WER', score, self.global_step)
                         else:
-                            audio_len = (labels[0][0] != 0).sum().item()
+                            audio_len = self.decoder_context_len + (labels[0][0][self.decoder_context_len:] != 0).sum().item()
                             labels_to_1024 = self.convert_tokens_to_range(labels[0, :, 0:audio_len])
                             label_wav = self.decode_wav_from_codec_model(labels_to_1024)
                             dec_input_to_1024 = self.convert_tokens_to_range(dec_input[0, :, 0:audio_len])
@@ -607,13 +607,6 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                 self.logger.experiment.add_audio(
                                     "train_context_wav", _context_wav, self.global_step, self.sample_rate
                                 )
-                            else:
-                                question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
-                                if question_si > 0:
-                                    context_text = self.frozen_model.tokenizer.ids_to_text(
-                                        [v for v in input_token_list_all[:question_si] if v < self.lm_vocab_size]
-                                    )
-                                    self.logger.experiment.add_text("Train Context Text", context_text, self.global_step)
 
                             question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
                             question_ei = text_limits[0, 1].item() - virtual_tokens.shape[1]
@@ -954,7 +947,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     logging.info(f"wer score : {score}")
                     self.logger.experiment.add_scalar('WER', score, self.global_step)
                 else:
-                    audio_len = (labels[0][0] != 0).sum().item()
+                    audio_len = self.decoder_context_len + (labels[0][0][self.decoder_context_len:] != 0).sum().item()
                     labels_to_1024 = self.convert_tokens_to_range(labels[0, :, 0:audio_len])
                     label_wav = self.decode_wav_from_codec_model(labels_to_1024)
                     dec_input_to_1024 = self.convert_tokens_to_range(dec_input[0, :, 0:audio_len])
@@ -1649,7 +1642,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             audio_to_pred = []
             audio_to_pred_zh = []
             for i in range(batch_size):
-                audio_len = (labels[i][0] != 0).sum().item()
+                audio_len = self.decoder_context_len + (labels[i][0][self.decoder_context_len:] != 0).sum().item()
                 # step = batch_idx * self.test_dataloader().batch_size + i
                 if global_step is not None:
                     # During validation, step is simply global_step + i
