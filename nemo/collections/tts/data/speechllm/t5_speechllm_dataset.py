@@ -292,6 +292,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         asr = 0
         i = 0
         logging.info(f"copy_dataset len === {len(copy_dataset)}")
+        examples = []
         for json_line in tqdm(copy_dataset):
             i += 1
 
@@ -374,12 +375,12 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                     < approx_context_len + approx_question_len + approx_answer_len
                     < self.max_seq_length
                 ):
-                    self.examples.append(doc)
+                    examples.append(doc)
                 elif (self.transformer_type == "T5") and (
                     self.min_seq_length < approx_context_len + approx_question_len < self.max_seq_length
                     and self.min_seq_length < approx_answer_len < self.max_seq_length
                 ):
-                    self.examples.append(doc)
+                    examples.append(doc)
                 else:
                     logging.debug(f"skipped for {approx_context_len + approx_question_len} {approx_answer_len} len")
                     skipped += 1
@@ -388,8 +389,10 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 logging.debug(f"skipped for {doc['answer']} as it is in skip_datasets")
                 skipped += 1
 
-        logging.info(f"After Process len(self.examples) {len(self.examples)} TTS = {tts} ASR = {asr}")
+        # logging.info(f"After Process len(self.examples) {len(self.examples)} TTS = {tts} ASR = {asr}")
         logging.info(f'Skipped {skipped} sentences, sequence length too short or too long even after truncation')
+
+        return examples
 
     def __getitem__(self, idx):
         doc = self.examples[idx]
