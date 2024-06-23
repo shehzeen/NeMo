@@ -889,6 +889,9 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 context_tokens[0] = (context_tokens[0] + self.speech_offset).long()
                 assert self.context_duration_min == self.context_duration_max, "CONTEXTANSWER only supports fixed context duration"
                 reference_codec_len = int(self.context_duration_min * self.codebook_fps)
+                if context_tokens.shape[1] < reference_codec_len:
+                    # Repeat the context to match the reference_codec_len
+                    context_tokens = torch.cat([context_tokens] * (reference_codec_len // context_tokens.shape[1] + 1), dim=1)
                 assert context_tokens.shape[1] >= reference_codec_len, "CONTEXTANSWER context duration is less than min duration {} {} {}".format(context_tokens.shape[1], reference_codec_len, context_codec_path)
                 si = rng.randint(0, context_tokens.shape[1] - reference_codec_len)
                 context_tokens = context_tokens[:, si:si+reference_codec_len]
