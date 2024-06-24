@@ -85,6 +85,8 @@ class MegatronTransformerEncoderDecoderModule(MegatronModule):
                 encoder_attn_mask_type = AttnMaskType.padding
             elif hasattr(encoder.model, 'self_attn_mask_type'):
                 encoder_attn_mask_type = encoder.model.self_attn_mask_type
+            elif isinstance(encoder.model, torch.nn.ModuleList) and hasattr(encoder.model[0], 'self_attn_mask_type'):
+                encoder_attn_mask_type = encoder.model[0].self_attn_mask_type
             else:
                 raise AttributeError(
                     "Could not find an attribute for encoder self_attn_mask_type, make sure it is set when instatiating the encoder or pass it to the constructor of this class."
@@ -161,6 +163,7 @@ class MegatronTransformerEncoderDecoderModule(MegatronModule):
         set_inference_key_value_memory=False,
         decoder_max_sequence_len=None,
         encoder_max_sequence_len=None,
+        enc_output_to_layers=None
     ):
         if self.decoder is None:
             raise ValueError(f"Cannot call .decode(...) when self.decoder is None.")
@@ -178,6 +181,7 @@ class MegatronTransformerEncoderDecoderModule(MegatronModule):
             set_inference_key_value_memory=set_inference_key_value_memory,
             decoder_max_sequence_len=decoder_max_sequence_len,
             encoder_max_sequence_len=encoder_max_sequence_len,
+            enc_output_to_layers=enc_output_to_layers
         )
 
         return dec_output
@@ -203,6 +207,7 @@ class MegatronTransformerEncoderDecoderModule(MegatronModule):
         set_inference_key_value_memory=False,
         decoder_max_sequence_len=None,
         encoder_max_sequence_len=None,
+        enc_output_to_layers=None
     ):
         # encoder
         if enc_output is None:
@@ -219,7 +224,10 @@ class MegatronTransformerEncoderDecoderModule(MegatronModule):
                 assert self.encoder_hidden_state is not None
                 enc_output = self.encoder_hidden_state
         else:
-            enc_attn_mask = enc_output_attn_mask.to(enc_attn_mask)
+            if isinstance(enc_output_attn_mask, list):
+                enc_attn_mask = [mask.to(enc_attn_mask[midx]) for midx, mask in enumerate(enc_output_attn_mask)]
+            else:
+                enc_attn_mask = enc_output_attn_mask.to(enc_attn_mask)
 
         if self.decoder is None or output_enc_hidden_only:
             return enc_output
@@ -241,6 +249,7 @@ class MegatronTransformerEncoderDecoderModule(MegatronModule):
             set_inference_key_value_memory=set_inference_key_value_memory,
             decoder_max_sequence_len=decoder_max_sequence_len,
             encoder_max_sequence_len=encoder_max_sequence_len,
+            enc_output_to_layers=enc_output_to_layers
         )
 
         # if self.hiddens_module is not None enc_output is a dict, else it is a torch.tensor

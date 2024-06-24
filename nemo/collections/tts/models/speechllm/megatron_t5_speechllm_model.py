@@ -300,21 +300,42 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         Special forward method for p-tuning/prompt-tuning pretrained
         T5 style models.
         """
+        multi_encoder = False
+        if isinstance(context_and_question_tokens, list):
+            multi_encoder = True
+            assert isinstance(enc_mask, list)
+            assert isinstance(position_ids, list)
+            if cross_attention_prior is None:
+                cross_attention_prior = [None for _ in range(len(context_and_question_tokens))]
+            assert isinstance(cross_attention_prior, list)
+            assert len(context_and_question_tokens) == len(enc_mask) == len(position_ids) == len(cross_attention_prior)
+        else:
+            multi_encoder = False
+            context_and_question_tokens = [context_and_question_tokens]
+            enc_mask = [enc_mask]
+            position_ids = [position_ids]
+            cross_attention_prior = [cross_attention_prior]
+
+
         enc_output = None
         if self.first_stage_of_pipeline() and inference_step == 0:
             # Get embeddings for text tokens and insert virtual token embeddings
-            input_embeds = self.get_embeddings_and_combine(
-                [virtual_tokens, context_and_question_tokens], taskname_ids, inference
-            )
-            # TODO: This check needs to be revisited with PP support.
-            if hasattr(self.frozen_model.enc_dec_model.encoder_embedding, 'position_embeddings'):
-                position_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.position_embeddings(
-                    position_ids
+            encoder_input_list = []
+            for ei in range(len(context_and_question_tokens)):
+                input_embeds = self.get_embeddings_and_combine(
+                    [virtual_tokens, context_and_question_tokens[ei]], taskname_ids, inference
                 )
-                encoder_input = input_embeds + position_embeddings
-            else:
-                encoder_input = input_embeds
+                # TODO: This check needs to be revisited with PP support.
+                if hasattr(self.frozen_model.enc_dec_model.encoder_embedding, 'position_embeddings'):
+                    position_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.position_embeddings(
+                        position_ids[ei]
+                    )
+                    encoder_input = input_embeds + position_embeddings
+                else:
+                    encoder_input = input_embeds
+                encoder_input_list.append(encoder_input)
         else:
+            encoder_input_list = None
             encoder_input = None
             if inference_step != 0:
                 enc_output = context_and_question_tokens
@@ -324,7 +345,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         dec_mask[:, 0] = 1
 
         if not self.cfg.data.get('use_attention_prior', False):
-            cross_attention_prior = None
+            cross_attention_prior = [None for _ in range(len(cross_attention_prior))]
+
+        _encoder_input = encoder_input_list
+        if not multi_encoder:
+            context_and_question_tokens = context_and_question_tokens[0]
+            enc_mask = enc_mask[0]
+            position_ids = position_ids[0]
+            cross_attention_prior = cross_attention_prior[0]
+            _encoder_input = encoder_input_list[0]
 
         # Call forward on T5 model with preprocessed embeddings
         if self.autocast_dtype == torch.float32:
@@ -336,7 +365,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 token_type_ids=None,
                 labels=labels,
                 output_enc_hidden_only=False,
-                enc_input=encoder_input,
+                enc_input=_encoder_input,
                 speech_mask=speech_mask,
                 cross_attention_prior=cross_attention_prior,
                 text_limits=text_limits,
@@ -355,7 +384,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     token_type_ids=None,
                     labels=labels,
                     output_enc_hidden_only=False,
-                    enc_input=encoder_input,
+                    enc_input=_encoder_input,
                     enc_output=enc_output,
                     speech_mask=speech_mask,
                     cross_attention_prior=cross_attention_prior,
@@ -534,15 +563,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 self.frozen_model.enc_dec_model.logging_step = True
             output_tensor, encoder_input, out_logits = model(
                 virtual_tokens,
-                context_and_question_tokens,
-                enc_mask,
+                [context_and_question_tokens],
+                [enc_mask],
                 dec_input,
                 dec_input_mask,
-                position_ids,
+                [position_ids],
                 taskname_ids,
                 labels=labels,
                 speech_mask=speech_mask,
-                cross_attention_prior=cross_attention_prior,
+                cross_attention_prior=[cross_attention_prior],
                 text_limits=text_limits,
                 inference=False,
             )
@@ -744,12 +773,12 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             ) = batch
 
             output_logits, _, token_and_speech_logits = model(
+                [context_and_question_tokens],
                 context_and_question_tokens,
-                context_and_question_tokens,
-                enc_mask,
+                [enc_mask],
                 dec_input,
                 dec_input_mask,
-                position_ids,
+                [position_ids],
                 taskname_ids,
                 labels=None,
                 speech_mask=speech_mask,
@@ -911,15 +940,15 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         labels_original = labels.clone()  # (b, 8, t)
         output_loss, _, output_logits = self.forward(
             virtual_tokens,
-            context_and_question_tokens,
-            enc_mask,
+            [context_and_question_tokens],
+            [enc_mask],
             dec_input,
             dec_input_mask,
-            position_ids,
+            [position_ids],
             taskname_ids,
             labels=labels,
             speech_mask=speech_mask,
-            cross_attention_prior=cross_attention_prior,
+            cross_attention_prior=[cross_attention_prior],
             text_limits=text_limits,
             inference=False,
         )
@@ -1468,11 +1497,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     # logging.debug(f"Calling first step with input size:{dec_input[:, :, : t + 1].shape} and mask:{dec_input_mask[:, : t + 1].shape}")
                     output_logits, _, token_and_speech_logits = self.forward(
                         virtual_tokens,
-                        context_and_question_tokens,
-                        enc_mask,
+                        [context_and_question_tokens],
+                        [enc_mask],
                         dec_input[:, :, : t + 1],
                         dec_input_mask[:, : t + 1],
-                        position_ids,
+                        [position_ids],
                         taskname_ids,
                         labels=None,
                         speech_mask=speech_mask,
@@ -1480,7 +1509,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         decoder_max_sequence_len=max_inference_timesteps,
                         encoder_max_sequence_len=enc_mask.size(1),
                     )
-                    encoder_output = token_and_speech_logits[-1].transpose(0, 1)
+                    encoder_output = token_and_speech_logits[-1]
+                    if isinstance(encoder_output, list):
+                        encoder_output = [e.transpose(0, 1) for e in encoder_output]
+                    else:
+                        encoder_output = encoder_output.transpose(0, 1)
                 else:
                     # logging.debug(f"Calling step with input size:{dec_input[:, :, : t + 1].shape} and mask:{dec_input_mask[:, : t + 1].shape}")
                     # Prepare batch

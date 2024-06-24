@@ -1476,6 +1476,7 @@ class ParallelTransformer(MegatronModule):
         return_all_selfattention_probs=False,
         decoder_max_sequence_len=None,
         encoder_max_sequence_len=None,
+        enc_output_to_layers=None,
     ):
         if return_all_crossattention_probs and return_all_selfattention_probs:
             raise NotImplementedError(
@@ -1571,9 +1572,25 @@ class ParallelTransformer(MegatronModule):
                             logging.warning("Returning embeddings states only!")
                             return hidden_states
 
+                    layer_to_encoder_num_mapping = {}
+                    if enc_output_to_layers is not None:
+                        assert len(enc_output_to_layers) == len(encoder_output)
+                        for encoder_idx in range(len(encoder_output)):
+                            for layer_idx in enc_output_to_layers[encoder_idx]:
+                                layer_to_encoder_num_mapping[layer_idx] = encoder_idx
+                            
                     for index in range(self.num_layers):
                         layer = self._get_layer(index)
                         past = None
+
+                        _encoder_output = encoder_output
+                        _enc_dec_attn_mask = enc_dec_attn_mask
+                        _cross_attention_relative_position_bias = cross_attention_relative_position_bias
+                        if index in layer_to_encoder_num_mapping:
+                            _encoder_output = encoder_output[layer_to_encoder_num_mapping[index]]
+                            _enc_dec_attn_mask = enc_dec_attn_mask[layer_to_encoder_num_mapping[index]]
+                            _cross_attention_relative_position_bias = cross_attention_relative_position_bias[layer_to_encoder_num_mapping[index]]
+                            
 
                         if layer_past is not None:
                             past = layer_past[index]
@@ -1608,8 +1625,8 @@ class ParallelTransformer(MegatronModule):
                             hidden_states = layer(
                                 hidden_states,
                                 attention_mask,
-                                encoder_output=encoder_output,
-                                enc_dec_attn_mask=enc_dec_attn_mask,
+                                encoder_output=_encoder_output,
+                                enc_dec_attn_mask=_enc_dec_attn_mask,
                                 inference_params=self.inference_params,
                                 is_first_microbatch=is_first_microbatch,
                                 checkpoint_core_attention=checkpoint_core_attention,
@@ -1619,14 +1636,14 @@ class ParallelTransformer(MegatronModule):
                                 hidden_states, attention_probs = layer(
                                     hidden_states,
                                     attention_mask,
-                                    encoder_output=encoder_output,
-                                    enc_dec_attn_mask=enc_dec_attn_mask,
+                                    encoder_output=_encoder_output,
+                                    enc_dec_attn_mask=_enc_dec_attn_mask,
                                     layer_past=past,
                                     set_inference_key_value_memory=set_inference_key_value_memory,
                                     inference_max_sequence_len=inference_max_sequence_len,
                                     rotary_pos_emb=rotary_pos_emb,
                                     self_attention_relative_position_bias=self_attention_relative_position_bias,
-                                    cross_attention_relative_position_bias=cross_attention_relative_position_bias,
+                                    cross_attention_relative_position_bias=_cross_attention_relative_position_bias,
                                     checkpoint_core_attention=checkpoint_core_attention,
                                     return_crossattention_scores=return_all_crossattention_probs,
                                     decoder_max_sequence_len=decoder_max_sequence_len,
@@ -1637,15 +1654,15 @@ class ParallelTransformer(MegatronModule):
                                 hidden_states, attention_probs = layer(
                                     hidden_states,
                                     attention_mask,
-                                    encoder_output=encoder_output,
-                                    enc_dec_attn_mask=enc_dec_attn_mask,
+                                    encoder_output=_encoder_output,
+                                    enc_dec_attn_mask=_enc_dec_attn_mask,
                                     layer_past=past,
                                     get_key_value=get_key_value,
                                     set_inference_key_value_memory=set_inference_key_value_memory,
                                     inference_max_sequence_len=inference_max_sequence_len,
                                     rotary_pos_emb=rotary_pos_emb,
                                     self_attention_relative_position_bias=self_attention_relative_position_bias,
-                                    cross_attention_relative_position_bias=cross_attention_relative_position_bias,
+                                    cross_attention_relative_position_bias=_cross_attention_relative_position_bias,
                                     checkpoint_core_attention=checkpoint_core_attention,
                                     return_selfattention_scores=return_all_selfattention_probs,
                                 )
@@ -1654,15 +1671,15 @@ class ParallelTransformer(MegatronModule):
                                 hidden_states = layer(
                                     hidden_states,
                                     attention_mask,
-                                    encoder_output=encoder_output,
-                                    enc_dec_attn_mask=enc_dec_attn_mask,
+                                    encoder_output=_encoder_output,
+                                    enc_dec_attn_mask=_enc_dec_attn_mask,
                                     layer_past=past,
                                     get_key_value=get_key_value,
                                     set_inference_key_value_memory=set_inference_key_value_memory,
                                     inference_max_sequence_len=inference_max_sequence_len,
                                     rotary_pos_emb=rotary_pos_emb,
                                     self_attention_relative_position_bias=self_attention_relative_position_bias,
-                                    cross_attention_relative_position_bias=cross_attention_relative_position_bias,
+                                    cross_attention_relative_position_bias=_cross_attention_relative_position_bias,
                                     checkpoint_core_attention=checkpoint_core_attention,
                                     decoder_max_sequence_len=decoder_max_sequence_len,
                                     encoder_max_sequence_len=encoder_max_sequence_len,
