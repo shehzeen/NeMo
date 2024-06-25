@@ -754,9 +754,11 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
                 else:
                     # For the rest of the channels (speech), use the speech embedding layer. No need for position, since already added in first layer.
                     current = self.speech_tokens_embeddings[i - 1](dec_input_ids[:, i, :]).permute(1, 0, 2)
+                    # @pneekhara - Commenting the below because we always want to include all channels for speech.
+                    # @pneekhara - include_channel_flag can become 0 when doing autoregressive inference and the first timestep is zeros
                     # For text inputs, only include 1st channel embeddings. Zero-out others.
-                    include_channel_flag = (torch.sum(dec_input_ids[:, i, :], dim=1) > 0).float()  # [B]
-                    current = current * include_channel_flag.unsqueeze(0).unsqueeze(2)
+                    # include_channel_flag = (torch.sum(dec_input_ids[:, i, :], dim=1) > 0).float()  # [B]
+                    # current = current * include_channel_flag.unsqueeze(0).unsqueeze(2)
                     dec_input = dec_input + current
 
         return dec_input
