@@ -185,8 +185,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.codecmodel_type = codecmodel_type
         self.enc_output_to_layers = cfg.get('enc_output_to_layers', None)
         if self.enc_output_to_layers is not None:
+            # Convert from listconfig to list
             self.enc_output_to_layers = [ [l for l in encoder_layer] for encoder_layer in self.enc_output_to_layers ]
-            import ipdb; ipdb.set_trace()
         
         self.frozen_model.enc_dec_model.speech_offset = speech_offset
         self.frozen_model.enc_dec_model.speech_codebook_size = speech_codebook_size
@@ -665,14 +665,22 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                 context_end_step = input_token_list[0][0]
                                 _context_tokens = context_and_question_tokens[0, :, :context_end_step]
 
-                            if context_end_step > self.num_speech_codebooks:
-                                _context_tokens = self.convert_tokens_to_range(
-                                    _context_tokens, pattern=self.context_pattern
-                                )
-                                _context_wav = self.decode_wav_from_codec_model(_context_tokens)
-                                self.logger.experiment.add_audio(
-                                    "train_context_wav", _context_wav, self.global_step, self.sample_rate
-                                )
+                            if context_end_step > 1:
+                                is_speech_context = _context_tokens[1,:].sum().item() > 0
+                                if is_speech_context:
+                                    _context_tokens = self.convert_tokens_to_range(
+                                        _context_tokens, pattern=self.context_pattern
+                                    )
+                                    _context_wav = self.decode_wav_from_codec_model(_context_tokens)
+                                    self.logger.experiment.add_audio(
+                                        "train_context_wav", _context_wav, self.global_step, self.sample_rate
+                                    )
+                                else:
+                                    _context_token_list = [ v.item() for v in _context_tokens[0, :] ]
+                                    _context_text = self.frozen_model.tokenizer.ids_to_text(
+                                        [v for v in _context_token_list if v < self.lm_vocab_size]
+                                    )
+                                    self.logger.experiment.add_text("train_context_text", _context_text, self.global_step)
 
                             question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
                             question_ei = text_limits[0, 1].item() - virtual_tokens.shape[1]
@@ -1062,12 +1070,20 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         ]
                         context_end_step = input_token_list[0][0]
                         _context_tokens = context_and_question_tokens[0, :, :context_end_step]
-                    if context_end_step > self.num_speech_codebooks:
-                        _context_tokens = self.convert_tokens_to_range(_context_tokens, pattern=self.context_pattern)
-                        _context_wav = self.decode_wav_from_codec_model(_context_tokens)
-                        self.logger.experiment.add_audio(
-                            "val_context_wav", _context_wav, self.global_step, self.sample_rate
-                        )
+                    if context_end_step > 1:
+                        is_speech_context = _context_tokens[1,:].sum().item() > 0
+                        if is_speech_context:
+                            _context_tokens = self.convert_tokens_to_range(_context_tokens, pattern=self.context_pattern)
+                            _context_wav = self.decode_wav_from_codec_model(_context_tokens)
+                            self.logger.experiment.add_audio(
+                                "val_context_wav", _context_wav, self.global_step, self.sample_rate
+                            )
+                        else:
+                            _context_token_list = [v.item() for v in _context_tokens[0, :]]
+                            _context_text = self.frozen_model.tokenizer.ids_to_text(
+                                [v for v in _context_token_list if v < self.lm_vocab_size]
+                            )
+                            self.logger.experiment.add_text("val_context_text", _context_text, self.global_step)
 
                     question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
                     question_ei = text_limits[0, 1].item() - virtual_tokens.shape[1]
@@ -1840,9 +1856,19 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     if self.decoder_context_len > 0:
                         context_tokens = dec_input_to_1024[:, :self.decoder_context_len+1]
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
-                    elif context_end_step > self.num_speech_codebooks:
-                        context_tokens = self.convert_tokens_to_range(context_tokens, pattern=self.context_pattern)
-                        context_wav = self.decode_wav_from_codec_model(context_tokens)
+                    elif context_end_step > 1:
+                        is_speech_context = context_tokens[1,:].sum().item() > 0
+                        if is_speech_context:
+                            context_tokens = self.convert_tokens_to_range(context_tokens, pattern=self.context_pattern)
+                            context_wav = self.decode_wav_from_codec_model(context_tokens)
+                        else:
+                            context_wav = None
+                            _context_token_list = [ v.item() for v in context_tokens[0, :] ]
+                            _context_text = self.frozen_model.tokenizer.ids_to_text(
+                                [v for v in _context_token_list if v < self.lm_vocab_size]
+                            )
+                            self.logger.experiment.add_text("Context Text", _context_text, self.global_step)
+                            
                     else:
                         context_wav = None
                         spk_embedding_context = spk_embedding_gt

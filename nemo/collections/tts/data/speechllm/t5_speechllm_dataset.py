@@ -831,10 +831,10 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 # Speaker id conditioning
                 field_tokens = self._get_text_tokens(_text)
                 # pad field tokens to fixed length
-                assert self.context_duration_min == self.context_duration_max, "TEXT CONTEXT only supports fixed context duration"
+                # assert self.context_duration_min == self.context_duration_max, "TEXT CONTEXT only supports fixed context duration"
                 # To keep context length the same for audio or tex context
-                _fixed_context_len = int(self.context_duration_min * self.codebook_fps)
-                field_tokens = field_tokens + [self.tokenizer.pad_id] * (_fixed_context_len - len(field_tokens))
+                # _fixed_context_len = int(self.context_duration_min * self.codebook_fps)
+                field_tokens = field_tokens + [self.tokenizer.eos_id]
             else:
                 field_tokens = self._get_text_tokens(field_data.strip(" "))  # list of ids
         elif doc[f"{field}_type"] == 'SPEECH':
