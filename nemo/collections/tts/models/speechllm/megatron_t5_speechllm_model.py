@@ -183,7 +183,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.speech_codebook_size = speech_codebook_size
         self.num_speech_codebooks = num_speech_codebooks
         self.codecmodel_type = codecmodel_type
-
+        self.enc_output_to_layers = cfg.get('enc_output_to_layers', None)
+        if self.enc_output_to_layers is not None:
+            self.enc_output_to_layers = [ [l for l in encoder_layer] for encoder_layer in self.enc_output_to_layers ]
+            import ipdb; ipdb.set_trace()
+        
         self.frozen_model.enc_dec_model.speech_offset = speech_offset
         self.frozen_model.enc_dec_model.speech_codebook_size = speech_codebook_size
         self.frozen_model.enc_dec_model.num_speech_codebooks = num_speech_codebooks
@@ -195,6 +199,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.frozen_model.enc_dec_model.num_cross_attention_heads = num_cross_attention_heads
         self.frozen_model.enc_dec_model.context_conditioning = self.context_conditioning
         self.frozen_model.enc_dec_model.decoder_context_len = self.decoder_context_len
+        self.frozen_model.enc_dec_model.enc_output_to_layers = self.enc_output_to_layers
 
         self.alignment_loss_start_step = 0
         self.alignment_loss_end_step = float('inf')
@@ -300,6 +305,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         Special forward method for p-tuning/prompt-tuning pretrained
         T5 style models.
         """
+        # import ipdb; ipdb.set_trace()
         multi_encoder = False
         if isinstance(context_and_question_tokens, list):
             multi_encoder = True
@@ -338,7 +344,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             encoder_input_list = None
             encoder_input = None
             if inference_step != 0:
-                enc_output = context_and_question_tokens
+                enc_output = context_and_question_tokens if multi_encoder else context_and_question_tokens[0]
 
         # If the decoder input starts with <pad> instead of <bos>, which is the case for huggingface T5 models, we don't want to mask the first token.
         # For NeMo-Megatron, the sequence starts with <bos>, which is never masked so we can always set index 0 to be unmasked.
@@ -353,7 +359,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             enc_mask = enc_mask[0]
             position_ids = position_ids[0]
             cross_attention_prior = cross_attention_prior[0]
-            _encoder_input = encoder_input_list[0]
+            _encoder_input = encoder_input_list[0] if encoder_input_list is not None else None
 
         # Call forward on T5 model with preprocessed embeddings
         if self.autocast_dtype == torch.float32:
@@ -492,7 +498,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         else:
             _, dec_seq_length = batch[4].shape
         data_iter = get_iterator_k_split(batch, get_num_microbatches())
-
+        
         fwd_bwd_function = get_forward_backward_func()
 
         losses_reduced_per_micro_batch = fwd_bwd_function(
@@ -540,7 +546,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
     def get_forward_output_and_loss_func(self, validation_step=False):
         def fwd_output_and_loss_func(dataloader_iter, model):
             batch = next(dataloader_iter)
-            batch = [x.cuda(non_blocking=True) if isinstance(x, torch.Tensor) else x for x in batch]
+            _batch = []
+            for x in batch:
+                # import ipdb; ipdb.set_trace()
+                if isinstance(x, torch.Tensor):
+                    x = x.cuda(non_blocking=True)
+                elif isinstance(x, list):
+                    if isinstance(x[0], torch.Tensor):
+                        x = [y.cuda(non_blocking=True) for y in x]
+                _batch.append(x)
+            batch = _batch
+            # batch = [x.cuda(non_blocking=True) if isinstance(x, torch.Tensor) else x for x in batch]
             (
                 virtual_tokens,
                 context_and_question_tokens,
@@ -552,26 +568,32 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 position_ids,
                 taskname_ids,
                 speech_mask,
-                _,
+                context_and_question_tokens_lens,
                 cross_attention_prior,
                 text_limits,
                 _,  # TODO: text limit and lang not in tarred dataset
                 _,
             ) = batch
-
+            
             if self.trainer.global_step % self.train_check_interval == 0 and not validation_step and self.is_rank_zero:
                 self.frozen_model.enc_dec_model.logging_step = True
+            
+            _cross_attention_prior = cross_attention_prior
+            if isinstance(context_and_question_tokens, list):
+                # None for context and prior for question
+                _cross_attention_prior = [None, cross_attention_prior]
+
             output_tensor, encoder_input, out_logits = model(
                 virtual_tokens,
-                [context_and_question_tokens],
-                [enc_mask],
+                context_and_question_tokens,
+                enc_mask,
                 dec_input,
                 dec_input_mask,
-                [position_ids],
+                position_ids,
                 taskname_ids,
                 labels=labels,
                 speech_mask=speech_mask,
-                cross_attention_prior=[cross_attention_prior],
+                cross_attention_prior=_cross_attention_prior,
                 text_limits=text_limits,
                 inference=False,
             )
@@ -616,19 +638,34 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             self.logger.experiment.add_audio(
                                 "train_dec_input_wav", dec_input_wav, self.global_step, self.sample_rate
                             )
+                            if isinstance(context_and_question_tokens, list):
+                                context_tokens = context_and_question_tokens[0]
+                                question_tokens = context_and_question_tokens[1]
+                                input_token_list_all = [
+                                    question_tokens[0, 0, i].item()
+                                    for i in range(question_tokens.shape[2])
+                                ]
+                                input_token_list = [
+                                    (ti, t)
+                                    for ti, t in enumerate(input_token_list_all)
+                                    if t != 0 and t < self.speech_offset
+                                ]
+                                context_end_step = context_and_question_tokens_lens[0][0].item()
+                                _context_tokens = context_tokens[0, :, :context_end_step]
+                            else:
+                                input_token_list_all = [
+                                    context_and_question_tokens[0, 0, i].item()
+                                    for i in range(context_and_question_tokens.shape[2])
+                                ]
+                                input_token_list = [
+                                    (ti, t)
+                                    for ti, t in enumerate(input_token_list_all)
+                                    if t != 0 and t < self.speech_offset
+                                ]
+                                context_end_step = input_token_list[0][0]
+                                _context_tokens = context_and_question_tokens[0, :, :context_end_step]
 
-                            input_token_list_all = [
-                                context_and_question_tokens[0, 0, i].item()
-                                for i in range(context_and_question_tokens.shape[2])
-                            ]
-                            input_token_list = [
-                                (ti, t)
-                                for ti, t in enumerate(input_token_list_all)
-                                if t != 0 and t < self.speech_offset
-                            ]
-                            context_end_step = input_token_list[0][0]
                             if context_end_step > self.num_speech_codebooks:
-                                _context_tokens = context_and_question_tokens[0][:, :context_end_step]
                                 _context_tokens = self.convert_tokens_to_range(
                                     _context_tokens, pattern=self.context_pattern
                                 )
@@ -759,7 +796,16 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
         def fwd_output_only_func(dataloader_iter, model):
             batch = next(dataloader_iter)
-            batch = [x.cuda(non_blocking=True) if isinstance(x, torch.Tensor) else x for x in batch]
+            _batch = []
+            for x in batch:
+                if isinstance(x, torch.Tensor):
+                    x = x.cuda(non_blocking=True)
+                elif isinstance(x, list):
+                    if isinstance(x[0], torch.Tensor):
+                        x = [y.cuda(non_blocking=True) for y in x]
+                _batch.append(x)
+            batch = _batch
+            # batch = [x.cuda(non_blocking=True) if isinstance(x, torch.Tensor) else x for x in batch]
             (
                 decoder_max_sequence_len,
                 encoder_max_sequence_len,
@@ -772,13 +818,14 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 speech_mask,
             ) = batch
 
+            
             output_logits, _, token_and_speech_logits = model(
-                [context_and_question_tokens],
                 context_and_question_tokens,
-                [enc_mask],
+                context_and_question_tokens,
+                enc_mask,
                 dec_input,
                 dec_input_mask,
-                [position_ids],
+                position_ids,
                 taskname_ids,
                 labels=None,
                 speech_mask=speech_mask,
@@ -908,7 +955,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             position_ids,
             taskname_ids,
             speech_mask,
-            _,
+            context_and_question_tokens_lens,
             cross_attention_prior,
             text_limits,
             _,
@@ -916,10 +963,12 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         ) = batch
         # loss_mask (b, t)
         # does not use dataloader_iter due to device placement issues arising from PTL
+        
         mode = self.training
         self.eval()
         gbs = self.cfg.get('validation_global_batch_size', self.cfg.global_batch_size)
         self._reconfigure_and_process_inference_batch(virtual_tokens.size(0), gbs)
+
         loss_mean = self.fwd_bwd_step(
             itertools.chain([batch]), batch_idx, forward_only=True
         )  # comment this out and add custom forward function to calculate WER
@@ -938,17 +987,22 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     )
 
         labels_original = labels.clone()  # (b, 8, t)
+        
+        _cross_attention_prior = cross_attention_prior
+        if isinstance(context_and_question_tokens, list):
+            _cross_attention_prior = [None, cross_attention_prior]
+        
         output_loss, _, output_logits = self.forward(
             virtual_tokens,
-            [context_and_question_tokens],
-            [enc_mask],
+            context_and_question_tokens,
+            enc_mask,
             dec_input,
             dec_input_mask,
-            [position_ids],
+            position_ids,
             taskname_ids,
             labels=labels,
             speech_mask=speech_mask,
-            cross_attention_prior=[cross_attention_prior],
+            cross_attention_prior=_cross_attention_prior,
             text_limits=text_limits,
             inference=False,
         )
@@ -986,16 +1040,29 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         "val_dec_input_wav", dec_input_wav, self.global_step, self.sample_rate
                     )
 
-                    input_token_list_all = [
-                        context_and_question_tokens[0, 0, i].item()
-                        for i in range(context_and_question_tokens.shape[2])
-                    ]
-                    input_token_list = [
-                        (ti, t) for ti, t in enumerate(input_token_list_all) if t != 0 and t < self.speech_offset
-                    ]
-                    context_end_step = input_token_list[0][0]
+                    if isinstance(context_and_question_tokens, list):
+                        context_tokens = context_and_question_tokens[0]
+                        question_tokens = context_and_question_tokens[1]
+                        input_token_list_all = [
+                            question_tokens[0, 0, i].item() for i in range(question_tokens.shape[2])
+                        ]
+                        input_token_list = [
+                            (ti, t) for ti, t in enumerate(input_token_list_all) if t != 0 and t < self.speech_offset
+                        ]
+                        context_end_step = context_and_question_tokens_lens[0][0].item()
+                        _context_tokens = context_tokens[0, :, :context_end_step]
+
+                    else:
+                        input_token_list_all = [
+                            context_and_question_tokens[0, 0, i].item()
+                            for i in range(context_and_question_tokens.shape[2])
+                        ]
+                        input_token_list = [
+                            (ti, t) for ti, t in enumerate(input_token_list_all) if t != 0 and t < self.speech_offset
+                        ]
+                        context_end_step = input_token_list[0][0]
+                        _context_tokens = context_and_question_tokens[0, :, :context_end_step]
                     if context_end_step > self.num_speech_codebooks:
-                        _context_tokens = context_and_question_tokens[0][:, :context_end_step]
                         _context_tokens = self.convert_tokens_to_range(_context_tokens, pattern=self.context_pattern)
                         _context_wav = self.decode_wav_from_codec_model(_context_tokens)
                         self.logger.experiment.add_audio(
@@ -1345,6 +1412,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             use_beta_binomial_interpolator=self.cfg.get('use_beta_binomial_interpolator', False),
             context_slice_method=self.cfg.data.get('context_slice_method', 'random'),
             phoneme_probability=self.cfg.data.get('phoneme_probability', 0.5),
+            encoder_type=self.cfg.data.get('encoder_type', 'single_transformer'),
         )
 
         rank = parallel_state.get_data_parallel_rank()
@@ -1461,7 +1529,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 position_ids,
                 taskname_ids,
                 speech_mask,
-                _,
+                context_and_question_tokens_lens,
                 cross_attention_prior,
                 text_limits,
                 lang,
@@ -1492,34 +1560,41 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 if t == end_inference_loop_at:
                     print("All ends detected")
                     break
+                if isinstance(enc_mask, list):
+                    encoder_max_sequence_len = [e.size(1) for e in enc_mask]
+                else:
+                    encoder_max_sequence_len = enc_mask.size(1)
                 if t == self.decoder_context_len + 1:
                     # Run first step manually
                     # logging.debug(f"Calling first step with input size:{dec_input[:, :, : t + 1].shape} and mask:{dec_input_mask[:, : t + 1].shape}")
+                    
                     output_logits, _, token_and_speech_logits = self.forward(
                         virtual_tokens,
-                        [context_and_question_tokens],
-                        [enc_mask],
+                        context_and_question_tokens,
+                        enc_mask,
                         dec_input[:, :, : t + 1],
                         dec_input_mask[:, : t + 1],
-                        [position_ids],
+                        position_ids,
                         taskname_ids,
                         labels=None,
                         speech_mask=speech_mask,
                         inference=True,
                         decoder_max_sequence_len=max_inference_timesteps,
-                        encoder_max_sequence_len=enc_mask.size(1),
+                        encoder_max_sequence_len=encoder_max_sequence_len
                     )
                     encoder_output = token_and_speech_logits[-1]
+                    
                     if isinstance(encoder_output, list):
                         encoder_output = [e.transpose(0, 1) for e in encoder_output]
                     else:
                         encoder_output = encoder_output.transpose(0, 1)
+                    
                 else:
                     # logging.debug(f"Calling step with input size:{dec_input[:, :, : t + 1].shape} and mask:{dec_input_mask[:, : t + 1].shape}")
                     # Prepare batch
                     batch = [
                         max_inference_timesteps,
-                        enc_mask.size(1),
+                        encoder_max_sequence_len,
                         encoder_output,
                         enc_mask,
                         dec_input[:, :, : t + 1],
@@ -1740,19 +1815,32 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         audio_to_pred.append({"step": i, "audio": audio_fp_pred})
                         audio_to_pred.append({"step": i, "audio": audio_fp_gt})
 
-                    input_token_list = [
-                        context_and_question_tokens[i, 0, j].item()
-                        for j in range(context_and_question_tokens.shape[2])
-                    ]
-                    input_token_list = [
-                        (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < self.speech_offset
-                    ]
-                    context_end_step = input_token_list[0][0]
+                    if isinstance(context_and_question_tokens, list):
+                        context_tokens, question_tokens = context_and_question_tokens
+                        input_token_list = [
+                            question_tokens[i, 0, j].item()
+                            for j in range(context_and_question_tokens_lens[1][i].item())
+                        ]
+                        input_token_list = [
+                            (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < self.speech_offset
+                        ]
+                        context_end_step = context_and_question_tokens_lens[0][i]
+                        context_tokens = context_tokens[i][:, :context_end_step]
+                    else:
+                        input_token_list = [
+                            context_and_question_tokens[i, 0, j].item()
+                            for j in range(context_and_question_tokens.shape[2])
+                        ]
+                        input_token_list = [
+                            (ti, t) for ti, t in enumerate(input_token_list) if t != 0 and t < self.speech_offset
+                        ]
+                        context_end_step = input_token_list[0][0]
+                        context_tokens = context_and_question_tokens[i][:, :context_end_step]
+
                     if self.decoder_context_len > 0:
                         context_tokens = dec_input_to_1024[:, :self.decoder_context_len+1]
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
                     elif context_end_step > self.num_speech_codebooks:
-                        context_tokens = context_and_question_tokens[i][:, :context_end_step]
                         context_tokens = self.convert_tokens_to_range(context_tokens, pattern=self.context_pattern)
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
                     else:

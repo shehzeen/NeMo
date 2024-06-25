@@ -384,6 +384,10 @@ def get_all_params_for_weight_decay_optimization(
     return ({'params': weight_decay_params},)
 
 
+def split_list(my_list, n):
+    k, m = divmod(len(my_list), n)
+    return [my_list[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+
 def get_iterator_k_split(batch: List[torch.Tensor], num_microbatches: int) -> Iterator:
     if isinstance(batch, dict):
         items = list(batch.items())
@@ -393,9 +397,21 @@ def get_iterator_k_split(batch: List[torch.Tensor], num_microbatches: int) -> It
         microbatches = [dict(elem) for elem in microbatches]
     else:
         assert batch[0].shape[0] % num_microbatches == 0, "Issue with batch size configuration!"
-        split_batch = [
-            torch.tensor_split(item, num_microbatches, dim=0) if torch.is_tensor(item) else item for item in batch
-        ]
+        split_batch = []
+        for item in batch:
+            if torch.is_tensor(item):
+                split_batch.append(torch.tensor_split(item, num_microbatches, dim=0))
+            elif isinstance(item, list):
+                if isinstance(item[0], torch.Tensor):
+                    split_tensors = [torch.tensor_split(elem, num_microbatches, dim=0) for elem in item]
+                    split_tuple = []
+                    for mbi in range(num_microbatches):
+                        split_tuple.append([split_tensors[i][mbi] for i in range(len(split_tensors))])
+                    split_tuple = tuple(split_tuple)
+                    split_batch.append(split_tuple)
+                else:
+                    split_batch.append(split_list(item, num_microbatches))
+        
         microbatches = [
             [elem[i] if elem is not None else elem for elem in split_batch] for i in range(num_microbatches)
         ]

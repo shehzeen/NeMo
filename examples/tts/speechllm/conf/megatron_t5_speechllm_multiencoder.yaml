@@ -66,11 +66,12 @@ model:
   codecmodel_type: nemo_codec
   codecmodel_path: ???
   english_only_model: true
-  context_conditioning: decoder
+  context_conditioning: encoder
   train_from_scratch: true
   override_tokenizer_vocab_file: ???
   use_flash_attention: false
   lm_vocab_size: 30000
+  enc_output_to_layers: [[0,1,2],[3,4,5,6,7,8]]
 
   frozen_model:
     # micro_batch_size: null
@@ -106,10 +107,10 @@ model:
       dataset_type: t5
     encoder:
       arch: multi_transformer
-      n_transformers: 1
+      n_transformers: 2
       bias_activation_fusion: false
       use_flash_attention: ${model.use_flash_attention}
-      num_layers: 12
+      num_layers: 6
       hidden_size: 768
       ffn_hidden_size: 2048
       num_attention_heads: 12
@@ -173,6 +174,7 @@ model:
     codebook_fps: 86
     context_duration_min: 2.9
     context_duration_max: 2.9
+    encoder_type: ${model.frozen_model.encoder.arch}
     g2p:
       english:
         _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p

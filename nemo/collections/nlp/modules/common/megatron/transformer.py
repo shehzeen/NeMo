@@ -1586,10 +1586,13 @@ class ParallelTransformer(MegatronModule):
                         _encoder_output = encoder_output
                         _enc_dec_attn_mask = enc_dec_attn_mask
                         _cross_attention_relative_position_bias = cross_attention_relative_position_bias
+                        _encoder_max_sequence_len = encoder_max_sequence_len
                         if index in layer_to_encoder_num_mapping:
                             _encoder_output = encoder_output[layer_to_encoder_num_mapping[index]]
                             _enc_dec_attn_mask = enc_dec_attn_mask[layer_to_encoder_num_mapping[index]]
                             _cross_attention_relative_position_bias = cross_attention_relative_position_bias[layer_to_encoder_num_mapping[index]]
+                            if encoder_max_sequence_len is not None:
+                                _encoder_max_sequence_len = encoder_max_sequence_len[layer_to_encoder_num_mapping[index]]
                             
 
                         if layer_past is not None:
@@ -1647,7 +1650,7 @@ class ParallelTransformer(MegatronModule):
                                     checkpoint_core_attention=checkpoint_core_attention,
                                     return_crossattention_scores=return_all_crossattention_probs,
                                     decoder_max_sequence_len=decoder_max_sequence_len,
-                                    encoder_max_sequence_len=encoder_max_sequence_len,
+                                    encoder_max_sequence_len=_encoder_max_sequence_len,
                                 )
                                 attention_probs_list.append(attention_probs)
                             elif layer.layer_type == LayerType.encoder and return_all_selfattention_probs:
@@ -1682,7 +1685,7 @@ class ParallelTransformer(MegatronModule):
                                     cross_attention_relative_position_bias=_cross_attention_relative_position_bias,
                                     checkpoint_core_attention=checkpoint_core_attention,
                                     decoder_max_sequence_len=decoder_max_sequence_len,
-                                    encoder_max_sequence_len=encoder_max_sequence_len,
+                                    encoder_max_sequence_len=_encoder_max_sequence_len,
                                 )
 
                         if self.return_select_layer < 0:

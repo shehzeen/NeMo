@@ -738,6 +738,7 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
         self.return_all_crossattention_probs = False
         self.logging_step = False
         self.num_cross_attention_heads = 12  # 12 for 220m T5, 16 for 11b T5
+        self.enc_output_to_layers = None
 
     def get_decoder_embeddings(self, dec_input_ids, dec_position_ids, token_type_ids):
         if dec_input_ids.dim() <= 2:
@@ -969,7 +970,7 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
                 set_inference_key_value_memory=set_inference_key_value_memory,
                 decoder_max_sequence_len=decoder_max_sequence_len,
                 encoder_max_sequence_len=encoder_max_sequence_len,
-                enc_output_to_layers=[[0,1,2,3,4,5,6,7,8]]
+                enc_output_to_layers=self.enc_output_to_layers
             )
 
             alignment_loss = None
@@ -977,7 +978,7 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
                 dec_output, enc_output = output  # [s, b, h]
                 if return_all_crossattention_probs:
                     dec_output, attention_scores = dec_output
-                    attention_probs = [torch.softmax(attention_score, dim=-1) for attention_score in attention_scores]
+                    attention_probs = [torch.softmax(attention_score, dim=-1) for lidx, attention_score in enumerate(attention_scores) if lidx in self.alignment_decoder_layerids]
 
                     if text_limits is not None and hasattr(self, "forward_sum_loss"):
                         attention_scores_filtered = [
