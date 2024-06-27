@@ -169,6 +169,7 @@ model:
     pin_memory: true
     speech_offset: 30128
     train_task: all
+    sup_data_path: None
     num_speech_codebooks: 8
     codebook_fps: 86
     context_duration_min: 2.9

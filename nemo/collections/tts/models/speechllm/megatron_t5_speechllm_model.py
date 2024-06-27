@@ -1853,6 +1853,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         context_end_step = input_token_list[0][0]
                         context_tokens = context_and_question_tokens[i][:, :context_end_step]
 
+                    spk_embedding_context = spk_embedding_gt
                     if self.decoder_context_len > 0:
                         context_tokens = dec_input_to_1024[:, :self.decoder_context_len+1]
                         context_wav = self.decode_wav_from_codec_model(context_tokens)
@@ -1871,7 +1872,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                             
                     else:
                         context_wav = None
-                        spk_embedding_context = spk_embedding_gt
+
                         # raise NotImplementedError("During prediction, there was no context found.")
                     if context_wav is not None:
                         self.logger.experiment.add_audio("Context Wav", context_wav, step, self.sample_rate)
