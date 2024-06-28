@@ -372,6 +372,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 labels=labels,
                 output_enc_hidden_only=False,
                 enc_input=_encoder_input,
+                enc_output=enc_output,
                 speech_mask=speech_mask,
                 cross_attention_prior=cross_attention_prior,
                 text_limits=text_limits,
@@ -1619,6 +1620,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         taskname_ids,
                         speech_mask,
                     ]
+                    
                     output_tensor = fwd_bwd_function(
                         forward_step_func=self.get_forward_output_only_func(),
                         data_iterator=iter([batch,]),
