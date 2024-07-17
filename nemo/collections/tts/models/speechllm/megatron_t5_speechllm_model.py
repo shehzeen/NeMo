@@ -304,9 +304,16 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         enc_output = None
         if self.first_stage_of_pipeline() and inference_step == 0:
             # Get embeddings for text tokens and insert virtual token embeddings
-            input_embeds = self.get_embeddings_and_combine(
-                [virtual_tokens, context_and_question_tokens], taskname_ids, inference
-            )
+            if virtual_tokens is not None:
+                # import ipdb; ipdb.set_trace()
+                input_embeds = self.get_embeddings_and_combine(
+                    [virtual_tokens, context_and_question_tokens], taskname_ids, inference
+                )
+            else:
+                # import ipdb; ipdb.set_trace()
+                input_embeds = self.get_embeddings_and_combine(
+                    [context_and_question_tokens], taskname_ids, inference
+                )
             # TODO: This check needs to be revisited with PP support.
             if hasattr(self.frozen_model.enc_dec_model.encoder_embedding, 'position_embeddings'):
                 position_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.position_embeddings(
@@ -458,7 +465,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         """
         # Get seq length of batch
         batch = next(dataloader_iter)
-        _, seq_length = batch[0].shape
+        _, _, seq_length = batch[1].shape
         if batch[4].dim() > 2:
             _, _, dec_seq_length = batch[4].shape
         else:
@@ -530,6 +537,24 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 _,  # TODO: text limit and lang not in tarred dataset
                 _,
             ) = batch
+
+            print(f"virtual_tokens: {virtual_tokens.shape} {virtual_tokens.dtype}")
+            print(f"context_and_question_tokens: {context_and_question_tokens.shape} {context_and_question_tokens.dtype}")
+            print(f"enc_mask: {enc_mask.shape} {enc_mask.dtype}")
+            print(f"dec_input: {dec_input.shape} {dec_input.dtype}")
+            print(f"dec_input_mask: {dec_input_mask.shape} {dec_input_mask.dtype}")
+            print(f"labels: {labels.shape} {labels.dtype}")
+            print(f"loss_mask: {loss_mask.shape} {loss_mask.dtype}")
+            print(f"position_ids: {position_ids.shape} {position_ids.dtype}")
+            print(f"taskname_ids: {taskname_ids.shape} {taskname_ids.dtype}")
+            print(f"speech_mask: {speech_mask.shape} {speech_mask.dtype}")
+            print(f"cross_attention_prior: {cross_attention_prior.shape} {cross_attention_prior.dtype}")
+            print(f"text_limits: {text_limits.shape} {text_limits.dtype}")
+            # import ipdb; ipdb.set_trace()
+            if virtual_tokens.shape[1] > 3:
+                virtual_tokens = None # Hack for now to tell when we are using lhotse dataset
+            # quit()
+
 
             if self.trainer.global_step % self.train_check_interval == 0 and not validation_step and self.is_rank_zero:
                 self.frozen_model.enc_dec_model.logging_step = True
@@ -609,8 +634,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                                     "train_context_wav", _context_wav, self.global_step, self.sample_rate
                                 )
 
-                            question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
-                            question_ei = text_limits[0, 1].item() - virtual_tokens.shape[1]
+                            # question_si = text_limits[0, 0].item() - virtual_tokens.shape[1]
+                            # question_ei = text_limits[0, 1].item() - virtual_tokens.shape[1]
+                            question_si = text_limits[0, 0].item() - 3  #TODO: remove hardcode
+                            question_ei = text_limits[0, 1].item() - 3
                             text_si = text_limits[0, 0].item()
                             text_ei = text_limits[0, 1].item()
                             input_text = self.frozen_model.tokenizer.ids_to_text(
@@ -807,9 +834,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self._reconfigure_batch_sizes(gbs, mbs)
         return super().on_validation_epoch_start()
 
-    def training_step(self, dataloader_iter, batch_idx):
+    def training_step(self, dataloader_iter):
         self._optimizer.zero_grad()
-        batch = next(dataloader_iter)
+        batch, batch_idx, dataloader_idx = next(dataloader_iter)
         loss_mean = self.fwd_bwd_step(itertools.chain([batch]), batch_idx, forward_only=False)
         self.allreduce_gradients()
 
@@ -902,17 +929,17 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         )  # comment this out and add custom forward function to calculate WER
         # # logging.info (f'loss_mean {loss_mean}')
 
-        if batch_idx == 0 and self.is_rank_zero:
-            self.frozen_model.enc_dec_model.logging_step = True
-            self.predict_step_outputs = []
-            # log_scalars=False avoids logging scalar TTS metrics in the predict_step
-            # Images, audio and texts will still be logged
-            self.predict_step(batch=batch, batch_idx=batch_idx, log_scalars=False, global_step=self.global_step)
-            for inf_key in self.predict_step_outputs[0]:
-                if self.predict_step_outputs[0][inf_key] is not None:
-                    self.logger.experiment.add_scalar(
-                        f'Val_{inf_key}', self.predict_step_outputs[0][inf_key], self.global_step
-                    )
+        # if batch_idx == 0 and self.is_rank_zero:
+        #     self.frozen_model.enc_dec_model.logging_step = True
+        #     self.predict_step_outputs = []
+        #     # log_scalars=False avoids logging scalar TTS metrics in the predict_step
+        #     # Images, audio and texts will still be logged
+        #     self.predict_step(batch=batch, batch_idx=batch_idx, log_scalars=False, global_step=self.global_step)
+        #     for inf_key in self.predict_step_outputs[0]:
+        #         if self.predict_step_outputs[0][inf_key] is not None:
+        #             self.logger.experiment.add_scalar(
+        #                 f'Val_{inf_key}', self.predict_step_outputs[0][inf_key], self.global_step
+        #             )
 
         labels_original = labels.clone()  # (b, 8, t)
         output_loss, _, output_logits = self.forward(

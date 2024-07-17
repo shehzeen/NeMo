@@ -602,6 +602,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                         scaling_factor=self.attention_prior_scaling_factor,
                     )
                 )
+            # import ipdb; ipdb.set_trace()
             cross_attention_prior[
                 prior_dec_start_idx:,
                 virtual_tokens_len + context_tokens_len + start_of_question_offset : -end_of_question_offset,

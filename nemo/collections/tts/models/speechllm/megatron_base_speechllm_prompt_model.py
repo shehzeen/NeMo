@@ -32,6 +32,10 @@ from nemo.collections.nlp.modules.common import (
 from nemo.collections.nlp.modules.common.transformer.text_generation import TextGeneration
 from nemo.collections.nlp.parts import utils_funcs
 from nemo.utils import AppState
+from nemo.collections.multimodal.speech_llm.data.build_dataset import (
+    build_speechllm_dataloader,
+    build_speechllm_dataset,
+)
 
 try:
     from apex.transformer.pipeline_parallel.utils import _reconfigure_microbatch_calculator
@@ -269,7 +273,7 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
 
         if self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER:
             # taskname_embeddings = self.word_embeddings(taskname_ids)
-            batch_size, _ = taskname_ids.size()
+            batch_size, _ = input_ids.size()
             virtual_token_embeds = self.prompt_encoder(batch_size=batch_size, use_cached_reps=use_cached_reps)
         else:
             raise ValueError("invalid VirtualPromptSource.")
@@ -295,6 +299,8 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
         self.save_to(save_path=self.cfg.nemo_path)
 
     def setup(self, stage=None):
+        self.init_consumed_samples = 0
+
         if stage == 'predict' and self.first_stage_of_pipeline():
             return
 
@@ -332,6 +338,11 @@ class MegatronBaseSpeechLM(MegatronBaseModel, TextGeneration):
                 num_workers=self.cfg.data.num_workers,
                 pin_memory=True,
             )
+        elif self.cfg.data.get('use_lhotse', None):
+            self._train_ds = build_speechllm_dataset(self, self.cfg.data.lhotse_train_ds, True)
+            consumed_samples = self.compute_consumed_samples(0)
+            self._train_dl = build_speechllm_dataloader(self._train_ds, self.cfg.data.lhotse_train_ds, consumed_samples)
+
 
     def setup_validation_data(self, validation_data_config=None):
         if self.cfg.data.get('validation_ds', None):

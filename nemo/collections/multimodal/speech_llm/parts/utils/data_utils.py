@@ -17,6 +17,8 @@ from typing import List, Optional
 import numpy as np
 import torch
 from nemo.utils import logging, logging_mode
+from hydra.utils import instantiate
+
 
 
 def maybe_cast_to_list(x):
@@ -380,3 +382,52 @@ class TextProcessing:
         }
 
         return processed_example
+
+
+class TTSTextProcessing(TextProcessing):
+    def __init__(self, tokenizer, lm_vocab_size, g2p_conf):
+        self.tokenizer = tokenizer
+        self.lm_vocab_size = tokenizer.vocab_size if lm_vocab_size is None else lm_vocab_size
+        self.phoneme_tokenizer = instantiate(g2p_conf)
+        self.pad_id = tokenizer.pad_id
+        self.bos_id = tokenizer.bos_id
+        self.eos_id = tokenizer.eos_id
+
+    def _process_example(self, context: str, output: str):
+        print(context)
+        check_len = max(len("Text to speech this"), len("Phoneme TTS"))+5
+        if "Phoneme TTS" in context[:check_len]:
+            instruction = self._get_text_tokens("Phoneme TTS ")
+            context = context.replace("Phoneme TTS", "").strip()
+            transcript = self._get_phoneme_tokens(context)
+            logging.debug(f"instruction: {instruction}")
+            logging.debug(f"transcript: {transcript}")
+            final_question = instruction+transcript
+        elif "Text to speech this" in context[:check_len]:
+            final_question = self._get_text_tokens(context)
+        else:
+            raise ValueError(f"Did not find TTS this nor PhonemeTTS in {context}")
+        final_question.append(self.eos_id)
+        return torch.tensor(final_question)
+
+    def _get_text_tokens(self, text):
+        input_ids = self.tokenizer.text_to_ids(text)
+        return input_ids
+
+    def _get_phoneme_tokens(self, text, lang="en"):
+        # if self.english_only_model:
+        input_ids = self.phoneme_tokenizer(text)
+        input_ids_adjusted = []
+        for i in input_ids:
+            input_ids_adjusted.append(f"p{{{i}}}")
+        input_ids_adjusted = self.tokenizer.text_to_ids("".join(input_ids_adjusted))
+        return input_ids_adjusted
+        # else:
+        #     text = any_locale_text_preprocessing(text)
+        #     input_ids = self.g2p[lang](text)
+        #     input_ids_adjusted = []
+        #     for i in input_ids:
+        #         input_ids_adjusted.append(f"p{{{i}}}")
+        #     input_ids_adjusted = self.tokenizer.text_to_ids("".join(input_ids_adjusted))
+        #     return input_ids_adjusted
+
