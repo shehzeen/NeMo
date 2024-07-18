@@ -254,7 +254,9 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         if self.pad_to_max_length:
             max_length = self.max_seq_length
         else:
-            max_length = min(self.max_seq_length, ceil_to_nearest(max_length, 8))
+            # max_length = min(self.max_seq_length, ceil_to_nearest(max_length, 8))
+            # @shehzeen not making it a multiple of 8, easier to debug.
+            max_length = min(self.max_seq_length, max_length)
         contexts = collate_vectors(virtual_text_data, max_length=max_length, padding_value=pad_id)
         context_lengths = torch.LongTensor([len(seq) for seq in all_text_data])  # text length not including virutal tokens
         max_context_and_question_tokens_len = torch.max(context_lengths).item()

@@ -969,8 +969,9 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
                         align_every_n_head = self.align_every_n_head
                         dec_start_idx = self.decoder_context_len + 1  # +1 to remove bos
                         attention_scores_sliced = attention_scores_combined[
-                            :, ::align_every_n_head, dec_start_idx:, text_start_idx : -(2 + end_offset)
+                            :, ::align_every_n_head, dec_start_idx:, text_start_idx :
                         ]  # -2 to remove eos and pad
+                        # @shehzeen: Removing the text end slicing, since it is anyway handled by the enc_len passed to CTC loss
                         attention_logprobs = (
                             attention_scores_sliced  # not taking log_softmax, since we will do that in loss function
                         )
