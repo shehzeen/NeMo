@@ -103,17 +103,17 @@ class BasePromptLearningDataset(Dataset):
             for dataset_idx in range(len(datasets)):
                 num_samples_required = int(new_total_examples * target_probs[dataset_idx])
                 num_repeat = max(int(round(num_samples_required // dataset_lengths[dataset_idx])), 1) # At least 1 repeat
-                print("dataset idx", dataset_idx, "num_repeat", num_repeat)
+                logging.info("dataset idx {}, num_repeat {}".format(dataset_idx, num_repeat))
                 dataset_examples_repeated = datasets_examples_list[dataset_idx] * num_repeat
                 final_dataset_lengths.append(len(dataset_examples_repeated))
                 final_total_examples += len(dataset_examples_repeated)
                 self.examples.extend(dataset_examples_repeated)
             
             final_probs = [final_dataset_lengths[i] / final_total_examples for i in range(len(final_dataset_lengths))]
-            print("Target probs: ", target_probs)
-            print("Final probs: ", final_probs)
-            print("Initial total examples: ", total_examples)
-            print("Final total examples: ", final_total_examples)
+            logging.info("Target probs: {}".format(target_probs))
+            logging.info("Final probs: {}".format(final_probs))
+            logging.info("Initial total examples: {}".format(total_examples))
+            logging.info("Final total examples: {}".format(final_total_examples))
         else:
             raise ValueError("Datasets must be a list of dicts or a list of filepath strings")
 
