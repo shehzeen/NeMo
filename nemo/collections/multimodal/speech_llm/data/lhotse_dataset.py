@@ -177,15 +177,21 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         # tts_text_data = collate_vectors(tts_text_data["context_ids"], max_length=max_length, padding_value=pad_id)
 
         # Build answer and label tensor
-        features_lens = torch.tensor([cut.num_frames for cut in cuts_tts], dtype=torch.int)
+        # @shehzeen: cut.num_frames don't always match with feat_i.shape
+        # features_lens = torch.tensor([cut.num_frames for cut in cuts_tts], dtype=torch.int)
+        _max_ans_len = self.max_seq_length - (3 * 86) - 2
+        features_lens = torch.tensor([ min(cut.load_features().shape[0], _max_ans_len) for cut in cuts_tts], dtype=torch.int)
         tts_answer = torch.zeros(len(cuts_tts), max(features_lens).item(), 8) + 1001  # 1001 for speech pad_id
         # Loop through cuts and build tts_answer, label, and context tensors
         speaker_context_list = []
         answers_lens = []
         for i, cut_t in enumerate(cuts_tts):
             feat_i = cut_t.load_features()
+            feat_i = feat_i[:_max_ans_len, :] # @shehzeen: Cut to max length. TODO: Fix this to filter out longer examples.
+            print("feat_i", feat_i.shape, features_lens[i])
             tts_answer[i,:feat_i.shape[0],:] = torch.tensor(feat_i)
             speaker_context = cut_t.load_context()
+            print("Speaker context", speaker_context.shape)
             # take random 3s splice from context
             # TODO: fix hardcode
             rng = random.Random()  # Custom random generator (since random uses fixed seeds). Else context remains fixed
@@ -203,29 +209,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         # import ipdb; ipdb.set_trace()
 
         pad_id = self.text_processor.pad_id
-        # if len(cuts) > 0 and len(cuts_tts) > 0:
-        #     all_text_data = asr_batch["context_ids"] + tts_batch["tts_text_data"]
-        #     # TODO: Mask out tts pad_id
-        #     bos_tensor = torch.zeros([len(cuts_tts), 1, 8])
-        #     bos_tensor[:,:,0] = self.text_processor.bos_id
-        #     speech_token_offset = self.text_processor.tokenizer.vocab_size
-        #     for i in range(speaker_context.shape(-1)):
-        #         speaker_context[:,:,i] += speech_token_offset + i*1024
-        #         tts_answer[:,:,i] += speech_token_offset + i*1024
-        #     tts_decoder_in = torch.concat([speaker_context, bos_tensor, tts_answer], 1)
-        #     asr_answer = asr_batch["answers"]
-        #     asr_answer_padded = torch.nn.functional.pad(asr_answer, [tts_decoder_in.shape[1]-asr_answer.shape[1]],pad_id)
-        #     answers = None  #TODO
-        #     loss_mask = None  #TODO
-        # elif len(cuts) > 0:
-        #     # Just asr data
-        #     all_text_data = asr_batch["context_ids"]
-        #     answers = asr_batch["answers"]
-        #     loss_mask = asr_batch["loss_mask"]
-        # else:
-        # Just tts data
-
-        # Deal with virtual tokens
+        
         # TODO: Should probably remove this
         taskname = "squad"
         virtual_token_splits = self.task_templates[taskname]["virtual_token_splits"]
@@ -245,6 +229,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         speaker_context[:,:,0] += speech_token_offset + i*1024  #Only offset 0th codebook for now
         tts_answer[:,:,0] += speech_token_offset + i*1024
         answers = torch.concat([speaker_context, bos_tensor, tts_answer], 1)
+        print("answers", answers.shape)
         # Move wav_tokens above current text token range
 
         loss_mask = None  #Need to mask out speaker_context potion of audio
@@ -262,16 +247,18 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         max_context_and_question_tokens_len = torch.max(context_lengths).item()
 
         enc_mask = get_mask_from_lengths(context_lengths + 3)  # 3 virtual tokens
-        print(enc_mask)
+        # print(enc_mask)
         if enc_mask.shape[1] < max_length:
             enc_mask = torch.nn.functional.pad(enc_mask, (0, max_length-enc_mask.shape[1]), "constant", 0)
-        print(enc_mask)
+        # print(enc_mask)
 
         position_ids = self.get_position_ids(contexts)
 
         # import ipdb; ipdb.set_trace()
         dec_input = answers[:,:-1,:]
         dec_labels = answers[:,1:,:]
+        print("dec_input", dec_input.shape)
+        print("dec_labels", dec_labels.shape)
 
         dec_mask_list = []
         cross_attention_prior_list = []
@@ -279,11 +266,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         max_dec_labels_len = dec_input.shape[1]
 
         cross_attention_prior = torch.zeros(dec_input.shape[0], dec_input.shape[1], position_ids.shape[1]) + self.cross_attention_epsilon
+        print("cross_attention_prior base", cross_attention_prior.shape)
         # B, Dec_len, enc_len
         for i in range(answers.shape[0]):
             dec_len_i = answers_lens[i] + self.decoder_context_len + 1
+            dec_len_i_loss_mask = dec_len_i - 1
             loss_mask = (
-                torch.as_tensor(([1] * dec_len_i) + ([0] * (max_dec_labels_len - dec_len_i)))
+                torch.as_tensor(([1] * dec_len_i_loss_mask) + ([0] * (max_dec_labels_len - dec_len_i_loss_mask)))
                 .long()
                 .contiguous()
             )
@@ -296,10 +285,11 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 prior_dec_start_idx = 0
                 if self.context_conditioning == "decoder":
                     prior_dec_len_i = dec_len_i - (self.decoder_context_len + 1)
-                    prior_dec_start_idx = self.decoder_context_len + 1
+                    prior_dec_start_idx = self.decoder_context_len # @shehzeen: removing +1, because we want the prior from the first step of label
                 text_len = context_lengths[i].item() - start_of_question_offset - end_of_question_offset
                 audio_len = prior_dec_len_i
                 if self.beta_binomial_interpolator is not None:
+                    # @shehzeen audio_len-1 because, 
                     cross_attention_question_prior = torch.from_numpy(self.beta_binomial_interpolator(audio_len, text_len))
                 else:
                     cross_attention_question_prior = torch.from_numpy(
@@ -309,18 +299,20 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                             scaling_factor=self.attention_prior_scaling_factor,
                         )
                     )
-                # print(f"{cross_attention_prior.shape}")
-                # print(f"{cross_attention_question_prior.shape}")
-                # print(f"{prior_dec_start_idx}")
-                # print(f"{3 + start_of_question_offset}:-{end_of_question_offset}")
-                # import ipdb; ipdb.set_trace()
+                
                 _start_of_text_id = 3 + start_of_question_offset
                 _end_of_text_id = _start_of_text_id + text_len
-                cross_attention_prior[
-                    i,
-                    prior_dec_start_idx:prior_dec_start_idx+prior_dec_len_i,
-                    _start_of_text_id : _end_of_text_id,  # 3 virtual tokens
-                ] = cross_attention_question_prior
+                print("cross_attention_prior", cross_attention_prior.shape)
+                print(prior_dec_start_idx,prior_dec_len_i )
+                print("cross_attention_question_prior", cross_attention_question_prior.shape)
+                try:
+                    cross_attention_prior[
+                        i,
+                        prior_dec_start_idx:prior_dec_start_idx+prior_dec_len_i,
+                        _start_of_text_id : _end_of_text_id,  # 3 virtual tokens
+                    ] = cross_attention_question_prior
+                except:
+                    import ipdb; ipdb.set_trace()
                 cross_attention_prior[
                     i,
                     prior_dec_start_idx+prior_dec_len_i:,
