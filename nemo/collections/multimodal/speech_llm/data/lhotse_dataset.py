@@ -269,10 +269,9 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         print("cross_attention_prior base", cross_attention_prior.shape)
         # B, Dec_len, enc_len
         for i in range(answers.shape[0]):
-            dec_len_i = answers_lens[i] + self.decoder_context_len + 1
-            dec_len_i_loss_mask = dec_len_i - 1
+            dec_len_i = answers_lens[i] + self.decoder_context_len # @shehzeen: removing + 1, because we have sliced the answer
             loss_mask = (
-                torch.as_tensor(([1] * dec_len_i_loss_mask) + ([0] * (max_dec_labels_len - dec_len_i_loss_mask)))
+                torch.as_tensor(([1] * dec_len_i) + ([0] * (max_dec_labels_len - dec_len_i)))
                 .long()
                 .contiguous()
             )
@@ -284,12 +283,11 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 prior_dec_len_i = dec_len_i
                 prior_dec_start_idx = 0
                 if self.context_conditioning == "decoder":
-                    prior_dec_len_i = dec_len_i - (self.decoder_context_len + 1)
+                    prior_dec_len_i = dec_len_i - self.decoder_context_len
                     prior_dec_start_idx = self.decoder_context_len # @shehzeen: removing +1, because we want the prior from the first step of label
                 text_len = context_lengths[i].item() - start_of_question_offset - end_of_question_offset
                 audio_len = prior_dec_len_i
                 if self.beta_binomial_interpolator is not None:
-                    # @shehzeen audio_len-1 because, 
                     cross_attention_question_prior = torch.from_numpy(self.beta_binomial_interpolator(audio_len, text_len))
                 else:
                     cross_attention_question_prior = torch.from_numpy(
