@@ -300,17 +300,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 
                 _start_of_text_id = 3 + start_of_question_offset
                 _end_of_text_id = _start_of_text_id + text_len
-                print("cross_attention_prior", cross_attention_prior.shape)
-                print(prior_dec_start_idx,prior_dec_len_i )
-                print("cross_attention_question_prior", cross_attention_question_prior.shape)
-                try:
-                    cross_attention_prior[
-                        i,
-                        prior_dec_start_idx:prior_dec_start_idx+prior_dec_len_i,
-                        _start_of_text_id : _end_of_text_id,  # 3 virtual tokens
-                    ] = cross_attention_question_prior
-                except:
-                    import ipdb; ipdb.set_trace()
+                
+                cross_attention_prior[
+                    i,
+                    prior_dec_start_idx:prior_dec_start_idx+prior_dec_len_i,
+                    _start_of_text_id : _end_of_text_id,  # 3 virtual tokens
+                ] = cross_attention_question_prior
+                
                 cross_attention_prior[
                     i,
                     prior_dec_start_idx+prior_dec_len_i:,
