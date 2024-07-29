@@ -1780,7 +1780,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             for i in range(batch_size):
                 text_end_step = text_limits[i,1].item()
                 text_start_step = text_limits[i,0].item()
-                attention_probs_example = atention_probs_all[i][:end_indices[i] - (1 + self.decoder_context_len),text_start_step:text_end_step] # T, enc_timesteps
+                end_index = end_indices.get(i, output_tokens_combined.shape[2])
+                attention_probs_example = atention_probs_all[i][:end_index - (1 + self.decoder_context_len),text_start_step:text_end_step] # T, enc_timesteps
                 attention_map = attention_probs_example.float().cpu().numpy().T
                 alignment_image = plot_alignment_to_numpy_for_speechllm(
                     attention_map,
