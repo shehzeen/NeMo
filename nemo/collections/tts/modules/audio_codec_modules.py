@@ -19,7 +19,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio
 from einops import rearrange
+from transformers import AutoModel
 
 from nemo.collections.asr.modules import AudioToMelSpectrogramPreprocessor
 from nemo.collections.asr.parts.utils.activations import Snake
@@ -36,7 +38,6 @@ from nemo.core.neural_types.elements import (
 )
 from nemo.core.neural_types.neural_type import NeuralType
 from nemo.utils import logging
-
 
 def get_padding(kernel_size: int, dilation: int = 1) -> int:
     return (kernel_size * dilation - dilation) // 2
@@ -320,6 +321,75 @@ class MultiPeriodDiscriminator(NeuralModule):
             fmaps_gen.append(fmap_gen)
 
         return scores_real, scores_gen, fmaps_real, fmaps_gen
+
+class SSLModel(NeuralModule):
+    def __init__(self, slm_model_name):
+        super().__init__()
+        self.ssl_model = AutoModel.from_pretrained(slm_model_name)
+
+    def forward(self, *args, **kwargs):
+        return self.ssl_model(*args, **kwargs)
+
+
+class SLMDiscriminator(NeuralModule):
+    """SLM Discriminator as in StyleTTS2 paper.
+    Adapted from https://github.com/yl4579/StyleTTS2/blob/5cedc71c333f8d8b8551ca59378bdcc7af4c9529/losses.py#L193"""
+
+    def __init__(self,
+                slm_model_name="microsoft/wavlm-base-plus",
+                slm_sr=16000,
+                input_sr=22050,
+                slm_hidden=768, 
+                slm_layers=13, 
+                initial_channel=64, 
+                use_spectral_norm=False,
+                lrelu_slope=0.1):
+        super().__init__()
+
+        self.lrelu_slope = lrelu_slope
+
+        # define slm model
+        self.slm_model = SSLModel(slm_model_name)
+        self.slm_model.ssl_model.feature_extractor._requires_grad = False
+
+        # Freeze slm model
+        self.slm_model.freeze()
+
+        self.resample = torchaudio.transforms.Resample(input_sr, slm_sr)
+
+        norm_f = nn.utils.weight_norm if use_spectral_norm == False else nn.utils.spectral_norm
+        self.pre = norm_f(nn.Conv1d(slm_hidden * slm_layers, initial_channel, 1, 1, padding=0))
+
+        self.convs = nn.ModuleList([
+            norm_f(nn.Conv1d(initial_channel, initial_channel * 2, kernel_size=5, padding=2)),
+            norm_f(nn.Conv1d(initial_channel * 2, initial_channel * 4, kernel_size=5, padding=2)),
+            norm_f(nn.Conv1d(initial_channel * 4, initial_channel * 4, 5, 1, padding=2)),
+        ])
+
+        self.conv_post = norm_f(nn.Conv1d(initial_channel * 4, 1, 3, 1, padding=1))
+
+    def _forward(self, x):
+        x = self.slm_model(input_values=self.resample(x), output_hidden_states=True).hidden_states
+        x = torch.stack(x, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+
+        x = self.pre(x)
+        fmap = []
+        for l in self.convs:
+            x = l(x)
+            x = F.leaky_relu(x, self.lrelu_slope)
+            fmap.append(x.unsqueeze(-1))
+
+        x = self.conv_post(x)
+        x = torch.flatten(x, 1, -1)
+
+        return x, fmap
+
+    def forward(self, audio_real, audio_gen):
+
+        y_d_r, fmap_r = self._forward(audio_real)
+        y_d_g, fmap_g = self._forward(audio_gen)
+
+        return [y_d_r.unsqueeze(1)], [y_d_g.unsqueeze(1)], [fmap_r], [fmap_g]
 
 
 class Discriminator(NeuralModule):
@@ -870,6 +940,106 @@ class HiFiGANResLayer(NeuralModule):
         residuals = [res_block(inputs=inputs, input_len=input_len) for res_block in self.res_blocks]
         out = sum(residuals) / len(residuals)
         return out
+
+class HiFiGANEncoder(NeuralModule):
+    """
+    Inverted version of HiFi-GAN generator
+    """
+    def __init__(
+        self,
+        down_sample_rates: Iterable[int] = (2, 4, 5, 8),
+        base_channels: int = 32,
+        in_kernel_size: int = 7,
+        out_kernel_size: int = 7,
+        encoded_dim: int = 128,
+        resblock_kernel_sizes: Iterable[int] = (3, 7, 11),
+        resblock_dilation_sizes: Iterable[int] = (1,),
+        activation: str = "lrelu",
+        input_dim: int = 1,
+    ):
+        assert in_kernel_size > 0
+        assert out_kernel_size > 0
+
+        super().__init__()
+
+        self.down_sample_rates = down_sample_rates
+        self.pre_conv = Conv1dNorm(in_channels=input_dim, out_channels=base_channels, kernel_size=in_kernel_size)
+
+        in_channels = base_channels
+        self.activations = nn.ModuleList([])
+        self.res_layers = nn.ModuleList([])
+        self.down_sample_conv_layers = nn.ModuleList([])
+        for i, down_sample_rate in enumerate(self.down_sample_rates):
+            act = CodecActivation(activation, channels=in_channels)
+            self.activations.append(act)
+
+            res_layer = HiFiGANResLayer(
+                channels=in_channels,
+                kernel_sizes=resblock_kernel_sizes,
+                dilations=resblock_dilation_sizes,
+                activation=activation
+            )
+            self.res_layers.append(res_layer)
+
+
+            out_channels = 2 * in_channels
+            kernel_size = 2 * down_sample_rate
+            down_sample_conv = Conv1dNorm(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=down_sample_rate,
+                padding=get_down_sample_padding(kernel_size, down_sample_rate),
+            )
+            in_channels = out_channels
+            self.down_sample_conv_layers.append(down_sample_conv)
+
+        self.post_activation = CodecActivation(activation, channels=in_channels)
+        self.post_conv = Conv1dNorm(in_channels=in_channels, out_channels=encoded_dim, kernel_size=out_kernel_size)
+
+    @property
+    def input_types(self):
+        return {
+            "audio": NeuralType(('B', 'T_audio'), AudioSignal()),
+            "audio_len": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "encoded": NeuralType(('B', 'D', 'T_encoded'), EncodedRepresentation()),
+            "encoded_len": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    def remove_weight_norm(self):
+        self.pre_conv.remove_weight_norm()
+        self.post_conv.remove_weight_norm()
+        for res_layer in self.res_layers:
+            res_layer.remove_weight_norm()
+        for down_sample_conv in self.down_sample_conv_layers:
+            down_sample_conv.remove_weight_norm()
+
+    @typecheck()
+    def forward(self, audio, audio_len):
+        encoded_len = audio_len
+        audio = rearrange(audio, "B T -> B 1 T")
+        # [B, C, T_audio]
+        out = self.pre_conv(inputs=audio, input_len=encoded_len)
+        for act, res_layer, down_sample_conv, down_sample_rate in zip(
+            self.activations, self.res_layers, self.down_sample_conv_layers, self.down_sample_rates
+        ):
+            # [B, C, T]
+            out = res_layer(inputs=out, input_len=encoded_len)
+            out = act(out)
+
+            encoded_len = encoded_len // down_sample_rate
+            # [B, 2 * C, T / down_sample_rate]
+            out = down_sample_conv(inputs=out, input_len=encoded_len)
+
+        out = self.post_activation(out)
+        # [B, encoded_dim, T_encoded]
+        encoded = self.post_conv(inputs=out, input_len=encoded_len)
+        return encoded, encoded_len
 
 
 class HiFiGANDecoder(NeuralModule):
