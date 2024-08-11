@@ -524,34 +524,41 @@ def main():
         with torch.no_grad():
             if args.codec_model == 'encodec':
                 original_codec_codes = codec_model.encode(batch["audio"].unsqueeze(1))[0][0]
-                perturbed_codec_codes = codec_model.encode(batch["perturbed_audio"].unsqueeze(1))[0][0]
-                mixed_codec_codes = codec_model.encode(batch["mixed_audio"].unsqueeze(1))[0][0]
+                if not args.save_only_tts_records:
+                    perturbed_codec_codes = codec_model.encode(batch["perturbed_audio"].unsqueeze(1))[0][0]
+                    mixed_codec_codes = codec_model.encode(batch["mixed_audio"].unsqueeze(1))[0][0]
             elif args.codec_model == 'uniaudio_codec':
                 original_codec_codes = codec_model.encode(
                     batch["audio"].unsqueeze(1) * codec_config.audio_norm_scale, target_bw=args.codec_bw
                 ).permute(1, 0, 2)
-                print("original_codec_codes", original_codec_codes.shape)
-                perturbed_codec_codes = codec_model.encode(
-                    batch["perturbed_audio"].unsqueeze(1) * codec_config.audio_norm_scale, target_bw=args.codec_bw
-                ).permute(1, 0, 2)
-                mixed_codec_codes = codec_model.encode(
-                    batch["mixed_audio"].unsqueeze(1) * codec_config.audio_norm_scale, target_bw=args.codec_bw
-                ).permute(1, 0, 2)
+                if not args.save_only_tts_records:
+                    perturbed_codec_codes = codec_model.encode(
+                        batch["perturbed_audio"].unsqueeze(1) * codec_config.audio_norm_scale, target_bw=args.codec_bw
+                    ).permute(1, 0, 2)
+                    mixed_codec_codes = codec_model.encode(
+                        batch["mixed_audio"].unsqueeze(1) * codec_config.audio_norm_scale, target_bw=args.codec_bw
+                    ).permute(1, 0, 2)
             elif args.codec_model == 'dac':
                 # z, codes, latents, _, _ = model.encode(x)
                 _, original_codec_codes, _, _, _ = codec_model.encode(batch["audio"].unsqueeze(1))
-                _, perturbed_codec_codes, _, _, _ = codec_model.encode(batch["perturbed_audio"].unsqueeze(1))
-                _, mixed_codec_codes, _, _, _ = codec_model.encode(batch["mixed_audio"].unsqueeze(1))
+                if not args.save_only_tts_records:
+                    _, perturbed_codec_codes, _, _, _ = codec_model.encode(batch["perturbed_audio"].unsqueeze(1))
+                    _, mixed_codec_codes, _, _, _ = codec_model.encode(batch["mixed_audio"].unsqueeze(1))
             elif args.codec_model in ['nemo_codec', 'nemo_codec21']:
                 original_codec_codes, _ = codec_model.encode(audio=batch["audio"], audio_len=batch["audio_len"])
-                perturbed_codec_codes, _ = codec_model.encode(
-                    audio=batch["perturbed_audio"], audio_len=batch["perturbed_audio_len"]
-                )
-                mixed_codec_codes, _ = codec_model.encode(
-                    audio=batch["mixed_audio"], audio_len=batch["mixed_audio_len"]
-                )
+                if not args.save_only_tts_records:
+                    perturbed_codec_codes, _ = codec_model.encode(
+                        audio=batch["perturbed_audio"], audio_len=batch["perturbed_audio_len"]
+                    )
+                    mixed_codec_codes, _ = codec_model.encode(
+                        audio=batch["mixed_audio"], audio_len=batch["mixed_audio_len"]
+                    )
             else:
                 raise ValueError("Unknown codec model {}".format(args.codec_model))
+        
+        if args.save_only_tts_records:
+            perturbed_codec_codes = original_codec_codes # Dummy values to not break the code
+            mixed_codec_codes = original_codec_codes # Dummy values to not break the code
 
         # codec_codes = transformer_encodec_model.encode(batch["audio"].unsqueeze(1), audio_len_mask, bandwidth=6.0)
         target_codecs = []
