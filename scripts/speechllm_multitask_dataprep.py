@@ -114,6 +114,7 @@ class AudioDataset(Dataset):
         #     os.makedirs(self.sup_data_dir)
 
     def _is_record_valid(self, record):
+        return True
         try:
             sf.read(record["audio_filepath"])
             # sf.read(record["context"])

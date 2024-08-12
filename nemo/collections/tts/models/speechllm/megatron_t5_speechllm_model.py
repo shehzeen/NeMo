@@ -531,7 +531,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         output_tokens = tokens.clone()
         if apply_offset_correction:
             output_tokens[0] = output_tokens[0] - self.speech_offset
-        output_tokens = torch.clamp(output_tokens, min=0, max=1023)
+        output_tokens = torch.clamp(output_tokens, min=0, max=self.speech_codebook_size - 1)
         if pattern is None:
             pattern = self.cfg.get('seq_pattern', 'delay_parallel')
         if pattern == "delay_parallel":
@@ -1158,7 +1158,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                     all_layer_tokens = torch.stack([first_layer_tokens] + other_layer_tokens)  # (8, t)
                     all_layer_tokens = self.convert_tokens_to_range(all_layer_tokens, apply_offset_correction=False)
-                    all_layer_tokens = torch.clip(all_layer_tokens, 0, 1023)
+                    all_layer_tokens = torch.clip(all_layer_tokens, 0, self.speech_codebook_size - 1)
                     predicted_wav = self.decode_wav_from_codec_model(all_layer_tokens)
                     self.logger.experiment.add_audio(
                         "val_tf_pred_wav", predicted_wav, self.global_step, self.sample_rate
