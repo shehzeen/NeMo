@@ -779,14 +779,16 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
     def on_test_epoch_end(self):
         return self._test_validation_epoch_end(step_outputs=self.test_step_outputs, prefix="test",)
 
-    def loss_func(self, loss_mask, tokens_loss):
+    def loss_func(self, loss_mask, tokens_loss, rewards=None):
         """
         This function takes as input per-token loss and masks non-required values.
         """
+        if rewards is not None:
+            loss_mask = loss_mask * rewards
         losses = tokens_loss.view(-1).float()
         loss_mask = loss_mask.view(-1).float()
         # TODO: add nemo version here
-        loss = torch.sum(losses * loss_mask) / loss_mask.sum()  # sequence level nll
+        loss = torch.sum(losses * loss_mask) / (torch.abs(loss_mask)).sum()  # sequence level nll
         return loss
 
     def process_micro_batch(self, micro_batch):
