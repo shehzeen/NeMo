@@ -404,6 +404,10 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         virtual_token_splits = self.task_templates[taskname]["virtual_token_splits"]
         truncation_field = self.task_templates[taskname]['truncate_field']
         answer_field = self.task_templates[taskname]["answer_field"]
+        # reward should be 1, 1, 0, 0, 1, 1, 0, 0, 1, 1...
+        reward = 1 if idx % 4 < 2 else 0
+        # reward = doc.get("reward", 1)
+        reward = reward
 
         input_example = prompt_template
 
@@ -630,7 +634,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             is_speech,
             cross_attention_prior,
             lang.value,
-            question_text
+            question_text,
+            reward
         )
 
     def _truncate_input_speech(self, context_tokens, question_tokens, virtual_tokens):
@@ -1010,6 +1015,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             data_dict['text_limits'],
             data_dict['lang'],
             data_dict['question_texts'],
+            data_dict['rewards'].unsqueeze(1) if data_dict['rewards'] is not None else None,
         )
 
     def pad_batch_and_build_loss_mask(self, batch):
@@ -1029,6 +1035,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             _,
             _,
             question_texts,
+            rewards,
         ) = zip(*batch)
 
         taskname_ids = self.pad_taskname_ids(taskname_ids)
@@ -1101,6 +1108,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 is_speech,
                 cross_attention_prior,
                 lang,
+                _,
                 _,
             ) = sample_tuple
 
@@ -1243,6 +1251,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             "text_limits": torch.stack(text_limits) if len(text_limits) > 0 else None,
             "lang": torch.stack(lang_list),
             "question_texts": question_texts,
+            "rewards" : torch.tensor(rewards).long(),
         }
 
         return data_dict

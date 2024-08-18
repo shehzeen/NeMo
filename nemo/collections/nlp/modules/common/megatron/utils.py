@@ -401,7 +401,9 @@ def get_iterator_k_split(batch: List[torch.Tensor], num_microbatches: int) -> It
         for item in batch:
             if torch.is_tensor(item):
                 split_batch.append(torch.tensor_split(item, num_microbatches, dim=0))
-            elif isinstance(item, list):
+            elif isinstance(item, list) or isinstance(item, tuple):
+                if isinstance(item, tuple):
+                    item = list(item)
                 if isinstance(item[0], torch.Tensor):
                     split_tensors = [torch.tensor_split(elem, num_microbatches, dim=0) for elem in item]
                     split_tuple = []

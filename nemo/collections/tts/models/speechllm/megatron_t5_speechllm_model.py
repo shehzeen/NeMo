@@ -575,6 +575,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 text_limits,
                 _,  # TODO: text limit and lang not in tarred dataset
                 _,
+                rewards,
             ) = batch
             
             if self.trainer.global_step % self.train_check_interval == 0 and not validation_step and self.is_rank_zero:
@@ -970,6 +971,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             text_limits,
             _,
             _,
+            rewards,
         ) = batch
         # loss_mask (b, t)
         # does not use dataloader_iter due to device placement issues arising from PTL
@@ -1551,7 +1553,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 cross_attention_prior,
                 text_limits,
                 lang,
-                question_texts, 
+                question_texts,
+                rewards,
             ) = batch
 
             dec_input = dec_input_raw * 1  # (B, 8, T)
@@ -2106,3 +2109,237 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             acc = correct / len(gather_results_dedup) if all_labels[0] else None
             logging.info(f'Prediction results: {acc}')
             logging.info(f'Test finish')
+
+class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
+    def __init__(self, cfg: DictConfig, trainer: Trainer):
+        super().__init__(cfg, trainer)
+    
+    def setup_training_data(self, training_data_config=None):
+        if self.cfg.data.get('train_ds', None):
+            self._train_ds, self._train_dl = self.build_virtual_prompt_dataset(
+                dataset_paths=self.cfg.data.train_ds,
+                batch_size=self.cfg.global_batch_size,
+                for_train=True,
+                drop_last=True,
+                shuffle=False,
+                num_workers=self.cfg.data.num_workers,
+                pin_memory=True,
+            )
+        elif self.cfg.data.get('train_manifest', None):
+            self._train_ds, self._train_dl = self.build_virtual_prompt_tarred_dataset(
+                dataset_paths=self.cfg.data.train_manifest,
+                audio_path=self.cfg.data.train_audio_path,
+                batch_size=self.cfg.global_batch_size,
+                for_train=True,
+                drop_last=True,
+                shuffle=False,
+                num_workers=self.cfg.data.num_workers,
+                pin_memory=True,
+            )
+    
+    # https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py
+    def _get_batch_logps(self, logits, labels, loss_mask, average_log_prob=False):
+        """Compute the log probabilities of the given labels under the given logits.
+
+        Args:
+            logits: Logits of the model (unnormalized). Shape: (batch_size, sequence_length, vocab_size)
+            labels: Labels for which to compute the log probabilities. Label tokens with a value of -100 are ignored. Shape: (batch_size, sequence_length)
+            average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
+
+        Returns:
+            A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
+        """
+        per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
+
+        if average_log_prob:
+            return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
+        else:
+            return (per_token_logps * loss_mask).sum(-1)
+    
+    # https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py
+    def preference_loss(self, policy_chosen_logps,
+                    policy_rejected_logps,
+                    reference_chosen_logps,
+                    reference_rejected_logps,
+                    beta=0.2,
+                    label_smoothing=0,
+                    ipo=False,
+                    reference_free=False):
+        """Compute the DPO loss for a batch of policy and reference model log probabilities.
+
+        Args:
+            policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
+            policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
+            reference_chosen_logps: Log probabilities of the reference model for the chosen responses. Shape: (batch_size,)
+            reference_rejected_logps: Log probabilities of the reference model for the rejected responses. Shape: (batch_size,)
+            beta: Temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5. We ignore the reference model as beta -> 0.
+            label_smoothing: conservativeness for DPO loss, which assumes that preferences are noisy (flipped with probability label_smoothing)
+            ipo: If True, use the IPO loss instead of the DPO loss.
+            reference_free: If True, we ignore the _provided_ reference model and implicitly use a reference model that assigns equal probability to all responses.
+
+        Returns:
+            A tuple of three tensors: (losses, chosen_rewards, rejected_rewards).
+            The losses tensor contains the DPO loss for each example in the batch.
+            The chosen_rewards and rejected_rewards tensors contain the rewards for the chosen and rejected responses, respectively.
+        """
+        pi_logratios = policy_chosen_logps - policy_rejected_logps
+        ref_logratios = reference_chosen_logps - reference_rejected_logps
+
+        if reference_free:
+            ref_logratios = 0
+
+        logits = pi_logratios - ref_logratios  # also known as h_{\pi_\theta}^{y_w,y_l}
+
+        if ipo:
+            losses = (logits - 1/(2 * beta)) ** 2  # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
+        else:
+            # Eq. 3 https://ericmitchell.ai/cdpo.pdf; label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
+            F = torch.nn.functional
+            losses = -F.logsigmoid(beta * logits) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
+
+        chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
+        rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
+
+        return losses, chosen_rewards, rejected_rewards
+
+    def get_forward_output_and_loss_func(self, validation_step=False):
+        def fwd_output_and_loss_func(dataloader_iter, model):
+            batch = next(dataloader_iter)
+            _batch = []
+            for x in batch:
+                # import ipdb; ipdb.set_trace()
+                if isinstance(x, torch.Tensor):
+                    x = x.cuda(non_blocking=True)
+                elif isinstance(x, list):
+                    if isinstance(x[0], torch.Tensor):
+                        x = [y.cuda(non_blocking=True) for y in x]
+                _batch.append(x)
+            batch = _batch
+            # batch = [x.cuda(non_blocking=True) if isinstance(x, torch.Tensor) else x for x in batch]
+            (
+                virtual_tokens,
+                context_and_question_tokens,
+                enc_mask,
+                dec_input,
+                dec_input_mask,
+                labels,
+                loss_mask,
+                position_ids,
+                taskname_ids,
+                speech_mask,
+                context_and_question_tokens_lens,
+                cross_attention_prior,
+                text_limits,
+                _,  # TODO: text limit and lang not in tarred dataset
+                _,
+                rewards,
+            ) = batch
+            
+            if self.trainer.global_step % self.train_check_interval == 0 and not validation_step and self.is_rank_zero:
+                self.frozen_model.enc_dec_model.logging_step = True
+            
+            _cross_attention_prior = cross_attention_prior
+            if isinstance(context_and_question_tokens, list):
+                # None for context and prior for question
+                _cross_attention_prior = [None, cross_attention_prior]
+
+            output_tensor, encoder_input, out_logits = model(
+                virtual_tokens,
+                context_and_question_tokens,
+                enc_mask,
+                dec_input,
+                dec_input_mask,
+                position_ids,
+                taskname_ids,
+                labels=labels,
+                speech_mask=speech_mask,
+                cross_attention_prior=_cross_attention_prior,
+                text_limits=text_limits,
+                inference=False,
+            )
+            # out_logits[0] : (T, B, 31152) -> token logits (first layer logits)
+            # out_logits[1] : List of size 7, each element is (T, B, 1024) -> speech logits
+            output_tensor_ref, encoder_input_ref, out_logits_ref = None, None, None
+            if 'model_ref' in self.additional_models:
+                self.additional_models['model_ref'] = self.additional_models['model_ref'].cuda()
+                with torch.no_grad():
+                    output_tensor_ref, encoder_input_ref, out_logits_ref = self.additional_models['model_ref'](
+                        virtual_tokens,
+                        context_and_question_tokens,
+                        enc_mask,
+                        dec_input,
+                        dec_input_mask,
+                        position_ids,
+                        taskname_ids,
+                        labels=labels,
+                        speech_mask=speech_mask,
+                        cross_attention_prior=_cross_attention_prior,
+                        text_limits=text_limits,
+                        inference=False,
+                )
+
+            output_tensor = output_tensor.contiguous()
+
+            alignment_loss = out_logits[3]
+            if alignment_loss is not None:
+                self.logger.experiment.add_scalar('train_alignment_loss', alignment_loss, self.global_step)
+            
+            def loss_func(loss_args):
+                output_tensor, out_logits, curr_step, out_logits_ref, labels, loss_mask, rewards = loss_args
+                alignment_loss = out_logits[3]
+                first_layer_logits = out_logits[0].permute(1,0,2) # (B, T, V)
+                first_layer_labels = labels[:,0,:] # (B, T)
+                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=True)
+                with torch.no_grad():
+                    first_layer_logits_ref = out_logits_ref[0].permute(1,0,2) # (B, T, V)
+                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=True)
+
+                for speech_layer_idx in range(len(out_logits[1])):
+                    speech_logits = out_logits[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
+                    speech_labels = labels[:,speech_layer_idx+1,:] # (B, T)
+                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=True)
+                    with torch.no_grad():
+                        speech_logits_ref = out_logits_ref[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
+                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=True)
+
+                # First half of the batch are chosen responses, second half are rejected responses
+                _batch_size = first_layer_labels.shape[0]
+                num_chosen = int(_batch_size / 2)
+                rewards_chosen = rewards[:num_chosen]
+                # assert each reward is 1 in the chosen set
+                assert torch.all(rewards_chosen == 1)
+                rewards_rejected = rewards[num_chosen:]
+                # assert each reward is 0 in the rejected set
+                assert torch.all(rewards_rejected == 0)
+
+                # Compute the DPO loss
+                chosen_policy_logprobs = batch_log_probs[:num_chosen]
+                rejected_policy_logprobs = batch_log_probs[num_chosen:]
+                chosen_reference_logprobs = batch_log_probs_ref[:num_chosen]
+                rejected_reference_logprobs = batch_log_probs_ref[num_chosen:]
+                
+                loss, chosen_rewards, rejected_rewards = self.preference_loss(
+                    chosen_policy_logprobs,
+                    rejected_policy_logprobs,
+                    chosen_reference_logprobs,
+                    rejected_reference_logprobs
+                )
+
+
+                loss = loss.mean()
+                # import ipdb; ipdb.set_trace()
+                # loss = self.frozen_model.loss_func(loss_mask, output_tensor)
+                if (
+                    (alignment_loss is not None)
+                    and (curr_step > self.alignment_loss_start_step)
+                    and (curr_step < self.alignment_loss_end_step)
+                ):
+                    logging.debug(f"Adding alignment loss. cur:{curr_step} start:{self.alignment_loss_start_step}")
+                    loss = loss + alignment_loss
+
+                reduced_loss = average_losses_across_data_parallel_group([loss])
+                return loss, {'avg': reduced_loss}
+
+            return [output_tensor, out_logits, self.global_step, out_logits_ref, labels, loss_mask, rewards], loss_func
+
+        return fwd_output_and_loss_func
