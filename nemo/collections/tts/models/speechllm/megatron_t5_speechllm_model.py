@@ -72,6 +72,13 @@ except (ImportError, ModuleNotFoundError):
 
 __all__ = ['MegatronT5SpeechLMModel']
 
+def read_records(manifest_path):
+    with open(manifest_path, 'r') as f:
+        lines = f.readlines()
+        records = []
+        for line in lines:
+            records.append(json.loads(line.strip()))
+    return records
 
 class MegatronT5OverrideModel(MegatronT5Model):
     def _build_tokenizer(self):
@@ -1359,16 +1366,23 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         """
         outputs = self.predict_step_outputs
         average_metrics = {}
+        inference_lists = {}
         for output in outputs:
             for key in output:
-                if key not in average_metrics:
-                    average_metrics[key] = []
-                if isinstance(output[key], torch.Tensor):
-                    average_metrics[key].append(output[key].item())
-                elif output[key] is None:
-                    continue
+                if key != 'lists':
+                    if key not in average_metrics:
+                        average_metrics[key] = []
+                    if isinstance(output[key], torch.Tensor):
+                        average_metrics[key].append(output[key].item())
+                    elif output[key] is None:
+                        continue
+                    else:
+                        average_metrics[key].append(output[key])
                 else:
-                    average_metrics[key].append(output[key])
+                    for list_key in output[key]:
+                        if list_key not in inference_lists:
+                            inference_lists[list_key] = []
+                        inference_lists[list_key].extend(output[key][list_key])
 
         for key in average_metrics:
             average_metrics[key] = np.mean(average_metrics[key]).item()
@@ -1377,8 +1391,18 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             self.logger.experiment.add_scalar(f'Inf Cumulative {key}', average_metrics[key], 0)
 
         # save average metrics into json file
-        with open(os.path.join(self.logger.log_dir, 'output_metrics.json'), 'w') as f:
+        _exp_dir = self.logger.log_dir
+        if hasattr(self, 'override_log_dir') and self.override_log_dir is not None:
+            _exp_dir = self.override_log_dir
+            
+        with open(os.path.join(_exp_dir, 'output_metrics.json'), 'w') as f:
             json.dump(average_metrics, f)
+        
+        # save inference lists into json file
+        with open(os.path.join(_exp_dir, 'inference_lists.json'), 'w') as f:
+            json.dump(inference_lists, f)
+        
+        return average_metrics
 
     def build_virtual_prompt_dataset(
         self, dataset_paths, batch_size, for_train, drop_last, shuffle, num_workers, pin_memory
@@ -1527,6 +1551,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         
         # Replace "-" with spaces
         no_dash_text = no_comma_text.replace("-", " ")
+
+        no_dash_text = no_dash_text.replace("'", "")
+        no_dash_text = no_dash_text.replace(";", "")
+        no_dash_text = no_dash_text.replace(".", "")
         
         # Replace double spaces with single space
         single_space_text = " ".join(no_dash_text.split())
@@ -1762,6 +1790,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 else:
                     asr_model_zh = self.additional_models['asr_model_zh']
             _exp_dir_path = self.logger.log_dir
+            if hasattr(self, 'override_log_dir') and self.override_log_dir is not None:
+                _exp_dir_path = self.override_log_dir
             _exp_dir_path = _exp_dir_path + '/Sample_Audios'
             if not os.path.exists(_exp_dir_path):
                 os.mkdir(_exp_dir_path)
@@ -1780,6 +1810,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             wer_score = 0
             audio_to_pred = []
             audio_to_pred_zh = []
+            predicted_token_files = []
+            predicted_durations = []
             for i in range(batch_size):
                 text_end_step = text_limits[i,1].item()
                 text_start_step = text_limits[i,0].item()
@@ -1852,6 +1884,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     audio_fp_gt = os.path.join(_exp_dir_path, f'dec_input_wav_{wav_num}.wav')
                     sf.write(audio_fp_gt, dec_input_wav.cpu().numpy(), self.sample_rate)
 
+                    tokens_fp_pred = os.path.join(_exp_dir_path, f'predicted_tokens_{wav_num}.pt')
+                    torch.save(predicted_tokens.cpu().type(torch.int16), tokens_fp_pred)
+                    predicted_token_files.append(tokens_fp_pred)
+                    predicted_durations.append(round(predicted_wav.shape[0] / self.sample_rate, 2))
                     # speaker verification evaluation
                     spk_embedding_pred = nemo_sv_model.get_embedding(audio_fp_pred)
                     spk_embedding_pred = spk_embedding_pred.cpu().detach().numpy().flatten()
@@ -2006,7 +2042,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             wer_phoneme_gt = []
             cer_tts_gt = []
             wer_tts_gt = []
-
+            cer_gts = []
+            wer_gts = []
             for i in range(0, len(greedy_transcripts) - 1, 2):
                 assert all_audio_to_pred[i]["step"] == all_audio_to_pred[i + 1]["step"]
                 # step = batch_idx * self.test_dataloader().batch_size + all_audio_to_pred[i]["step"]
@@ -2041,6 +2078,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     wer_phoneme.append(wer_sample)
                     cer_phoneme_gt.append(cer_gt)
                     wer_phoneme_gt.append(wer_gt)
+                    cer_gts.append(cer_gt)
+                    wer_gts.append(wer_gt)
                 elif question_type[all_audio_to_pred[i]["step"]] == "Text to speech this":
                     if log_scalars:
                         self.logger.experiment.add_scalar(f'Inf CER TTS Task', cer_sample, step)
@@ -2050,6 +2089,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     wer_tts.append(wer_sample)
                     cer_tts_gt.append(cer_gt)
                     wer_tts_gt.append(wer_gt)
+                    cer_gts.append(cer_gt)
+                    wer_gts.append(wer_gt)
+
 
             # compute average similarity
             similarity_avg = np.mean(similarity_list)
@@ -2074,6 +2116,13 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     'wer_phoneme_gt': np.mean(wer_phoneme_gt) if len(wer_phoneme_gt) > 0 else None,
                     'cer_tts_gt': np.mean(cer_tts_gt) if len(cer_tts_gt) > 0 else None,
                     'wer_tts_gt': np.mean(wer_tts_gt) if len(wer_tts_gt) > 0 else None,
+                    'lists' : {
+                        'predicted_durations': predicted_durations,
+                        'predicted_token_files': predicted_token_files,
+                        'cer_gts': cer_gts,
+                        'wer_gts': wer_gts,
+                        'pred_context_similarity' : [float(sim) for sim in pred_context_similarity_list],
+                    }
                 }
             )
 
@@ -2202,6 +2251,88 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
 
         return losses, chosen_rewards, rejected_rewards
 
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        (
+            virtual_tokens,
+            context_and_question_tokens,
+            enc_mask,
+            dec_input,
+            dec_input_mask,
+            labels,
+            loss_mask,
+            position_ids,
+            taskname_ids,
+            speech_mask,
+            context_and_question_tokens_lens,
+            cross_attention_prior,
+            text_limits,
+            _,
+            _,
+            rewards,
+        ) = batch
+        # loss_mask (b, t)
+        # does not use dataloader_iter due to device placement issues arising from PTL
+        
+        mode = self.training
+        self.eval()
+        gbs = self.cfg.get('validation_global_batch_size', self.cfg.global_batch_size)
+        self._reconfigure_and_process_inference_batch(virtual_tokens.size(0), gbs)
+
+        loss_mean = self.fwd_bwd_step(
+            itertools.chain([batch]), batch_idx, forward_only=True
+        )  # comment this out and add custom forward function to calculate WER
+        # # logging.info (f'loss_mean {loss_mean}')
+        self.train(mode=mode)
+        self.frozen_model.train()
+        metrics = {
+            'loss' : loss_mean,
+        }
+        self.validation_step_outputs.append(metrics)
+        return loss_mean
+
+    def on_validation_epoch_end(self):
+        outputs = self.validation_step_outputs
+        averaged_loss = torch.stack([item['loss'] for item in outputs]).mean()
+        self.log('val_loss', averaged_loss, prog_bar=True, rank_zero_only=True, batch_size=1)
+        
+        # self.predict_step_outputs = []
+        # self._test_ds.examples = []
+        # records = read_records("/Data/CodecDatasets/updatedcodecs/manifests/dummy_test.json")
+        # self._test_ds.examples = self._test_ds.load_data(records)
+        # sampler = torch.utils.data.distributed.DistributedSampler(
+        #     self._test_ds, num_replicas=1, rank=0, shuffle=False, seed=1
+        # )
+        # self._test_dl = torch.utils.data.DataLoader(
+        #     self._test_ds,
+        #     collate_fn=self._test_ds.collate_fn,
+        #     sampler=sampler,
+        #     batch_size=32,
+        #     drop_last=False,
+        #     num_workers=1,
+        #     pin_memory=False,
+        #     persistent_workers=True
+        # )
+        # self.cfg.data.test_ds = None
+        # self.trainer.test(self, self._test_dl)
+        
+        # _exp_dir = self.logger.log_dir
+        # if hasattr(self, 'override_log_dir') and self.override_log_dir is not None:
+        #     _exp_dir = self.override_log_dir
+        
+        # inference_metrics_json = os.path.join(_exp_dir, 'output_metrics.json')
+        # with open(inference_metrics_json, 'r') as f:
+        #     inference_metrics = json.load(f)
+        
+        # global_step = self.global_step
+        # new_metrics_file = os.path.join(_exp_dir, f'inference_metrics_{global_step}.json')
+        # with open(new_metrics_file, 'w') as f:
+        #     json.dump(inference_metrics, f)
+        
+        gbs = self.cfg.global_batch_size
+        mbs = self.cfg.micro_batch_size
+        self._reconfigure_batch_sizes(gbs, mbs)
+        self.validation_step_outputs.clear()
+
     def get_forward_output_and_loss_func(self, validation_step=False):
         def fwd_output_and_loss_func(dataloader_iter, model):
             batch = next(dataloader_iter)
@@ -2289,24 +2420,25 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                 alignment_loss = out_logits[3]
                 first_layer_logits = out_logits[0].permute(1,0,2) # (B, T, V)
                 first_layer_labels = labels[:,0,:] # (B, T)
-                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=True)
+                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=False)
                 with torch.no_grad():
                     first_layer_logits_ref = out_logits_ref[0].permute(1,0,2) # (B, T, V)
-                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=True)
+                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=False)
 
                 for speech_layer_idx in range(len(out_logits[1])):
                     speech_logits = out_logits[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
                     speech_labels = labels[:,speech_layer_idx+1,:] # (B, T)
-                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=True)
+                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=False)
                     with torch.no_grad():
                         speech_logits_ref = out_logits_ref[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
-                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=True)
+                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=False)
 
                 # First half of the batch are chosen responses, second half are rejected responses
                 _batch_size = first_layer_labels.shape[0]
                 num_chosen = int(_batch_size / 2)
                 rewards_chosen = rewards[:num_chosen]
                 # assert each reward is 1 in the chosen set
+                print("rewards", rewards.shape, rewards)
                 assert torch.all(rewards_chosen == 1)
                 rewards_rejected = rewards[num_chosen:]
                 # assert each reward is 0 in the rejected set
