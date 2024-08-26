@@ -116,16 +116,14 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
 
         # sort by cer and similarity
         cer_sim_indices = sorted(cer_sim_indices)
-        if cer_sim_indices[0][0] < cfg.model.rlhf_cer_threshold:
-            best_record = copy.deepcopy(sample_group[cer_sim_indices[0][2]])
-            worst_record = copy.deepcopy(sample_group[cer_sim_indices[-1][2]])
-            best_record['reward'] = 1
-            worst_record['reward'] = 0
-            rlhf_records.append(best_record)
-            rlhf_records.append(worst_record)
-            best_records.append(best_record)
-            worst_records.append(worst_record)
-
+        best_record = copy.deepcopy(sample_group[cer_sim_indices[0][2]])
+        worst_record = copy.deepcopy(sample_group[cer_sim_indices[-1][2]])
+        best_record['reward'] = 1
+        worst_record['reward'] = 0
+        rlhf_records.append(best_record)
+        rlhf_records.append(worst_record)
+        best_records.append(best_record)
+        worst_records.append(worst_record)
         ridx += cfg.model.rlhf_num_samples_per_example
     
     rlhf_records_rearranged = []
@@ -139,13 +137,23 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
 
     rlhf_manifest = os.path.join(model.override_log_dir, "rlhf_manifest.json")
     write_records(rlhf_manifest, rlhf_records_rearranged)
+    
+    best_records_manifest = os.path.join(model.override_log_dir, "best_records.json")
+    worst_records_manifest = os.path.join(model.override_log_dir, "worst_records.json")
+    
+    write_records(best_records_manifest, best_records)
+    write_records(worst_records_manifest, worst_records)
+
     model.override_log_dir = None
     print(rlhf_manifest)
+    print(best_records_manifest)
+    print(worst_records_manifest)
     # import ipdb; ipdb.set_trace()
-    import ipdb; ipdb.set_trace()
     return {
         'completed_samples' : current_state.get('completed_samples', 0) + cfg.model.rlhf_num_generations_per_iteration,
         'rlhf_manifest' : rlhf_manifest,
+        'best_records_manifest' : best_records_manifest,
+        'worst_records_manifest' : worst_records_manifest,
         'inference_metrics' : inference_metrics,
     }
 
