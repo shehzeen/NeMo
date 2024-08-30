@@ -405,8 +405,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         truncation_field = self.task_templates[taskname]['truncate_field']
         answer_field = self.task_templates[taskname]["answer_field"]
         # reward should be 1, 1, 0, 0, 1, 1, 0, 0, 1, 1...
-        reward = 1 if idx % 4 < 2 else 0
-        # reward = doc.get("reward", 1)
+        # reward = 1 if idx % 4 < 2 else 0
+        reward = doc.get("reward", 1)
         reward = reward
 
         input_example = prompt_template

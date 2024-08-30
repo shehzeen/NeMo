@@ -1560,7 +1560,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         single_space_text = " ".join(no_dash_text.split())
 
         single_space_text = single_space_text.translate(str.maketrans('', '', string.punctuation))
-        
+
+        single_space_text.replace("h t t p", "http")
+        single_space_text.replace("w w w", "www")
+
         return single_space_text
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0, log_scalars=True, global_step=None) -> Any:
@@ -2044,6 +2047,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             wer_tts_gt = []
             cer_gts = []
             wer_gts = []
+            transcripts_gt = []
+            transcripts_pred = []
             for i in range(0, len(greedy_transcripts) - 1, 2):
                 assert all_audio_to_pred[i]["step"] == all_audio_to_pred[i + 1]["step"]
                 # step = batch_idx * self.test_dataloader().batch_size + all_audio_to_pred[i]["step"]
@@ -2057,6 +2062,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 # Processing text since one is ASR output and the other is the GT text
                 cer_gt = word_error_rate([self.process_text(greedy_transcripts[i])], [self.process_text(question_text)], use_cer=True)
                 wer_gt = word_error_rate([self.process_text(greedy_transcripts[i])], [self.process_text(question_text)], use_cer=False)
+
+                transcripts_gt.append(self.process_text(question_text))
+                transcripts_pred.append(self.process_text(greedy_transcripts[i]))
 
                 self.logger.experiment.add_text("Inf Predicted Text", greedy_transcripts[i], step)
                 self.logger.experiment.add_text("Inf GT Text", greedy_transcripts[i + 1], step)
@@ -2122,6 +2130,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                         'cer_gts': cer_gts,
                         'wer_gts': wer_gts,
                         'pred_context_similarity' : [float(sim) for sim in pred_context_similarity_list],
+                        'transcripts_gt': transcripts_gt,
+                        'transcripts_pred': transcripts_pred,
                     }
                 }
             )
@@ -2212,7 +2222,7 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                     reference_rejected_logps,
                     beta=0.2,
                     label_smoothing=0,
-                    ipo=False,
+                    ipo=True,
                     reference_free=False):
         """Compute the DPO loss for a batch of policy and reference model log probabilities.
 
@@ -2420,18 +2430,18 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                 alignment_loss = out_logits[3]
                 first_layer_logits = out_logits[0].permute(1,0,2) # (B, T, V)
                 first_layer_labels = labels[:,0,:] # (B, T)
-                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=False)
+                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=True)
                 with torch.no_grad():
                     first_layer_logits_ref = out_logits_ref[0].permute(1,0,2) # (B, T, V)
-                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=False)
+                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=True)
 
                 for speech_layer_idx in range(len(out_logits[1])):
                     speech_logits = out_logits[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
                     speech_labels = labels[:,speech_layer_idx+1,:] # (B, T)
-                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=False)
+                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=True)
                     with torch.no_grad():
                         speech_logits_ref = out_logits_ref[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
-                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=False)
+                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=True)
 
                 # First half of the batch are chosen responses, second half are rejected responses
                 _batch_size = first_layer_labels.shape[0]

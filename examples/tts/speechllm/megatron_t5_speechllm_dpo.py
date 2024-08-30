@@ -101,6 +101,8 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
         record['cer_gts'] = inference_list['cer_gts'][ridx]
         record['wer_gts'] = inference_list['wer_gts'][ridx]
         record['pred_context_similarity'] = inference_list['pred_context_similarity'][ridx]
+        record['transcript_pred'] = inference_list['transcripts_pred'][ridx]
+        record['transcript_gt'] = inference_list['transcripts_gt'][ridx]
         new_records.append(record)
 
     ridx = 0
