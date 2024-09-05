@@ -69,9 +69,9 @@ def contains_invalid_text(text):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate on challenging texts')
-    parser.add_argument('--exp_name', type=str, default="2024-01-16_17-30-29")
-    parser.add_argument('--exp_base_dir', type=str, default="/Data/Experiments/EVAL_NEMO_CODEC/temp08/jason_challenging_texts_ctc_corrected")
-    parser.add_argument('--manifest_path', type=str, default="/Data/CodecDatasets/updatedcodecs/manifests/challenging_nemo_codec_phoneme.json")
+    parser.add_argument('--exp_name', type=str, default="2024-09-04_19-46-42")
+    parser.add_argument('--exp_base_dir', type=str, default="/Data/InferenceCodecModels/Dac/dac_Step423k_librival")
+    parser.add_argument('--manifest_path', type=str, default="/Data/CodecDatasets/updatedcodecs/manifests/LibriValOrig_dac_bw_6.0_phoneme_plus_sentencepiece_tts.json")
     args = parser.parse_args()
 
     audio_file_lists = find_sample_audios(args.exp_name, args.exp_base_dir)

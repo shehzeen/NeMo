@@ -1412,6 +1412,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             # start_step = self.decoder_context_len + 1
             start_step = 0
             
+            start_time = None
             for t in range(start_step, dec_input.shape[2] - 1):
                 if t % 100 == 0:
                     logging.info("Timestep {}".format(t))
@@ -1513,6 +1514,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 output_token_list.append(output_tokens_curr_timestep)
 
                 if self.decoder_context_len == 0 or t > self.decoder_context_len:
+                    if start_time is None:
+                        # Start the timer after teacher-forcing is done.
+                        start_time = time.time()
                     # Teacher force before that, then use predicted tokens
                     if torch.count_nonzero(speech_mask) > 0:
                         dec_input_next_timestep = output_tokens_curr_timestep * 1  # (B,8)
@@ -1533,6 +1537,9 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             else:
                 output_tokens_combined = output_tokens_combined.squeeze(2)
                 output_tokens_combined = output_tokens_combined.permute(1, 0)  # (B, T)
+
+            # consider only autoregressive time, disconsider loading eval models for RTF time
+            total_process_time = time.time() - start_time
 
             # Layerwise token error rate
             ter_dict = {}
@@ -1607,6 +1614,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             wer_score = 0
             audio_to_pred = []
             audio_to_pred_zh = []
+            total_audio_seconds = 0
             for i in range(batch_size):
                 audio_len = (labels[i][0] != 0).sum().item()
                 # step = batch_idx * self.test_dataloader().batch_size + i
@@ -1631,11 +1639,18 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                     pred_img = predicted_tokens.data.cpu().float().numpy()
                     dec_inp_img = dec_input_to_1024.data.cpu().float().numpy()
+                    
+                    start_time = time.time()
 
                     predicted_tokens = self.convert_tokens_to_range(predicted_tokens, apply_offset_correction=False)
                     if self.decoder_context_len > 0:
                         predicted_tokens = predicted_tokens[:,self.decoder_context_len+1:]
                     predicted_wav = self.decode_wav_from_codec_model(predicted_tokens)
+
+                     # acummulate audio length in seconds and process time in seconds to the RTF
+                    total_process_time = total_process_time + (time.time() - start_time)
+                    total_audio_seconds = total_audio_seconds + predicted_wav.size(-1) / self.sample_rate
+
                     self.logger.experiment.add_audio("Inf Pred Wav", predicted_wav, step, self.sample_rate)
                     self.logger.experiment.add_image(
                         "Inf Pred Tokens", plot_encodec_to_numpy(pred_img), step, dataformats="HWC",
@@ -1877,6 +1892,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 'wer_phoneme': np.mean(wer_phoneme) if len(wer_phoneme) > 0 else None,
                 'cer_tts': np.mean(cer_tts) if len(cer_tts) > 0 else None,
                 'wer_tts': np.mean(wer_tts) if len(wer_tts) > 0 else None,
+                "RTF": total_process_time / total_audio_seconds,
             })
 
     def predict_step_old(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
