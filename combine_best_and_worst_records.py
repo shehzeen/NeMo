@@ -17,12 +17,13 @@ def write_records(fp, records):
 
 
 
-def filter_best_and_worst_records(best_records, worst_records, worst_records_alternate, cer_threshold=0.01):
+def filter_best_and_worst_records(best_records, worst_records, worst_records_alternate, cer_threshold=0.02):
     ridx = 0
     filtered_best_records = []
     filtered_worst_records = []
     best_cer_avg = 0.0
     worst_cer_avg = 0.0
+    skipped_records = 0
     while ridx < len(best_records):
         # print(ridx, len(best_records))
         best_record = best_records[ridx]
@@ -33,7 +34,8 @@ def filter_best_and_worst_records(best_records, worst_records, worst_records_alt
                 # If temp 0.85 is giving a worst record, choose that. 
                 worst_record = worst_record_alternate
             if (worst_record['answer_duration'] > 19.0 or best_record['answer_duration'] > 19.0) or (worst_record['answer_duration'] < 1.5 or best_record['answer_duration'] < 1.5):
-                print("Skipping record with answer duration > 20.0")
+                skipped_records += 1
+                print("Skipping record with answer duration > 20.0", ridx, skipped_records)
                 ridx += 1
                 continue
             assert best_record['cer_gts'] <= worst_record['cer_gts']
@@ -51,9 +53,14 @@ def filter_best_and_worst_records(best_records, worst_records, worst_records_alt
     print(f"Best CER avg: {best_cer_avg}, Worst CER avg: {worst_cer_avg}")
     return filtered_best_records, filtered_worst_records
 
-best_records_manifest = "/Data/Experiments/DPO_GenerationGoodExamplesTemp0.85/DPOGoodExamples/rlhf_generations/best_records.json"
-worst_records_manifest = "/Data/Experiments/DPO_GenerationBadExamplesTemp1.5/DPOBadExamples/rlhf_generations/worst_records.json"
-worst_records_manifest2 = "/Data/Experiments/DPO_GenerationGoodExamplesTemp0.85/DPOGoodExamples/rlhf_generations/worst_records.json"
+# best_records_manifest = "/Data/Experiments/DPO_GenerationGoodExamplesTemp0.85/DPOGoodExamples/rlhf_generations/best_records.json"
+# worst_records_manifest = "/Data/Experiments/DPO_GenerationBadExamplesTemp1.5/DPOBadExamples/rlhf_generations/worst_records.json"
+# worst_records_manifest2 = "/Data/Experiments/DPO_GenerationGoodExamplesTemp0.85/DPOGoodExamples/rlhf_generations/worst_records.json"
+
+
+best_records_manifest = "/Data/Experiments/DPO_GenerationGoodExamples_longer1_Temp085/DPOGoodExamples/rlhf_generations/best_records.json"
+worst_records_manifest = "/Data/Experiments/DPO_GenerationGoodExamples_longer1_Temp085/DPOGoodExamples/rlhf_generations/worst_records.json"
+worst_records_manifest2 = "/Data/Experiments/DPO_GenerationGoodExamples_longer1_Temp085/DPOGoodExamples/rlhf_generations/worst_records.json"
 
 best_records = read_records(best_records_manifest)
 worst_records = read_records(worst_records_manifest)
@@ -90,7 +97,7 @@ while ridx < len(best_records):
 final_records_val = final_records[:400]
 final_records_train = final_records[400:]
 
-out_dir = "/Data/Experiments/DPO_Data/"
+out_dir = "/Data/Experiments/DPO_Data_NewLongerthan3s/"
 if not os.path.exists(out_dir):
     os.makedirs(out_dir)
 
