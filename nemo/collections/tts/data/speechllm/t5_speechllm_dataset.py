@@ -1251,7 +1251,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             "text_limits": torch.stack(text_limits) if len(text_limits) > 0 else None,
             "lang": torch.stack(lang_list),
             "question_texts": question_texts,
-            "rewards" : torch.tensor(rewards).long(),
+            "rewards" : torch.tensor(rewards)
         }
 
         return data_dict

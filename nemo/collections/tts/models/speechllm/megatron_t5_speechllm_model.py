@@ -2172,6 +2172,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer)
+        self.frozen_model.enc_dec_model.only_chosen_alignment_loss = True
     
     def setup_training_data(self, training_data_config=None):
         if self.cfg.data.get('train_ds', None):
@@ -2220,9 +2221,12 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                     policy_rejected_logps,
                     reference_chosen_logps,
                     reference_rejected_logps,
+                    chosen_gt_rewards=None,
+                    rejected_gt_rewards=None,
                     beta=0.2,
+                    gt_reward_scale=1.0,
                     label_smoothing=0,
-                    ipo=True,
+                    loss_type="dpo",
                     reference_free=False):
         """Compute the DPO loss for a batch of policy and reference model log probabilities.
 
@@ -2248,10 +2252,23 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
             ref_logratios = 0
 
         logits = pi_logratios - ref_logratios  # also known as h_{\pi_\theta}^{y_w,y_l}
+        # logits = (policy_chosen_logps - policy_rejected_logps) - (reference_chosen_logps - reference_rejected_logps)
+        # logits = (policy_chosen_logps - reference_chosen_logps) - (policy_rejected_logps - reference_rejected_logps)
+        # logits is the same as rewards_delta in NeMo aligner: https://github.com/NVIDIA/NeMo-Aligner/blob/0b5bffeb78a8316dd57e0816a2a9544540f0c8dd/nemo_aligner/models/nlp/gpt/megatron_gpt_dpo_model.py#L241
 
-        if ipo:
+        if loss_type == "ipo":
             losses = (logits - 1/(2 * beta)) ** 2  # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
-        else:
+        elif loss_type == "rpo":
+            logbeta_hat_chosen = torch.nn.functional.logsigmoid(beta * logits)
+            logbeta_hat_rejected = torch.nn.functional.logsigmoid(-beta * logits)
+            gt_rewards_delta = gt_reward_scale * (chosen_gt_rewards - rejected_gt_rewards)
+            logalpha_hat_chosen = torch.nn.functional.logsigmoid(gt_rewards_delta)
+            logalpha_hat_rejected = torch.nn.functional.logsigmoid(-gt_rewards_delta)
+            losses = (
+                torch.exp(logalpha_hat_chosen) * (logalpha_hat_chosen - logbeta_hat_chosen)
+                + torch.exp(logalpha_hat_rejected) * (logalpha_hat_rejected - logbeta_hat_rejected)
+            )
+        elif loss_type == "dpo":
             # Eq. 3 https://ericmitchell.ai/cdpo.pdf; label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
             F = torch.nn.functional
             losses = -F.logsigmoid(beta * logits) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
@@ -2422,7 +2439,7 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
             output_tensor = output_tensor.contiguous()
 
             alignment_loss = out_logits[3]
-            if alignment_loss is not None:
+            if alignment_loss is not None and not validation_step:
                 self.logger.experiment.add_scalar('train_alignment_loss', alignment_loss, self.global_step)
             
             def loss_func(loss_args):
@@ -2430,18 +2447,19 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                 alignment_loss = out_logits[3]
                 first_layer_logits = out_logits[0].permute(1,0,2) # (B, T, V)
                 first_layer_labels = labels[:,0,:] # (B, T)
-                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=True)
+                batch_log_probs = self._get_batch_logps(first_layer_logits, first_layer_labels, loss_mask, average_log_prob=False)
                 with torch.no_grad():
                     first_layer_logits_ref = out_logits_ref[0].permute(1,0,2) # (B, T, V)
-                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=True)
+                    batch_log_probs_ref = self._get_batch_logps(first_layer_logits_ref, first_layer_labels, loss_mask, average_log_prob=False)
 
                 for speech_layer_idx in range(len(out_logits[1])):
+                    # import ipdb; ipdb.set_trace()
                     speech_logits = out_logits[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
                     speech_labels = labels[:,speech_layer_idx+1,:] # (B, T)
-                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=True)
+                    batch_log_probs += self._get_batch_logps(speech_logits, speech_labels, loss_mask, average_log_prob=False)
                     with torch.no_grad():
                         speech_logits_ref = out_logits_ref[1][speech_layer_idx].permute(1,0,2) # (B, T, V)
-                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=True)
+                        batch_log_probs_ref += self._get_batch_logps(speech_logits_ref, speech_labels, loss_mask, average_log_prob=False)
 
                 # First half of the batch are chosen responses, second half are rejected responses
                 _batch_size = first_layer_labels.shape[0]
@@ -2452,23 +2470,39 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                 assert torch.all(rewards_chosen == 1)
                 rewards_rejected = rewards[num_chosen:]
                 # assert each reward is 0 in the rejected set
-                assert torch.all(rewards_rejected == 0)
+                assert torch.all(rewards_rejected < 1)
 
                 # Compute the DPO loss
                 chosen_policy_logprobs = batch_log_probs[:num_chosen]
                 rejected_policy_logprobs = batch_log_probs[num_chosen:]
                 chosen_reference_logprobs = batch_log_probs_ref[:num_chosen]
                 rejected_reference_logprobs = batch_log_probs_ref[num_chosen:]
-                
-                loss, chosen_rewards, rejected_rewards = self.preference_loss(
+
+                pref_loss, chosen_rewards, rejected_rewards = self.preference_loss(
                     chosen_policy_logprobs,
                     rejected_policy_logprobs,
                     chosen_reference_logprobs,
-                    rejected_reference_logprobs
+                    rejected_reference_logprobs,
+                    chosen_gt_rewards=rewards_chosen,
+                    rejected_gt_rewards=rewards_rejected,
+                    loss_type=self.cfg.get('dpo_loss_type', 'dpo'),
+                    beta=self.cfg.get('dpo_beta', 0.1)
                 )
+                pref_loss = pref_loss.mean()
+                sft_loss = -chosen_policy_logprobs.mean()
 
+                if not validation_step:
+                    self.logger.experiment.add_scalar('train_pref_loss', pref_loss, self.global_step)
+                    self.logger.experiment.add_scalar('train_sft_loss', sft_loss, self.global_step)
+                else:
+                    self.logger.experiment.add_scalar('val_pref_loss', pref_loss, self.global_step)
+                    self.logger.experiment.add_scalar('val_sft_loss', sft_loss, self.global_step)
 
-                loss = loss.mean()
+                pref_loss_weight = self.cfg.get('dpo_pref_loss_weight', 1.0)
+                sft_loss_weight = self.cfg.get('dpo_sft_loss_weight', 0.0)
+
+                loss = pref_loss_weight * pref_loss + sft_loss_weight * sft_loss
+                
                 # import ipdb; ipdb.set_trace()
                 # loss = self.frozen_model.loss_func(loss_mask, output_tensor)
                 if (
