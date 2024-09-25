@@ -180,6 +180,7 @@ def main(cfg) -> None:
 
     mode = cfg.get("mode", "train")
     # load existing or init new soft prompt T5 model
+    pretrained_checkpoint = cfg.get("init_from_ptl_ckpt", None)
     if cfg.model.get("restore_path", None) is not None:
         logging.info(f"cfg.model.restore_path {cfg.model.restore_path}")
         model = MegatronT5SpeechLMModel_DPO.restore_from(
@@ -192,9 +193,10 @@ def main(cfg) -> None:
 
     if mode == "train":
         model_ref = MegatronT5SpeechLMModel_DPO.load_from_checkpoint(
-            checkpoint_path="/Data/JunEOSCheckpoints/desta_less_sophia_213850.ckpt", trainer=trainer, cfg=cfg.model
+            checkpoint_path=pretrained_checkpoint, trainer=trainer, cfg=cfg.model
         )
         model_ref.eval()
+        model_ref.dummy_test = True
         # To setup the reference model correctly
         trainer.test(model_ref)
         model.additional_models['model_ref'] = model_ref

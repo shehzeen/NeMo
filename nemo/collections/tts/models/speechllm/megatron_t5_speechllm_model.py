@@ -1356,6 +1356,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.validation_step_outputs.clear()
 
     def test_step(self, batch, batch_idx):
+        if getattr(self, 'dummy_test', False):
+            return None
         result = self.predict_step(batch, batch_idx)
         return result
 
@@ -1364,6 +1366,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         This might still be broken for lightning 2.0. to fix: see
         https://github.com/NVIDIA/NeMo/blob/9bdf4d12276ee8f95a340cf2f7f340e9b5b74a7e/docs/source/starthere/migration-guide.rst
         """
+        if getattr(self, 'dummy_test', False):
+            return
         outputs = self.predict_step_outputs
         average_metrics = {}
         inference_lists = {}
@@ -2268,10 +2272,15 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
                 torch.exp(logalpha_hat_chosen) * (logalpha_hat_chosen - logbeta_hat_chosen)
                 + torch.exp(logalpha_hat_rejected) * (logalpha_hat_rejected - logbeta_hat_rejected)
             )
+        elif loss_type == "rpo_sq":
+            gt_rewards_delta = gt_reward_scale * (chosen_gt_rewards - rejected_gt_rewards)
+            losses = (beta * logits - gt_rewards_delta) ** 2
         elif loss_type == "dpo":
             # Eq. 3 https://ericmitchell.ai/cdpo.pdf; label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
             F = torch.nn.functional
             losses = -F.logsigmoid(beta * logits) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
+        else:
+            raise NotImplementedError("loss type {} is not implemented".format(loss_type))
 
         chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
         rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
