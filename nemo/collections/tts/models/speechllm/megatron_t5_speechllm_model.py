@@ -1749,12 +1749,83 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 output_tokens_combined = output_tokens_combined.squeeze(2)
                 output_tokens_combined = output_tokens_combined.permute(1, 0)  # (B, T)
 
+            # Save only output tokens
+            # predicting audio
+            batch_size = output_tokens_combined.shape[0]
+            test_dataloader_batch_size = batch_size
+            # self.test_dataloader() is not defined during validation
+            if isinstance(self.test_dataloader(), torch.utils.data.DataLoader):
+                test_dataloader_batch_size = self.test_dataloader().batch_size
+            
+            wer_score = 0
+            audio_to_pred = []
+            audio_to_pred_zh = []
+            predicted_token_files = []
+            predicted_durations = []
+
+            _exp_dir_path = self.logger.log_dir
+            if hasattr(self, 'override_log_dir') and self.override_log_dir is not None:
+                _exp_dir_path = self.override_log_dir
+            
+            _exp_dir_path = os.path.join(_exp_dir_path, 'Sample_Audios')
+            if not os.path.exists(_exp_dir_path):
+                os.mkdir(_exp_dir_path)
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+            if getattr(self, "save_only_output_tokens", False):
+                for i in range(batch_size):
+                    predicted_tokens = output_tokens_combined[i]
+                    if i in end_indices:
+                        logging.info(f"Clipping until end index for audio {i}")
+                        predicted_tokens = predicted_tokens[:, 0 : end_indices[i] - (1 + self.decoder_context_len)]  # trim to audio length
+                    predicted_tokens = self.convert_tokens_to_range(predicted_tokens, apply_offset_correction=False)
+                    wav_num = test_dataloader_batch_size * batch_idx + i
+                    print("wav_num", wav_num)
+                    tokens_fp_pred = os.path.join(_exp_dir_path, f'predicted_tokens_{wav_num}.pt')
+                    torch.save(predicted_tokens.cpu().type(torch.int16), tokens_fp_pred)
+                    predicted_token_files.append(tokens_fp_pred)
+                    predicted_durations.append(round(predicted_tokens.shape[1]/self.codebook_fps, 3))
+
+                # Dummy values for metrics, we only care about the predicted tokens
+                self.predict_step_outputs.append(
+                    {
+                        'sv_avg_cossim': 0.0,
+                        'sv_avg_cossim_context_pred': 0.0,
+                        'sv_avg_cossim_context_gt': 0.0,
+                        'cer_transcript': 0.0,
+                        'wer_transcript': 0.0,
+                        'cer_phoneme': 0.0,
+                        'wer_phoneme': 0.0,
+                        'cer_tts': 0.0,
+                        'wer_tts': 0.0,
+                        'cer_transcript_gt': 0.0,
+                        'wer_transcript_gt': 0.0,
+                        'cer_phoneme_gt': 0.0,
+                        'wer_phoneme_gt': 0.0,
+                        'cer_tts_gt': 0.0,
+                        'wer_tts_gt': 0.0,
+                        'lists' : {
+                            'predicted_durations': predicted_durations,
+                            'predicted_token_files': predicted_token_files,
+                            'cer_gts': [0.0 for _ in range(len(predicted_token_files))],
+                            'wer_gts': [0.0 for _ in range(len(predicted_token_files))],
+                            'pred_context_similarity' : [0.0 for _ in range(len(predicted_token_files))],
+                            'transcripts_gt': [0.0 for _ in range(len(predicted_token_files))],
+                            'transcripts_pred': [0.0 for _ in range(len(predicted_token_files))],
+                        }
+                    }
+                )
+                
+                return
+
+                    
             # Layerwise token error rate
             ter_dict = {}
             for i in range(self.num_speech_codebooks):
                 ter_dict[i] = {'hypothesis': [], 'gt': []}
 
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
 
             atention_probs_all = torch.cat(atention_probs_all, dim=2) # B, 12, dec_timesteps, enc_timesteps
             atention_probs_all = atention_probs_all.mean(dim=1) # B, dec_timesteps, enc_timesteps
@@ -1796,29 +1867,12 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     self.additional_models['asr_model_zh'] = asr_model_zh
                 else:
                     asr_model_zh = self.additional_models['asr_model_zh']
-            _exp_dir_path = self.logger.log_dir
-            if hasattr(self, 'override_log_dir') and self.override_log_dir is not None:
-                _exp_dir_path = self.override_log_dir
-            _exp_dir_path = _exp_dir_path + '/Sample_Audios'
-            if not os.path.exists(_exp_dir_path):
-                os.mkdir(_exp_dir_path)
+            
             similarity_list = []
             pred_context_similarity_list = []
             gt_context_similarity_list = []
             question_type = []
-
-            # predicting audio
-            batch_size = output_tokens_combined.shape[0]
-            test_dataloader_batch_size = batch_size
-            # self.test_dataloader() is not defined during validation
-            if isinstance(self.test_dataloader(), torch.utils.data.DataLoader):
-                test_dataloader_batch_size = self.test_dataloader().batch_size
-
-            wer_score = 0
-            audio_to_pred = []
-            audio_to_pred_zh = []
-            predicted_token_files = []
-            predicted_durations = []
+            
             for i in range(batch_size):
                 text_end_step = text_limits[i,1].item()
                 text_start_step = text_limits[i,0].item()
@@ -2263,6 +2317,7 @@ class MegatronT5SpeechLMModel_DPO(MegatronT5SpeechLMModel):
         if loss_type == "ipo":
             losses = (logits - 1/(2 * beta)) ** 2  # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
         elif loss_type == "rpo":
+            # https://github.com/NVIDIA/NeMo-Aligner/blob/0b5bffeb78a8316dd57e0816a2a9544540f0c8dd/nemo_aligner/models/nlp/gpt/megatron_gpt_dpo_model.py#L241
             logbeta_hat_chosen = torch.nn.functional.logsigmoid(beta * logits)
             logbeta_hat_rejected = torch.nn.functional.logsigmoid(-beta * logits)
             gt_rewards_delta = gt_reward_scale * (chosen_gt_rewards - rejected_gt_rewards)

@@ -345,7 +345,8 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                     doc["answer_duration"] * (self.codebook_fps + 1) + 400
                 )  # 400 is the max ref speaker audio
             elif ("Text to speech this" in question_in_manifest) or ('Phoneme TTS' in question_in_manifest):
-                approx_context_len = 400  # Max length of Ref TTS audio
+                # approx_context_len = 400  # Max length of Ref TTS audio
+                approx_context_len = 5 * (self.codebook_fps + 1)
             elif "Edit Speech" in question_in_manifest:
                 approx_context_len = doc["answer_duration"] * (self.codebook_fps + 1)
             else:

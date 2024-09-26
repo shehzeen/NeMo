@@ -38,6 +38,7 @@ def write_records(fp, records):
     with open(fp, "w") as f:
         for record in records:
             f.write(json.dumps(record) + "\n")
+        print(f"Wrote {len(records)} records to: {fp}")
 
 def inference_for_records(model, trainer, cfg, records):
     model.predict_step_outputs = []
@@ -50,7 +51,7 @@ def inference_for_records(model, trainer, cfg, records):
         model._test_ds,
         collate_fn=model._test_ds.collate_fn,
         sampler=sampler,
-        batch_size=32,
+        batch_size=cfg.model.micro_batch_size,
         drop_last=False,
         num_workers=1,
         pin_memory=False,
@@ -105,59 +106,67 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
         record['transcript_gt'] = inference_list['transcripts_gt'][ridx]
         new_records.append(record)
 
-    ridx = 0
-    rlhf_records = []
-    best_records = []
-    worst_records = []
-    while ridx < len(new_records):
-        sample_group = copy.deepcopy(new_records[ridx:ridx+cfg.model.rlhf_num_samples_per_example])
+    generated_outputs_manifest = os.path.join(model.override_log_dir, "generated_outputs_manifest.json")
+    write_records(generated_outputs_manifest, new_records)
 
-        cer_sim_indices = []
-        for sidx, record in enumerate(sample_group):
-            cer_sim_indices.append((record['cer_gts'], -record['pred_context_similarity'], sidx))
-
-        # sort by cer and similarity
-        cer_sim_indices = sorted(cer_sim_indices)
-        best_record = copy.deepcopy(sample_group[cer_sim_indices[0][2]])
-        worst_record = copy.deepcopy(sample_group[cer_sim_indices[-1][2]])
-        best_record['reward'] = 1
-        worst_record['reward'] = 0
-        rlhf_records.append(best_record)
-        rlhf_records.append(worst_record)
-        best_records.append(best_record)
-        worst_records.append(worst_record)
-        ridx += cfg.model.rlhf_num_samples_per_example
-    
-    rlhf_records_rearranged = []
-    rlhf_idx = 0
-    while rlhf_idx+1 < len(best_records):
-        rlhf_records_rearranged.append(best_records[rlhf_idx])
-        rlhf_records_rearranged.append(best_records[rlhf_idx+1])
-        rlhf_records_rearranged.append(worst_records[rlhf_idx])
-        rlhf_records_rearranged.append(worst_records[rlhf_idx+1])
-        rlhf_idx += 2
-
-    rlhf_manifest = os.path.join(model.override_log_dir, "rlhf_manifest.json")
-    write_records(rlhf_manifest, rlhf_records_rearranged)
-    
-    best_records_manifest = os.path.join(model.override_log_dir, "best_records.json")
-    worst_records_manifest = os.path.join(model.override_log_dir, "worst_records.json")
-    
-    write_records(best_records_manifest, best_records)
-    write_records(worst_records_manifest, worst_records)
-
-    model.override_log_dir = None
-    print(rlhf_manifest)
-    print(best_records_manifest)
-    print(worst_records_manifest)
-    # import ipdb; ipdb.set_trace()
     return {
         'completed_samples' : current_state.get('completed_samples', 0) + cfg.model.rlhf_num_generations_per_iteration,
-        'rlhf_manifest' : rlhf_manifest,
-        'best_records_manifest' : best_records_manifest,
-        'worst_records_manifest' : worst_records_manifest,
-        'inference_metrics' : inference_metrics,
+        'generated_outputs_manifest' : generated_outputs_manifest,
     }
+
+    # ridx = 0
+    # rlhf_records = []
+    # best_records = []
+    # worst_records = []
+    # while ridx < len(new_records):
+    #     sample_group = copy.deepcopy(new_records[ridx:ridx+cfg.model.rlhf_num_samples_per_example])
+
+    #     cer_sim_indices = []
+    #     for sidx, record in enumerate(sample_group):
+    #         cer_sim_indices.append((record['cer_gts'], -record['pred_context_similarity'], sidx))
+
+    #     # sort by cer and similarity
+    #     cer_sim_indices = sorted(cer_sim_indices)
+    #     best_record = copy.deepcopy(sample_group[cer_sim_indices[0][2]])
+    #     worst_record = copy.deepcopy(sample_group[cer_sim_indices[-1][2]])
+    #     best_record['reward'] = 1
+    #     worst_record['reward'] = 0
+    #     rlhf_records.append(best_record)
+    #     rlhf_records.append(worst_record)
+    #     best_records.append(best_record)
+    #     worst_records.append(worst_record)
+    #     ridx += cfg.model.rlhf_num_samples_per_example
+    
+    # rlhf_records_rearranged = []
+    # rlhf_idx = 0
+    # while rlhf_idx+1 < len(best_records):
+    #     rlhf_records_rearranged.append(best_records[rlhf_idx])
+    #     rlhf_records_rearranged.append(best_records[rlhf_idx+1])
+    #     rlhf_records_rearranged.append(worst_records[rlhf_idx])
+    #     rlhf_records_rearranged.append(worst_records[rlhf_idx+1])
+    #     rlhf_idx += 2
+
+    # rlhf_manifest = os.path.join(model.override_log_dir, "rlhf_manifest.json")
+    # write_records(rlhf_manifest, rlhf_records_rearranged)
+    
+    # best_records_manifest = os.path.join(model.override_log_dir, "best_records.json")
+    # worst_records_manifest = os.path.join(model.override_log_dir, "worst_records.json")
+    
+    # write_records(best_records_manifest, best_records)
+    # write_records(worst_records_manifest, worst_records)
+
+    # model.override_log_dir = None
+    # print(rlhf_manifest)
+    # print(best_records_manifest)
+    # print(worst_records_manifest)
+    
+    # return {
+    #     'completed_samples' : current_state.get('completed_samples', 0) + cfg.model.rlhf_num_generations_per_iteration,
+    #     'rlhf_manifest' : rlhf_manifest,
+    #     'best_records_manifest' : best_records_manifest,
+    #     'worst_records_manifest' : worst_records_manifest,
+    #     'inference_metrics' : inference_metrics,
+    # }
 
 @hydra_runner(config_path="conf", config_name="megatron_t5_speechllm_medium.yaml")
 def main(cfg) -> None:
@@ -203,7 +212,10 @@ def main(cfg) -> None:
         trainer.fit(model)
     elif mode == "generate":
         # dummy test to set things up
+        model.dummy_test = True
         trainer.test(model)
+        model.dummy_test = False
+        model.save_only_output_tokens = True
         generate_samples_and_compute_reward(model, trainer, cfg)
 
 if __name__ == '__main__':
