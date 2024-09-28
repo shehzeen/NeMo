@@ -731,6 +731,7 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
         self.logging_step = False
         self.num_cross_attention_heads = 12  # 12 for 220m T5, 16 for 11b T5
         self.enc_output_to_layers = None
+        self.only_chosen_alignment_loss = False
 
     def get_decoder_embeddings(self, dec_input_ids, dec_position_ids, token_type_ids):
         if dec_input_ids.dim() <= 2:
@@ -997,9 +998,18 @@ class MegatronTokenLevelEncoderDecoderSpeechLLMModule(MegatronTokenLevelEncoderD
                         attention_logprobs = torch.mean(attention_logprobs, dim=1, keepdim=True)
                         dec_len = torch.sum(dec_attn_mask, dim=1) - dec_start_idx
                         enc_len = text_limits[:, 1] - text_limits[:, 0] - end_offset
-                        alignment_loss = self.forward_sum_loss(
-                            attn_logprob=attention_logprobs, in_lens=enc_len, out_lens=dec_len
-                        )
+                        if self.only_chosen_alignment_loss:
+                            # First half of microbatch is chosen examples
+                            chosen_batch_size = dec_len.size(0) // 2
+                            alignment_loss = self.forward_sum_loss(
+                                attn_logprob=attention_logprobs[:chosen_batch_size],
+                                in_lens=enc_len[:chosen_batch_size],
+                                out_lens=dec_len[:chosen_batch_size]
+                            )
+                        else:
+                            alignment_loss = self.forward_sum_loss(
+                                attn_logprob=attention_logprobs, in_lens=enc_len, out_lens=dec_len
+                            )
                 else:
                     attention_probs = None
                 # project decoder output to vocabulary-size dimensions

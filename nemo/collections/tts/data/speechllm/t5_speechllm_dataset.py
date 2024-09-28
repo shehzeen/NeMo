@@ -451,6 +451,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         virtual_token_splits = self.task_templates[taskname]["virtual_token_splits"]
         truncation_field = self.task_templates[taskname]['truncate_field']
         answer_field = self.task_templates[taskname]["answer_field"]
+        reward = doc.get("reward", 1)
 
         input_example = prompt_template
 
@@ -689,6 +690,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             cross_attention_prior,  # tensor, shape=(dec_labels_len, context_tokens_len + question_tokens_len + virtual_tokens_len).
             lang.value,  # int,
             question_text,  # str, answer transcript without question type (Phoneme TTS or Text to speech this).
+            reward
         )
 
     def _truncate_input_speech(self, context_tokens, question_tokens, virtual_tokens):
@@ -1069,6 +1071,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             data_dict['text_limits'],
             data_dict['lang'],
             data_dict['question_texts'],
+            data_dict['rewards'].unsqueeze(1) if data_dict['rewards'] is not None else None,
         )
 
     def pad_batch_and_build_loss_mask(self, batch):
@@ -1088,6 +1091,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             _,
             _,
             question_texts,
+            rewards,
         ) = zip(*batch)
 
         taskname_ids = self.pad_taskname_ids(taskname_ids)
@@ -1160,6 +1164,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 is_speech,
                 cross_attention_prior,
                 lang,
+                _,
                 _,
             ) = sample_tuple
 
@@ -1302,6 +1307,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             "text_limits": torch.stack(text_limits) if len(text_limits) > 0 else None,  # tensor, valid range of answer transcripts without virtual/instruction/end tokens.
             "lang": torch.stack(lang_list),
             "question_texts": question_texts,
+            "rewards" : torch.tensor(rewards),
         }
 
         return data_dict
