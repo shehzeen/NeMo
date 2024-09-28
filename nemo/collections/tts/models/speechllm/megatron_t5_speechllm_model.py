@@ -1916,7 +1916,21 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 ter_dict[i] = {'hypothesis': [], 'gt': []}
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            _exp_dir_path = self.logger.log_dir
+            if hasattr(self, 'override_log_dir') and self.override_log_dir is not None:
+                _exp_dir_path = self.override_log_dir
+            
+            _exp_dir_path = os.path.join(_exp_dir_path, 'Sample_Audios')
+            if not os.path.exists(_exp_dir_path):
+                os.mkdir(_exp_dir_path)
 
+            batch_size = output_tokens_combined.shape[0]
+            test_dataloader_batch_size = batch_size
+            # self.test_dataloader() is not defined during validation
+            if isinstance(self.test_dataloader(), torch.utils.data.DataLoader):
+                test_dataloader_batch_size = self.test_dataloader().batch_size
+                
             if getattr(self, "save_only_output_tokens", False):
                 predicted_token_files = []
                 predicted_durations = []
@@ -2016,11 +2030,6 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             else:
                 squim_mos_model = self.additional_models['squim_mos_model']
 
-            _exp_dir_path = self.logger.log_dir
-            _exp_dir_path = _exp_dir_path + '/Sample_Audios'
-            if not os.path.exists(_exp_dir_path):
-                os.mkdir(_exp_dir_path)
-
             squim_mos_list = []
             squim_mos_list_context_gt = []
             squim_mos_list_context_pred = []
@@ -2033,11 +2042,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             question_type = []
 
             # predicting audio
-            batch_size = output_tokens_combined.shape[0]
-            test_dataloader_batch_size = batch_size
-            # self.test_dataloader() is not defined during validation
-            if isinstance(self.test_dataloader(), torch.utils.data.DataLoader):
-                test_dataloader_batch_size = self.test_dataloader().batch_size
+            
 
             # logging attention maps.
             # empty attention_probs_all indicates self.frozen_model.enc_dec_model.return_all_crossattention_probs is False.
