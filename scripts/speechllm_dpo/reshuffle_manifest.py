@@ -1,5 +1,11 @@
 import json
-import os
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--manifest", type=str, default="/Data/Experiments/DPO_GenerationsDebug/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest_final_records_train.json")
+args = parser.parse_args()
+
+manifest = args.manifest
 
 def read_manifest(manifest_path):
     records = []
@@ -19,8 +25,6 @@ def write_manifest(manifest_path, records):
         f.write(file_str)
         print("Wrote {} records to: {}".format(len(records), manifest_path))
 
-# manifest = "/Data/Experiments/DPO_Data_NewLongerthan3s/final_records_train.json"
-manifest = "/Data/Experiments/DPO_Generations/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest_zerower_val.json"
 records = read_manifest(manifest)
 
 micro_batch_size = 4
@@ -39,13 +43,7 @@ for bidx in range(n_micro_batches):
     else:
         if bidx > 0:
             target_start_idx = target_start_idx + 1
-    # if bidx not in filled_targets:
-    #     target_idx = bidx
-    # else:
-    #     # find the next available target index
-    #     max_filled_target = max(filled_targets.keys())
-    #     target_idx = max_filled_target + 1
-    #     print("max_filled_target", max_filled_target, "target_idx", target_idx)
+    
     target_idx = target_start_idx
     if target_idx + 48 >= len(records):
         filling_complete = True
@@ -69,5 +67,3 @@ for bidx in range(n_micro_batches):
 new_records = [r for r in new_records if r is not None]
 out_manifest = manifest.replace(".json", "_2nodes.json")
 write_manifest(out_manifest, new_records)
-
-        

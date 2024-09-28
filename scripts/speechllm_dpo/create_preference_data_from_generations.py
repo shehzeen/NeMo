@@ -7,14 +7,24 @@ import string
 from nemo.collections.asr.metrics.wer import word_error_rate
 import numpy as np
 import time
+import argparse
 
-BATCH_SIZE = 8
-SAMPLE_RATE = 22050
-GROUP_SIZE = 6
-VAL_BATCH_SIZE = 256
-# codec_model_path = "/Data/Checkpoints/SpeechCodec_2402.nemo"
-codec_model_path = "/Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo"
-generated_manifest = "/Data/Experiments/DPO_GenerationsDebug/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest.json"
+parser = argparse.ArgumentParser()
+parser.add_argument("--codec_model_path", type=str, default="/Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo")
+parser.add_argument("--generated_manifest", type=str, default="/Data/Experiments/DPO_GenerationsDebug/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest.json")
+parser.add_argument("--batch_size", type=int, default=8)
+parser.add_argument("--sample_rate", type=int, default=22050)
+parser.add_argument("--group_size", type=int, default=6)
+parser.add_argument("--val_size", type=int, default=256)
+args = parser.parse_args()
+
+
+batch_size = args.batch_size
+sample_rate = args.sample_rate
+group_size = args.group_size
+val_size = args.val_size
+codec_model_path = args.codec_model_path
+generated_manifest = args.generated_manifest
 
 
 def create_chosen_rejected_records(records, group_size=4):
@@ -168,13 +178,13 @@ nemo_sv_model = nemo_sv_model.to(device)
 nemo_sv_model.eval()
 
 # ceil division
-num_batches = (len(generated_records) + BATCH_SIZE - 1) // BATCH_SIZE
+num_batches = (len(generated_records) + batch_size - 1) // batch_size
 
 st = time.time()
 print("num_batches: ", num_batches)
 for batch_idx in range(num_batches):
-    si = batch_idx * BATCH_SIZE
-    ei = min((batch_idx + 1) * BATCH_SIZE, len(generated_records))
+    si = batch_idx * batch_size
+    ei = min((batch_idx + 1) * batch_size, len(generated_records))
     answer_paths = [generated_records[idx]['answer'] for idx in range(si, ei)]
     context_paths = [generated_records[idx]['context'] for idx in range(si, ei)]
     answer_audios, answer_audio_lens = decode_audio(codec_model, answer_paths)
@@ -192,8 +202,8 @@ for batch_idx in range(num_batches):
         answer_file_name = answer_paths[idx - si].split("/")[-1]
         answer_audio_path = answer_paths[idx - si].replace(answer_file_name, "{}_decoded_answer_audio.wav".format(idx - si))
         context_audio_path = answer_paths[idx - si].replace(answer_file_name, "{}_decoded_context_audio.wav".format(idx - si))
-        sf.write(answer_audio_path, answer_audio.cpu().numpy(), SAMPLE_RATE)
-        sf.write(context_audio_path, context_audio.cpu().numpy(), SAMPLE_RATE)
+        sf.write(answer_audio_path, answer_audio.cpu().numpy(), sample_rate)
+        sf.write(context_audio_path, context_audio.cpu().numpy(), sample_rate)
         answer_audio_paths.append(answer_audio_path)
         context_audio_paths.append(context_audio_path)
         gt_transcripts.append(process_text(generated_records[idx]['text']))
@@ -228,7 +238,7 @@ for batch_idx in range(num_batches):
 out_manifest = generated_manifest.replace(".json", "_with_metrics.json")
 write_records(out_manifest, generated_records)
 
-all_best_records, all_worst_records = create_chosen_rejected_records(generated_records, GROUP_SIZE)
+all_best_records, all_worst_records = create_chosen_rejected_records(generated_records, group_size)
 print("Len all_best_records: ", len(all_best_records))
 print("Len all_worst_records: ", len(all_worst_records))
 best_records, worst_records = filter_best_and_worst_records(all_best_records, all_worst_records)
@@ -252,8 +262,8 @@ while ridx + 1 < len(best_records):
     final_records.append(worst_record2)
     ridx += 2
 
-final_records_val = final_records[:VAL_BATCH_SIZE]
-final_records_train = final_records[VAL_BATCH_SIZE:]
+final_records_val = final_records[:val_size]
+final_records_train = final_records[val_size:]
 
 final_records_train_manifest = generated_manifest.replace(".json", "_final_records_train.json")
 final_records_val_manifest = generated_manifest.replace(".json", "_final_records_val.json")
