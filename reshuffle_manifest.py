@@ -20,7 +20,7 @@ def write_manifest(manifest_path, records):
         print("Wrote {} records to: {}".format(len(records), manifest_path))
 
 # manifest = "/Data/Experiments/DPO_Data_NewLongerthan3s/final_records_train.json"
-manifest = "/Data/Experiments/DPO_Data_NewLongerthan3s/final_records_train_scalar_rewards.json"
+manifest = "/Data/Experiments/DPO_Generations/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest_zerower_val.json"
 records = read_manifest(manifest)
 
 micro_batch_size = 4

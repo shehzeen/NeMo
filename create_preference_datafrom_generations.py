@@ -10,10 +10,10 @@ import time
 
 BATCH_SIZE = 8
 SAMPLE_RATE = 22050
-GROUP_SIZE = 4
+GROUP_SIZE = 6
 # codec_model_path = "/Data/Checkpoints/SpeechCodec_2402.nemo"
 codec_model_path = "/Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo"
-generated_manifest = "/Data/Experiments/DPO_GenerationDebug/DPO21Hz/rlhf_generations/generated_outputs_manifest.json"
+generated_manifest = "/Data/Experiments/DPO_Generations/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest.json"
 
 
 def create_chosen_rejected_records(records, group_size=4):
@@ -227,7 +227,7 @@ for batch_idx in range(num_batches):
 out_manifest = generated_manifest.replace(".json", "_with_metrics.json")
 write_records(out_manifest, generated_records)
 
-all_best_records, all_worst_records = create_chosen_rejected_records(generated_records[:48], GROUP_SIZE)
+all_best_records, all_worst_records = create_chosen_rejected_records(generated_records, GROUP_SIZE)
 print("Len all_best_records: ", len(all_best_records))
 print("Len all_worst_records: ", len(all_worst_records))
 best_records, worst_records = filter_best_and_worst_records(all_best_records, all_worst_records)
@@ -251,8 +251,8 @@ while ridx + 1 < len(best_records):
     final_records.append(worst_record2)
     ridx += 2
 
-final_records_val = final_records[:400]
-final_records_train = final_records[400:]
+final_records_val = final_records[:256]
+final_records_train = final_records[256:]
 
 final_records_train_manifest = generated_manifest.replace(".json", "_final_records_train.json")
 final_records_val_manifest = generated_manifest.replace(".json", "_final_records_val.json")
