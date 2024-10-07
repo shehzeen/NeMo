@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,23 +22,10 @@ from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerB
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
+from nemo.collections.asr.parts.utils import manifest_utils
 import json
 import os
 import copy
-
-def read_records(manifest_path):
-    with open(manifest_path, 'r') as f:
-        lines = f.readlines()
-        records = []
-        for line in lines:
-            records.append(json.loads(line.strip()))
-    return records
-
-def write_records(fp, records):
-    with open(fp, "w") as f:
-        for record in records:
-            f.write(json.dumps(record) + "\n")
-        print(f"Wrote {len(records)} records to: {fp}")
 
 def inference_for_records(model, trainer, cfg, records):
     model.predict_step_outputs = []
@@ -81,7 +68,7 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
 
     train_records = []
     for train_ds in cfg.model.rlhf_train_ds:
-        train_records.extend(read_records(train_ds))
+        train_records.extend(manifest_utils.read_manifest(train_ds))
 
     train_records_repeated = []
     for record in train_records:
@@ -107,7 +94,7 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
         new_records.append(record)
 
     generated_outputs_manifest = os.path.join(model.override_log_dir, "generated_outputs_manifest.json")
-    write_records(generated_outputs_manifest, new_records)
+    manifest_utils.write_manifest(generated_outputs_manifest, new_records)
 
     return {
         'completed_samples' : current_state.get('completed_samples', 0) + cfg.model.rlhf_num_generations_per_iteration,
