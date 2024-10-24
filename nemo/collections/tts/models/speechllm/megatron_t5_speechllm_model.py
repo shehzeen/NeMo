@@ -2245,32 +2245,32 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
                         spk_embedding_context_wavlm = wavlm_embeddings[0].cpu().detach().numpy().flatten()
 
-                    pred_similarity_context = np.dot(spk_embedding_context, spk_embedding_pred) / (
-                        np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_pred)
-                    )
-                    gt_similarity_context = np.dot(spk_embedding_context, spk_embedding_gt) / (
-                        np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_gt)
-                    )
+                        pred_similarity_context = np.dot(spk_embedding_context, spk_embedding_pred) / (
+                            np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_pred)
+                        )
+                        gt_similarity_context = np.dot(spk_embedding_context, spk_embedding_gt) / (
+                            np.linalg.norm(spk_embedding_context) * np.linalg.norm(spk_embedding_gt)
+                        )
 
-                    pred_similarity_context_wavlm = np.dot(spk_embedding_context_wavlm, spk_embedding_pred_wavlm) / (
-                        np.linalg.norm(spk_embedding_context_wavlm) * np.linalg.norm(spk_embedding_pred_wavlm)
-                    )
-                    gt_similarity_context_wavlm = np.dot(spk_embedding_context_wavlm, spk_embedding_gt_wavlm) / (
-                        np.linalg.norm(spk_embedding_context_wavlm) * np.linalg.norm(spk_embedding_gt_wavlm)
-                    )
+                        pred_similarity_context_wavlm = np.dot(spk_embedding_context_wavlm, spk_embedding_pred_wavlm) / (
+                            np.linalg.norm(spk_embedding_context_wavlm) * np.linalg.norm(spk_embedding_pred_wavlm)
+                        )
+                        gt_similarity_context_wavlm = np.dot(spk_embedding_context_wavlm, spk_embedding_gt_wavlm) / (
+                            np.linalg.norm(spk_embedding_context_wavlm) * np.linalg.norm(spk_embedding_gt_wavlm)
+                        )
 
-                    squim_mos_score_context_gt = squim_mos_model(torch.from_numpy(gt_16khz_wav).to(device).unsqueeze(0), context_wav.to(device).unsqueeze(0)).item()
-                    squim_mos_score_context_pred = squim_mos_model(torch.from_numpy(pred_16khz_wav).to(device).unsqueeze(0), context_wav.to(device).unsqueeze(0)).item()
-                    squim_mos_list_context_gt.append(squim_mos_score_context_gt)
-                    squim_mos_list_context_pred.append(squim_mos_score_context_pred)
+                        squim_mos_score_context_gt = squim_mos_model(torch.from_numpy(gt_16khz_wav).to(device).unsqueeze(0), context_wav.to(device).unsqueeze(0)).item()
+                        squim_mos_score_context_pred = squim_mos_model(torch.from_numpy(pred_16khz_wav).to(device).unsqueeze(0), context_wav.to(device).unsqueeze(0)).item()
+                        squim_mos_list_context_gt.append(squim_mos_score_context_gt)
+                        squim_mos_list_context_pred.append(squim_mos_score_context_pred)
 
-                    if log_scalars:
-                        self.logger.experiment.add_scalar(f'Inf SV Cossim Context Pred', pred_similarity_context, step)
-                        self.logger.experiment.add_scalar(f'Inf SV Cossim Context GT', gt_similarity_context, step)
-                    pred_context_similarity_list.append(pred_similarity_context)
-                    gt_context_similarity_list.append(gt_similarity_context)
-                    pred_context_similarity_list_wavlm.append(pred_similarity_context_wavlm)
-                    gt_context_similarity_list_wavlm.append(gt_similarity_context_wavlm)
+                        if log_scalars:
+                            self.logger.experiment.add_scalar(f'Inf SV Cossim Context Pred', pred_similarity_context, step)
+                            self.logger.experiment.add_scalar(f'Inf SV Cossim Context GT', gt_similarity_context, step)
+                        pred_context_similarity_list.append(pred_similarity_context)
+                        gt_context_similarity_list.append(gt_similarity_context)
+                        pred_context_similarity_list_wavlm.append(pred_similarity_context_wavlm)
+                        gt_context_similarity_list_wavlm.append(gt_similarity_context_wavlm)
 
                     task_question = self.frozen_model.tokenizer.ids_to_text(
                         [v[1] for v in input_token_list if v[1] < self.lm_vocab_size]

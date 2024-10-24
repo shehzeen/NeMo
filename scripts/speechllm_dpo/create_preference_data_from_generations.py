@@ -134,14 +134,20 @@ def write_records(fp, records):
             f.write(json.dumps(record) + "\n")
         print(f"Wrote {len(records)} records to: {fp}")
 
-def decode_audio(codec_model, codec_paths):
+def decode_audio(codec_model, codec_paths, replacement_paths=None):
     codec_batch = []
     codec_lens = []
     max_len = 0
-    for codec_path in codec_paths:
-        codec = torch.load(codec_path)
-        codec = codec.to('cuda')
-        codec = codec.unsqueeze(0)
+    for idx, codec_path in enumerate(codec_paths):
+        if codec_path.endswith(".pt"):
+            codec = torch.load(codec_path)
+            codec = codec.to('cuda')
+            codec = codec.unsqueeze(0)
+        else:
+            # For text context, consider context same as answer (replacement) audio
+            codec = torch.load(replacement_paths[idx])
+            codec = codec.to('cuda')
+            codec = codec.unsqueeze(0)
         codec_lens.append(codec.shape[2])
         codec_batch.append(codec)
         max_len = max(max_len, codec.shape[2])
@@ -188,7 +194,7 @@ for batch_idx in range(num_batches):
     answer_paths = [generated_records[idx]['answer'] for idx in range(si, ei)]
     context_paths = [generated_records[idx]['context'] for idx in range(si, ei)]
     answer_audios, answer_audio_lens = decode_audio(codec_model, answer_paths)
-    context_audios, context_audio_lens = decode_audio(codec_model, context_paths)
+    context_audios, context_audio_lens = decode_audio(codec_model, context_paths, replacement_paths=answer_paths)
     answer_audio_paths = []
     context_audio_paths = []
     gt_transcripts = []
