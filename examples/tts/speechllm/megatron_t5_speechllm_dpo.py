@@ -15,6 +15,7 @@
 import torch
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf, open_dict
+import random
 
 from nemo.collections.tts.models.speechllm.megatron_t5_speechllm_model import MegatronT5SpeechLMModel_DPO
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
@@ -57,6 +58,30 @@ def inference_for_records(model, trainer, cfg, records):
 
     return inference_list, inference_metrics
 
+def corrupt_question(question):
+    if "Phoneme TTS" in question:
+        prefix = "Phoneme TTS "
+        question_text = question.split("Phoneme TTS ")[1]
+    elif "Text to speech this" in question:
+        prefix = "Text to speech this "
+        question_text = question.split("Text to speech this ")[1]
+    
+    # randomly repeat word or delete a word from the question
+    question_words = question_text.split(" ")
+    if random.random() < 0.5:
+        # repeat a word
+        word_idx = random.randint(0, len(question_words) - 1)
+        word = question_words[word_idx]
+        # Repeat one occurence of the word
+        question_text = question_text.replace(word, word + " " + word, 1)
+    else:
+        # delete a word
+        word_idx = random.randint(0, len(question_words) - 1)
+        word = question_words[word_idx]
+        question_text = question_text.replace(word, "", 1)
+    
+    return prefix + question_text
+
 def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
     model.override_log_dir = os.path.join(model.logger.log_dir, "rlhf_generations")
     model.predict_step_outputs = []
@@ -72,10 +97,19 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
 
     train_records_repeated = []
     for record in train_records:
-        for _ in range(cfg.model.rlhf_num_samples_per_example):
-            train_records_repeated.append(copy.deepcopy(record))
+        for example_idx in range(cfg.model.rlhf_num_samples_per_example):
+            record_copy = copy.deepcopy(record)
+            record_copy['corrupted'] = False
+            if example_idx == cfg.model.rlhf_num_samples_per_example - 1:
+                # Corrupt question of the last example
+                record_copy['question'] = corrupt_question(record_copy['question'])
+                record_copy['corrupted'] = True
+            train_records_repeated.append(record_copy)
     si = current_state.get('completed_samples', 0) % len(train_records_repeated)
-    ei = si + cfg.model.rlhf_num_generations_per_iteration
+    if cfg.model.rlhf_num_generations_per_iteration == -1:
+        ei = len(train_records_repeated)
+    else:
+        ei = si + cfg.model.rlhf_num_generations_per_iteration
     train_records_repeated = train_records_repeated[si:ei]
 
     inference_list, inference_metrics = inference_for_records(model, trainer, cfg, train_records_repeated)
@@ -97,7 +131,7 @@ def generate_samples_and_compute_reward(model, trainer, cfg, current_state={}):
     manifest_utils.write_manifest(generated_outputs_manifest, new_records)
 
     return {
-        'completed_samples' : current_state.get('completed_samples', 0) + cfg.model.rlhf_num_generations_per_iteration,
+        'completed_samples' : current_state.get('completed_samples', 0) + len(train_records_repeated),
         'generated_outputs_manifest' : generated_outputs_manifest,
     }
 

@@ -5,9 +5,12 @@ import nemo.collections.asr as nemo_asr
 import soundfile as sf
 import string
 from nemo.collections.asr.metrics.wer import word_error_rate
+import torchaudio
+from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
 import numpy as np
 import time
 import argparse
+import librosa
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--codec_model_path", type=str, default="/Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo")
@@ -183,6 +186,9 @@ nemo_sv_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_na
 nemo_sv_model = nemo_sv_model.to(device)
 nemo_sv_model.eval()
 
+squim_mos_model = SQUIM_SUBJECTIVE.get_model().to(device)
+squim_mos_model.eval()
+
 # ceil division
 num_batches = (len(generated_records) + batch_size - 1) // batch_size
 
@@ -231,11 +237,17 @@ for batch_idx in range(num_batches):
         similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
             np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
         )
+        
+        gt_16khz_wav, _ = librosa.load(context_audio_path, sr=16000)
+        pred_16khz_wav, _ = librosa.load(answer_audio_path, sr=16000)
+        squim_mos_score = squim_mos_model(torch.from_numpy(pred_16khz_wav).to(device).unsqueeze(0), torch.from_numpy(gt_16khz_wav).to(device).unsqueeze(0)).item()
+
         generated_records[idx]['cer_gts'] = float(cer_gt)
         generated_records[idx]['wer_gts'] = float(wer_gt)
         generated_records[idx]['pred_context_similarity'] = float(similarity)
         generated_records[idx]['transcript_pred'] = pred_transcripts[idx - si]
         generated_records[idx]['transcript_gt'] = gt_transcripts[idx - si]
+        generated_records[idx]['squim_mos_score'] = squim_mos_score
         print("Done idx", idx)
 
     ct = time.time()

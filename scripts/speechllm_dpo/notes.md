@@ -7,9 +7,10 @@ We also create a similar number of text-context pairs with regular text from our
 ```
 python scripts/speechllm_dpo/create_text_context_pairs.py \
 --challenging_texts /Data/challenging_texts_nemollm.txt \
---riva_manifest /Data/CodecDatasets/updatedcodecs/manifests/RivattsEnglish_train_nemo_codec_bw_6.0_phoneme_tts_highsimilarity3.json \
---libri_manifest /Data/CodecDatasets/updatedcodecs/manifests/LibriTTSCorrectContext_train_nemo_codec_bw_6.0_phoneme_tts_highsimilarity2.json \
---output_manifest /Data/CodecDatasets/updatedcodecs/manifests/challenging_nemo21Hz_textcontextpairs.json ;
+--riva_manifest /datap/misc/speechllm_codecdatasets_new/manifests/rivaLindyRodney__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json \
+--libri_manifest /datap/misc/speechllm_codecdatasets_new/manifests/libri360__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json \
+--riva_textcontext_manifest /datap/misc/speechllm_codecdatasets_new/manifests/rivaLindyRodneyTextContext__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json \
+--output_manifest /datap/misc/speechllm_codecdatasets_new/manifests/dpo_textcontext_pairs_21Hz_NoElizWithWavLM.json ;
 ````
 
 ## Step 2: Generate multiple audios for each text-context pair 
@@ -22,10 +23,10 @@ To generate all audios for all pairs set `rlhf_num_generations_per_iteration = r
 ```
 python examples/tts/speechllm/megatron_t5_speechllm_dpo.py \
 --config-name=megatron_t5_speechllm_multiencoder.yaml \
-+init_from_ptl_ckpt="/Data/Checkpoints/multiencoder_step135k.ckpt" \
++init_from_ptl_ckpt="/Data/RivaCheckpoints/21Hz_NoYoutube_step162k.ckpt" \
 +mode="generate" \
-exp_manager.exp_dir=/Data/Experiments/DPO_GenerationsDebug \
-name="DPO21Hz_90kGenerations" \
+exp_manager.exp_dir=/Data/Experiments/DPO_Generations_RivaRelease \
+name="NoYoutube_21Hz_WithWavlm" \
 model.english_only_model=true \
 model.global_batch_size=128 \
 model.micro_batch_size=128 \
@@ -35,7 +36,7 @@ model.data.train_task=tts \
 model.data.train_ds='["/Data/CodecDatasets/updatedcodecs/manifests/empty_file.json"]' \
 model.data.validation_ds='["/Data/CodecDatasets/updatedcodecs/manifests/empty_file.json"]' \
 +model.data.test_ds='["/Data/CodecDatasets/updatedcodecs/manifests/empty_file.json"]' \
-+model.rlhf_train_ds='["/Data/CodecDatasets/updatedcodecs/manifests/challenging_nemo21Hz_textcontextpairs.json"]' \
++model.rlhf_train_ds='["/datap/misc/speechllm_codecdatasets_new/manifests/dpo_textcontext_pairs_21Hz_NoElizWithWavLM.json"]' \
 +model.data.sup_data_path="/datap/misc/speechllm_codecdatasets/" \
 model.data.g2p.english.phoneme_dict="/home/shehzeenh/Code/NeMo/scripts/tts_dataset_files/ipa_cmudict-0.7b_nv23.01.txt" \
 model.data.g2p.english.heteronyms="/home/shehzeenh/Code/NeMo/scripts/tts_dataset_files/heteronyms-052722" \
@@ -49,14 +50,15 @@ model.data.max_seq_length=512 \
 model.data.codebook_fps=21 \
 +model.data.add_special_tokens_to_only_first_codebook=true \
 +model.data.min_seq_length=5 \
-+model.temperature=0.9 \
++model.temperature=0.7 \
 model.data.context_duration_min=3.0 \
 model.data.context_duration_max=20.0 \
 model.data.use_attention_prior=false \
 model.use_alignment_loss=true \
-model.codecmodel_path="/Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo" \
+model.codecmodel_path="/Data/Checkpoints/AudioCodec_21Hz_no_eliz.nemo" \
 model.data.speech_offset=30128 \
 model.lm_vocab_size=30000 \
++model.data.use_ipa=true \
 model.frozen_model.encoder.hidden_size=768 \
 model.frozen_model.encoder.num_layers=6 \
 model.frozen_model.decoder.num_layers=12 \
@@ -69,8 +71,7 @@ model.override_tokenizer_vocab_file="/Data/Checkpoints/9a77f10c2793465e8e8a3fa5f
 'model.enc_output_to_layers=[[8,9],[3,4,5,6,7]]' \
 model.data.num_workers=2 \
 +model.rlhf_num_samples_per_example=6 \
-+model.rlhf_num_generations_per_iteration=288
-
++model.rlhf_num_generations_per_iteration=-1
 ```
 
 ## Step 3: Evaluate the CER/SSIM of generated audio and create preference dataset
@@ -84,9 +85,9 @@ We assume the micro-batch size is 4 during training so first half of the micro-b
 
 ```
 python scripts/speechllm_dpo/create_preference_data_from_generations.py \
---codec_model_path /Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo \
---generated_manifest /Data/Experiments/DPO_GenerationsDebug/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest.json \
---batch_size 8 \
+--codec_model_path /Data/Checkpoints/AudioCodec_21Hz_no_eliz.nemo \
+--generated_manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest.json \
+--batch_size 6 \
 --sample_rate 22050 \
 --group_size 6 \
 --val_size 256

@@ -2353,10 +2353,16 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                 # No need to process text since both are ASR outputs
                 cer_sample = word_error_rate([greedy_transcripts[i]], [greedy_transcripts[i + 1]], use_cer=True)
                 wer_sample = word_error_rate([greedy_transcripts[i]], [greedy_transcripts[i + 1]], use_cer=False)
+                # Clip to 1.0
+                cer_sample = min(cer_sample, 1.0)
+                wer_sample = min(wer_sample, 1.0)
 
                 # Processing text since one is ASR output and the other is the GT text
                 cer_gt = word_error_rate([self.process_text(greedy_transcripts[i])], [self.process_text(question_text)], use_cer=True)
                 wer_gt = word_error_rate([self.process_text(greedy_transcripts[i])], [self.process_text(question_text)], use_cer=False)
+                # Clip to 1.0
+                cer_gt = min(cer_gt, 1.0)
+                wer_gt = min(wer_gt, 1.0)
 
                 self.logger.experiment.add_text("Inf Predicted Text", greedy_transcripts[i], step)
                 self.logger.experiment.add_text("Inf GT Text", greedy_transcripts[i + 1], step)

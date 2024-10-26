@@ -3,13 +3,32 @@ import random
 import copy
 import argparse
 
+
+def corrupt_text(question_text):
+    # randomly repeat word or delete a word from the question
+    question_words = question_text.split(" ")
+    if random.random() < 0.5:
+        # repeat a word
+        word_idx = random.randint(0, len(question_words) - 1)
+        word = question_words[word_idx]
+        # Repeat one occurence of the word
+        question_text = question_text.replace(word, word + " " + word, 1)
+    else:
+        # delete a word
+        word_idx = random.randint(0, len(question_words) - 1)
+        word = question_words[word_idx]
+        question_text = question_text.replace(word, "", 1)
+    
+    return question_text
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--challenging_texts", type=str, default="/Data/challenging_texts_nemollm.txt")
-parser.add_argument("--riva_manifest", type=str, default="/Data/CodecDatasets/updatedcodecs/manifests/RivattsEnglish_train_nemo_codec_bw_6.0_phoneme_tts_highsimilarity3_ConvertedTo21Hz.json")
-parser.add_argument("--libri_manifest", type=str, default="/Data/CodecDatasets/updatedcodecs/manifests/LibriTTSCorrectContext_train_nemo_codec_bw_6.0_phoneme_tts_highsimilarity2_ConvertedTo21Hz.json")
-parser.add_argument("--riva_textcontext_manifest", type=str, default="/Data/CodecDatasets/updatedcodecs/manifests/RivattsEnglish_textcontext_train_nemo_codec_bw_6.0_phoneme_tts_highsimilarity3_ConvertedTo21Hz.json")
+parser.add_argument("--riva_manifest", type=str, default="/datap/misc/speechllm_codecdatasets_new/manifests/rivaLindyRodney__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json")
+parser.add_argument("--libri_manifest", type=str, default="/datap/misc/speechllm_codecdatasets_new/manifests/libri360__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json")
+parser.add_argument("--riva_textcontext_manifest", type=str, default="/datap/misc/speechllm_codecdatasets_new/manifests/rivaLindyRodneyTextContext__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json")
 parser.add_argument("--tts_records", type=bool, default=False)
-parser.add_argument("--output_manifest", type=str, default="/Data/CodecDatasets/updatedcodecs/manifests/challenging_nemo21Hz_onlyphoneme_addedrivatextcontext.json")
+parser.add_argument("--output_manifest", type=str, default="/datap/misc/speechllm_codecdatasets_new/manifests/dpo_textcontext_pairs_21Hz_NoElizWithWavLM.json")
 args = parser.parse_args()
 
 challenging_texts = args.challenging_texts
@@ -51,10 +70,16 @@ with open(challenging_texts, 'r') as f:
     challenging_texts = f.readlines()
 
 challenging_records = []
-num_contexts_per_sample = 10
+num_contexts_per_sample = 12
 for challenging_text in challenging_texts:
     challenging_text = challenging_text.strip()
-    for _ in range(num_contexts_per_sample):
+    for ci in range(num_contexts_per_sample):
+        if ci >= num_contexts_per_sample - 2:
+            # For last 20% of the challenging texts, make it more challenging by corrupting the text
+            # Randomly drops a word or repeats a word
+            print("Corrupting text: {}".format(challenging_text))
+            challenging_text = corrupt_text(challenging_text)
+            print("Corrupted text: {}".format(challenging_text))
         riva_record = copy.deepcopy(random.choice(riva_records))
         libri_record = copy.deepcopy(random.choice(libri_records))
         riva_textcontext_record = copy.deepcopy(random.choice(riva_textcontext_records))
@@ -66,7 +91,9 @@ for challenging_text in challenging_texts:
         riva_textcontext_record['text'] = challenging_text
         challenging_records.append(riva_record)
         challenging_records.append(libri_record)
-        challenging_records.append(riva_textcontext_record)
+        if ci == 0:
+            # dont need too many text context examples
+            challenging_records.append(riva_textcontext_record)
 
 # regular libri records 50% of the challenging records
 libri_subset_records = random.sample(libri_records_longer_than_2, int(len(challenging_records)/2.0) )
@@ -84,8 +111,8 @@ for riva_subset_record in riva_subset_records:
     riva_subset_record['context_type'] = context_record['context_type']
     riva_subset_record['context_duration'] = context_record['context_duration']
 
-# riva textcontext records 20% of the challenging records
-riva_textcontext_subset_records = random.sample(riva_textcontext_records, int(len(challenging_records)/5.0))
+# riva textcontext records 5% of the challenging records
+riva_textcontext_subset_records = random.sample(riva_textcontext_records, int(len(challenging_records)/20.0))
 for riva_textcontext_subset_record in riva_textcontext_subset_records:
     context_record = random.choice(riva_textcontext_records)
     riva_textcontext_subset_record['context'] = context_record['context']
