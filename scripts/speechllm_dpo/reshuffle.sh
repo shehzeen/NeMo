@@ -1,0 +1,10 @@
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.0__cerTh_0.01_train.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.2__cerTh_0.01_train.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.2__cerTh_0.02_train.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.5__cerTh_0.01_train.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_1.0__cerTh_0.01_train.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.0__cerTh_0.01_val.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.2__cerTh_0.01_val.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.2__cerTh_0.02_val.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_0.5__cerTh_0.01_val.json ; \
+python reshuffle_manifest.py --manifest /Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_corruptionProb_1.0__cerTh_0.01_val.json ;
