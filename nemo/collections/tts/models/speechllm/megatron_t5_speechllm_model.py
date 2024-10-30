@@ -1456,25 +1456,27 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         outputs = self.predict_step_outputs
         average_metrics = {}
         inference_lists = {}
+        total_samples = 0
         for output in outputs:
+            total_samples += output['num_samples']
             for key in output:
-                if key != 'lists':
+                if key not in ['lists', 'num_samples']:
                     if key not in average_metrics:
                         average_metrics[key] = []
                     if isinstance(output[key], torch.Tensor):
-                        average_metrics[key].append(output[key].item())
+                        average_metrics[key].append(output[key].item()*output['num_samples'])
                     elif output[key] is None:
                         continue
                     else:
-                        average_metrics[key].append(output[key])
-                else:
+                        average_metrics[key].append(output[key]*output['num_samples'])
+                elif key == 'lists':
                     for list_key in output[key]:
                         if list_key not in inference_lists:
                             inference_lists[list_key] = []
                         inference_lists[list_key].extend(output[key][list_key])
 
         for key in average_metrics:
-            average_metrics[key] = np.mean(average_metrics[key]).item()
+            average_metrics[key] = sum(average_metrics[key]) / total_samples
             logging.info(f'Test {key}: {average_metrics[key]}')
             self.log(f'test_{key}', average_metrics[key], prog_bar=True, rank_zero_only=True, batch_size=1)
             self.logger.experiment.add_scalar(f'Inf Cumulative {key}', average_metrics[key], 0)
@@ -2433,6 +2435,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
                     'cer_tts_gt': np.mean(cer_tts_gt) if len(cer_tts_gt) > 0 else None,
                     'wer_tts_gt': np.mean(wer_tts_gt) if len(wer_tts_gt) > 0 else None,
                     "RTF": total_process_time / total_audio_seconds,
+                    "num_samples": batch_size,
                 }
             )
 
