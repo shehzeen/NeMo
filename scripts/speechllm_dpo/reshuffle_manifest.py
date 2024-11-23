@@ -2,7 +2,7 @@ import json
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--manifest", type=str, default="/Data/Experiments/DPO_GenerationsDebug/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest_final_records_train.json")
+parser.add_argument("--manifest", type=str, default="/Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_emotion_corruptionProb_0.0__cerTh_0.01_val.json")
 args = parser.parse_args()
 
 manifest = args.manifest

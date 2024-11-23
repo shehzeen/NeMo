@@ -3,11 +3,11 @@ from nemo.collections.asr.parts.utils import manifest_utils
 import random
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--metrics_with_manifest", type=str, default="/Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics.json")
+parser.add_argument("--metrics_with_manifest", type=str, default="/Data/Experiments/DPO_Generations_RivaRelease/NoYoutube_21Hz_WithWavlm/rlhf_generations/generated_outputs_manifest_with_metrics_emotion.json")
 parser.add_argument("--group_size", type=int, default=6)
 parser.add_argument("--uncorrupted_group_size", type=int, default=5, help="First N records in each group are from uncorrupted text")
-parser.add_argument("--corruption_prob", type=float, default=0.2, help="Percentage of train records in which rejected example can be a corrupted text")
-parser.add_argument("--cer_threshold", type=float, default=0.02)
+parser.add_argument("--corruption_prob", type=float, default=0.0, help="Percentage of train records in which rejected example can be a corrupted text")
+parser.add_argument("--cer_threshold", type=float, default=0.01)
 parser.add_argument("--val_size", type=int, default=256)
 args = parser.parse_args()
 
