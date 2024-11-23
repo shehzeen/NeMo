@@ -12,8 +12,11 @@ import time
 import argparse
 import librosa
 
+from emotion_encoder import init_emotion_encoder, get_emotion_embedding_from_file
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--codec_model_path", type=str, default="/Data/Checkpoints/AudioCodec_21Hz-2k-codes_updated.nemo")
+parser.add_argument("--emo_encoder_model_path", type=str, default="/home/ecasanova/Projects/Checkpoints/emotion_classifier/w2v2_l071_acc08.bin")
 parser.add_argument("--generated_manifest", type=str, default="/Data/Experiments/DPO_GenerationsDebug/DPO21Hz_90kGenerations/rlhf_generations/generated_outputs_manifest.json")
 parser.add_argument("--batch_size", type=int, default=8)
 parser.add_argument("--sample_rate", type=int, default=22050)
@@ -28,7 +31,7 @@ group_size = args.group_size
 val_size = args.val_size
 codec_model_path = args.codec_model_path
 generated_manifest = args.generated_manifest
-
+emo_encoder_model_path = args.emo_encoder_model_path
 
 def create_chosen_rejected_records(records, group_size=4):
     assert len(records) % group_size == 0
@@ -189,6 +192,13 @@ nemo_sv_model.eval()
 squim_mos_model = SQUIM_SUBJECTIVE.get_model().to(device)
 squim_mos_model.eval()
 
+
+# init emotion encoder
+emotion_encoder, emotion_encoder_processor = init_emotion_encoder(emo_encoder_model_path)
+emotion_encoder.to(device)
+emotion_encoder.eval()
+
+
 # ceil division
 num_batches = (len(generated_records) + batch_size - 1) // batch_size
 
@@ -230,6 +240,7 @@ for batch_idx in range(num_batches):
         wer_gt = word_error_rate([pred_transcripts[idx - si]], [gt_transcripts[idx - si]], use_cer=False)
         answer_audio_path = answer_audio_paths[idx - si]
         context_audio_path = context_audio_paths[idx - si]
+        """
         with torch.no_grad():
             spk_embedding_pred = nemo_sv_model.get_embedding(answer_audio_path).cpu().detach().numpy().flatten()
             spk_embedding_gt = nemo_sv_model.get_embedding(context_audio_path).cpu().detach().numpy().flatten()
@@ -237,14 +248,20 @@ for batch_idx in range(num_batches):
         similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
             np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
         )
-        
+        """
+        # compute emotion embedding similarity
+        answer_emo_embedding = get_emotion_embedding_from_file(answer_audio_path, emotion_encoder, emotion_encoder_processor)
+        context_emo_embedding = get_emotion_embedding_from_file(context_audio_path, emotion_encoder, emotion_encoder_processor)
+        emo_similarity = torch.nn.functional.cosine_similarity(answer_emo_embedding, context_emo_embedding).item()
+
         gt_16khz_wav, _ = librosa.load(context_audio_path, sr=16000)
         pred_16khz_wav, _ = librosa.load(answer_audio_path, sr=16000)
         squim_mos_score = squim_mos_model(torch.from_numpy(pred_16khz_wav).to(device).unsqueeze(0), torch.from_numpy(gt_16khz_wav).to(device).unsqueeze(0)).item()
 
         generated_records[idx]['cer_gts'] = float(cer_gt)
         generated_records[idx]['wer_gts'] = float(wer_gt)
-        generated_records[idx]['pred_context_similarity'] = float(similarity)
+        generated_records[idx]['pred_context_similarity'] = float(emo_similarity)
+        # generated_records[idx]['pred_context_similarity_emo'] = float(emo_similarity)
         generated_records[idx]['transcript_pred'] = pred_transcripts[idx - si]
         generated_records[idx]['transcript_gt'] = gt_transcripts[idx - si]
         generated_records[idx]['squim_mos_score'] = squim_mos_score
