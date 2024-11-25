@@ -526,6 +526,11 @@ class T5TTSDataset(TextToSpeechDataset):
             align_prior = torch.tensor(align_prior, dtype=torch.float32)
             example["align_prior"] = align_prior
 
+        # TODO: Remove this, only for testing
+        example['reward'] = 1.0 if index % 2 == 0 else 0.0
+        if "reward" in data.manifest_entry:
+            example["reward"] = data.manifest_entry["reward"]
+
         return example
     
     def collate_fn(self, batch: List[dict]):
@@ -547,6 +552,7 @@ class T5TTSDataset(TextToSpeechDataset):
         context_text_tokens_list = []
         context_text_tokens_len_list = []
         context_has_text_context_list = []
+        reward_list = []
         for example in batch:
             dataset_name_list.append(example["dataset_name"])
             audio_filepath_list.append(example["audio_filepath"])
@@ -578,6 +584,9 @@ class T5TTSDataset(TextToSpeechDataset):
                 context_text_tokens_list.append(example['context_text_tokens'])
                 context_text_tokens_len_list.append(example['context_text_len'])
                 context_has_text_context_list.append(example['has_text_context'])
+            
+            if 'reward' in example:
+                reward_list.append(example['reward'])
 
             if self.include_align_prior:
                 prior_list.append(example["align_prior"])
@@ -640,5 +649,35 @@ class T5TTSDataset(TextToSpeechDataset):
             spec_max_len = max([prior.shape[0] for prior in prior_list])
             text_max_len = max([prior.shape[1] for prior in prior_list])
             batch_dict["align_prior_matrix"] = stack_tensors(prior_list, max_lens=[text_max_len, spec_max_len],)
+        
+        if len(reward_list) > 0:
+            batch_dict['rewards'] = torch.FloatTensor(reward_list)
 
         return batch_dict
+
+class T5TTSDatasetDPO(T5TTSDataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def __len__(self):
+        return len(self.data_samples)//2
+    
+    def __getitem__(self, index):
+        chosen_example = super().__getitem__(index*2)
+        rejected_example = super().__getitem__(index*2 + 1)
+        assert chosen_example['reward'] == 1.0
+        assert rejected_example['reward'] < 1.0
+        return {
+            "chosen": chosen_example,
+            "rejected": rejected_example
+        }
+    
+    def collate_fn(self, batch: List[dict]):
+        chosen_batch = [example['chosen'] for example in batch]
+        rejected_batch = [example['rejected'] for example in batch]
+        chosen_collated = super().collate_fn(chosen_batch)
+        rejected_collated = super().collate_fn(rejected_batch)
+        return {
+            "chosen": chosen_collated,
+            "rejected": rejected_collated
+        }
