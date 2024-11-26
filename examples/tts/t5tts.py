@@ -15,7 +15,7 @@
 import pytorch_lightning as pl
 from omegaconf import OmegaConf
 
-from nemo.collections.tts.models import T5TTS_Model
+from nemo.collections.tts.models import T5TTS_Model, T5TTS_ModelInference
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
@@ -28,7 +28,14 @@ def main(cfg):
     logging.info('\nConfig Params:\n%s', OmegaConf.to_yaml(cfg, resolve=True))
     trainer = pl.Trainer(**cfg.trainer)
     exp_manager(trainer, cfg.get("exp_manager", None))
-    model = T5TTS_Model(cfg=cfg.model, trainer=trainer)
+
+    if cfg.get('mode', 'train') == 'train':
+        model = T5TTS_Model(cfg=cfg.model, trainer=trainer)
+    elif cfg.get('mode', 'train') == 'test':
+        model = T5TTS_ModelInference(cfg=cfg.model, trainer=trainer)
+    else:
+        raise NotImplementedError(f"Only train and test modes are supported. Got {cfg.mode}")
+
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
     if cfg.get('mode', 'train') == 'train':
         trainer.fit(model)

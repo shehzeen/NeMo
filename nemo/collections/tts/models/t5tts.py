@@ -22,6 +22,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch import nn
 import os
+import json
 
 from nemo.collections.tts.parts.utils.helpers import (
     get_mask_from_lengths,
@@ -39,6 +40,8 @@ from torch.utils.data import get_worker_info
 from transformers import T5Tokenizer
 import copy
 from omegaconf import OmegaConf, open_dict
+import string
+from nemo.collections.asr.metrics.wer import word_error_rate
 
 HAVE_WANDB = True
 try:
@@ -755,6 +758,10 @@ class T5TTS_Model(ModelPT):
                 audio_path = os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}.wav')
                 sf.write(audio_path, predicted_audio_np, self.cfg.sample_rate)
 
+                predicted_codes_torch = predicted_codes[idx].cpu().type(torch.int16)
+                predicted_codes_torch = predicted_codes_torch[:, :predicted_codes_lens[idx]]
+                torch.save(predicted_codes_torch, os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}_codes.pt'))
+
 
     def on_validation_epoch_end(self):
         collect = lambda key: torch.stack([x[key] for x in self.validation_step_outputs]).mean()
@@ -826,6 +833,106 @@ class T5TTS_Model(ModelPT):
     @classmethod
     def list_available_models(cls) -> List[PretrainedModelInfo]:
         return []
+
+class T5TTS_ModelInference(T5TTS_Model):
+    """Small override to save inference metrics"""
+    def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
+        super().__init__(cfg, trainer)
+        self.eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name="nvidia/parakeet-tdt-1.1b")
+        self.eval_asr_model.freeze()
+        self.eval_asr_model.eval()
+
+        self.eval_speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large')
+        self.eval_speaker_verification_model.freeze()
+        self.eval_speaker_verification_model.eval()
+    
+    def process_text(self, input_text):
+        """
+        Normalizes text for CER/WER calculation.
+        Taken from hallucination_eval.py
+        """
+        # Convert text to lowercase
+        lower_case_text = input_text.lower()
+        
+        # Remove commas from text
+        no_comma_text = lower_case_text.replace(",", "")
+        # Replace "-" with spaces
+        no_dash_text = no_comma_text.replace("-", " ")
+        no_dash_text = no_dash_text.replace("'", "")
+        no_dash_text = no_dash_text.replace(";", "")
+        no_dash_text = no_dash_text.replace(".", "")
+        
+        # Replace double spaces with single space
+        single_space_text = " ".join(no_dash_text.split())
+
+        single_space_text = single_space_text.translate(str.maketrans('', '', string.punctuation))
+
+        single_space_text.replace("h t t p", "http")
+        single_space_text.replace("w w w", "www")
+
+        return single_space_text
+    
+    def test_step(self, batch, batch_idx):
+        with torch.no_grad():
+            test_dl_batch_size = self._test_dl.batch_size
+            predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens = self.infer_batch(batch, max_decoder_steps=self.cfg.get('max_decoder_steps', 500))
+            predicted_audio_paths = []
+            audio_durations = []
+            for idx in range(predicted_audio.size(0)):
+                predicted_audio_np = predicted_audio[idx].float().detach().cpu().numpy()
+                predicted_audio_np = predicted_audio_np[:predicted_audio_lens[idx]]
+                item_idx = batch_idx * test_dl_batch_size + idx
+                self.tb_logger.add_audio(
+                    'predicted_audio',
+                    predicted_audio_np,
+                    global_step=item_idx,
+                    sample_rate=self.cfg.sample_rate,
+                )
+                # Save the predicted audio
+                log_dir = self.logger.log_dir
+                audio_dir = os.path.join(log_dir, 'audios')
+                if not os.path.exists(audio_dir):
+                    os.makedirs(audio_dir)
+                audio_path = os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}.wav')
+                audio_durations.append(len(predicted_audio_np) / self.cfg.sample_rate)
+                sf.write(audio_path, predicted_audio_np, self.cfg.sample_rate)
+
+                predicted_codes_torch = predicted_codes[idx].cpu().type(torch.int16)
+                predicted_codes_torch = predicted_codes_torch[:, :predicted_codes_lens[idx]]
+                torch.save(predicted_codes_torch, os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}_codes.pt'))
+                predicted_audio_paths.append(audio_path)
+            
+            with torch.no_grad():
+                pred_transcripts = self.eval_asr_model.transcribe(predicted_audio_paths, batch_size=len(predicted_audio_paths))[0]
+
+            for idx in range(predicted_audio.size(0)):
+                audio_path = predicted_audio_paths[idx]
+                item_idx = batch_idx * test_dl_batch_size + idx
+                pred_transcript = pred_transcripts[idx]
+                gt_transcript = self.process_text(batch['raw_texts'][idx])
+
+                cer_gt = word_error_rate([pred_transcript], [gt_transcript], use_cer=True)
+                wer_gt = word_error_rate([pred_transcript], [gt_transcript], use_cer=False)
+
+                with torch.no_grad():
+                    spk_embedding_pred = self.eval_speaker_verification_model.get_embedding(audio_path).cpu().detach().numpy().flatten()
+                    spk_embedding_gt = self.eval_speaker_verification_model.get_embedding(batch['audio_filepaths'][idx]).cpu().detach().numpy().flatten()
+                
+                spk_similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
+                    np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
+                )
+
+                item_metrics = {
+                    'cer_gt': float(cer_gt),
+                    'wer_gt': float(wer_gt),
+                    'duration' : audio_durations[idx],
+                    'spk_similarity': float(spk_similarity),
+                    'pred_transcript': pred_transcript,
+                    'gt_transcript': gt_transcript,
+                }
+
+                with open(os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}_metrics.json'), 'w') as f:
+                    json.dump(item_metrics, f)
 
 class T5TTS_ModelDPO(T5TTS_Model):
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):

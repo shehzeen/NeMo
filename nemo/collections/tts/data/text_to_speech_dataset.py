@@ -418,7 +418,7 @@ class T5TTSDataset(TextToSpeechDataset):
                 value=0
             )
             audio_len = audio.shape[0]
-            example['audio_filepath'] = audio_filepath_rel
+            example['audio_filepath'] = data.manifest_entry['audio_filepath']
             example['audio'] = audio
             example['audio_len'] = audio_len
             spec_len = int(audio_len / self.codec_model_downsample_factor) + 1 # +1 for EOS
@@ -468,12 +468,19 @@ class T5TTSDataset(TextToSpeechDataset):
             # We always want to have context_audio_codes if available for multi-encoder model. These are ignored for singlencoder model.
             # If context audio is not available, just use a dummy context_audio_codes
             # (Will be used in text context scenario)
-            context_bos_tensor = torch.full((self.num_audio_codebooks, 1), self.audio_bos_id, dtype=torch.int32)
-            context_eos_tensor = torch.full((self.num_audio_codebooks, 1), self.audio_eos_id, dtype=torch.int32)
-            context_audio_codes = torch.cat([context_bos_tensor, context_eos_tensor], dim=1)
-            context_audio_codes_len = context_audio_codes.shape[1]
-            example['context_audio_codes'] = context_audio_codes
-            example['context_audio_codes_len'] = context_audio_codes_len
+            if self.load_cached_codes_if_available:
+                context_bos_tensor = torch.full((self.num_audio_codebooks, 1), self.audio_bos_id, dtype=torch.int32)
+                context_eos_tensor = torch.full((self.num_audio_codebooks, 1), self.audio_eos_id, dtype=torch.int32)
+                context_audio_codes = torch.cat([context_bos_tensor, context_eos_tensor], dim=1)
+                context_audio_codes_len = context_audio_codes.shape[1]
+                example['context_audio_codes'] = context_audio_codes
+                example['context_audio_codes_len'] = context_audio_codes_len
+            else:
+                # @shehzeenh: Added this condition so that a batch does not have a mix of context_audio and context_audio_codes
+                context_audio = torch.zeros(self.codec_model_downsample_factor, dtype=torch.float32)
+                context_audio_len = context_audio.shape[0]
+                example['context_audio'] = context_audio
+                example['context_audio_len'] = context_audio_len
 
         if self.load_16khz_audio:
             if 'context_audio_filepath' in data.manifest_entry:
@@ -526,6 +533,7 @@ class T5TTSDataset(TextToSpeechDataset):
             align_prior = torch.tensor(align_prior, dtype=torch.float32)
             example["align_prior"] = align_prior
 
+        example['raw_text'] = data.text
         # TODO: Remove this, only for testing
         example['reward'] = 1.0 if index % 2 == 0 else 0.0
         if "reward" in data.manifest_entry:
@@ -553,9 +561,11 @@ class T5TTSDataset(TextToSpeechDataset):
         context_text_tokens_len_list = []
         context_has_text_context_list = []
         reward_list = []
+        raw_text_list = []
         for example in batch:
             dataset_name_list.append(example["dataset_name"])
             audio_filepath_list.append(example["audio_filepath"])
+            raw_text_list.append(example["raw_text"])
 
             token_list.append(example["tokens"])
             token_len_list.append(example["text_len"])
@@ -597,6 +607,7 @@ class T5TTSDataset(TextToSpeechDataset):
 
         batch_dict = {
             "dataset_names": dataset_name_list,
+            "raw_texts": raw_text_list,
             "audio_filepaths": audio_filepath_list,
             "text": batch_tokens,
             "text_lens": batch_token_len,
