@@ -116,7 +116,7 @@ def filter_best_and_worst_records(best_records, worst_records, cer_threshold=0.0
 
 records = read_records(args.input_manifest)
 audio_files, codec_files, metric_files = find_audio_files(args.generated_audio_dir)
-assert len(records) == len(audio_files), "Mismatch between number of records and number of generated audio files"
+assert len(records) < len(audio_files), "Mismatch between number of records and number of generated audio files" # For multi-node, it generates more audio than records
 
 for idx, record in enumerate(records):
     record['audio_filepath'] = audio_files[idx]
