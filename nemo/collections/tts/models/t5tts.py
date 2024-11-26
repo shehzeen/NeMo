@@ -36,12 +36,14 @@ from nemo.collections.tts.models import AudioCodecModel
 from nemo.collections.tts.losses.aligner_loss import ForwardSumLoss
 import nemo.collections.asr as nemo_asr
 import soundfile as sf
+import librosa
 from torch.utils.data import get_worker_info
 from transformers import T5Tokenizer
 import copy
 from omegaconf import OmegaConf, open_dict
 import string
 from nemo.collections.asr.metrics.wer import word_error_rate
+from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 
 HAVE_WANDB = True
 try:
@@ -872,6 +874,29 @@ class T5TTS_ModelInference(T5TTS_Model):
 
         return single_space_text
     
+    def get_speaker_embeddings_from_filepaths(self, filepaths):
+        audio_batch = []
+        audio_lengths = []
+        for filepath in filepaths:
+            audio, sr = sf.read(filepath)
+            if sr != 16000:
+                audio = librosa.core.resample(audio, orig_sr=sr, target_sr=16000)
+            audio_tensor = torch.tensor(audio, dtype=torch.float32, device=self.device)
+            audio_batch.append(audio_tensor)
+            audio_lengths.append(audio_tensor.size(0))
+        
+        batch_audio_lens = torch.tensor(audio_lengths, device=self.device).long()
+        max_audio_len = int(batch_audio_lens.max().item())
+        audio_batch = stack_tensors(audio_batch, max_lens=[max_audio_len])
+
+        _, speaker_embeddings = self.eval_speaker_verification_model.forward(
+            input_signal=audio_batch, 
+            input_signal_length=batch_audio_lens
+        )
+        
+        # Clear the cache
+        return speaker_embeddings
+
     def test_step(self, batch, batch_idx):
         with torch.no_grad():
             test_dl_batch_size = self._test_dl.batch_size
@@ -882,12 +907,6 @@ class T5TTS_ModelInference(T5TTS_Model):
                 predicted_audio_np = predicted_audio[idx].float().detach().cpu().numpy()
                 predicted_audio_np = predicted_audio_np[:predicted_audio_lens[idx]]
                 item_idx = batch_idx * test_dl_batch_size + idx
-                self.tb_logger.add_audio(
-                    'predicted_audio',
-                    predicted_audio_np,
-                    global_step=item_idx,
-                    sample_rate=self.cfg.sample_rate,
-                )
                 # Save the predicted audio
                 log_dir = self.logger.log_dir
                 audio_dir = os.path.join(log_dir, 'audios')
@@ -904,6 +923,8 @@ class T5TTS_ModelInference(T5TTS_Model):
             
             with torch.no_grad():
                 pred_transcripts = self.eval_asr_model.transcribe(predicted_audio_paths, batch_size=len(predicted_audio_paths))[0]
+                pred_speaker_embeddings = self.get_speaker_embeddings_from_filepaths(predicted_audio_paths)
+                gt_speaker_embeddings = self.get_speaker_embeddings_from_filepaths(batch['audio_filepaths'])
 
             for idx in range(predicted_audio.size(0)):
                 audio_path = predicted_audio_paths[idx]
@@ -914,9 +935,8 @@ class T5TTS_ModelInference(T5TTS_Model):
                 cer_gt = word_error_rate([pred_transcript], [gt_transcript], use_cer=True)
                 wer_gt = word_error_rate([pred_transcript], [gt_transcript], use_cer=False)
 
-                with torch.no_grad():
-                    spk_embedding_pred = self.eval_speaker_verification_model.get_embedding(audio_path).cpu().detach().numpy().flatten()
-                    spk_embedding_gt = self.eval_speaker_verification_model.get_embedding(batch['audio_filepaths'][idx]).cpu().detach().numpy().flatten()
+                spk_embedding_pred = pred_speaker_embeddings[idx].cpu().numpy()
+                spk_embedding_gt = gt_speaker_embeddings[idx].cpu().numpy()
                 
                 spk_similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
                     np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
@@ -1108,7 +1128,7 @@ class T5TTS_ModelDPO(T5TTS_Model):
         sft_loss = -chosen_policy_logprobs.mean()
         
         pref_loss_weight = self.cfg.get('dpo_pref_loss_weight', 1.0)
-        sft_loss_weight = self.cfg.get('dpo_sft_loss_weight', 1.0)
+        sft_loss_weight = self.cfg.get('dpo_sft_loss_weight', 0.0)
         loss = pref_loss_weight * pref_loss + sft_loss * sft_loss_weight
 
         alignment_loss = model_output_chosen['alignment_loss']
