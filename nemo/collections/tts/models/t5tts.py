@@ -174,9 +174,11 @@ class T5TTS_Model(ModelPT):
         for param in model.parameters():
             param.requires_grad = False
 
-    def state_dict(self):
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        if hasattr(self, '_no_state_dict') and self._no_state_dict:
+            return {}
         # Don't save the speaker verification and codec model in the state dict
-        state_dict = super().state_dict()
+        state_dict = super().state_dict(destination, prefix, keep_vars)
         keys_substrings_to_exclude = ['_speaker_verification_model', '_codec_model']
         for key in list(state_dict.keys()):
             if any([substring in key for substring in keys_substrings_to_exclude]):
@@ -967,16 +969,17 @@ class T5TTS_ModelDPO(T5TTS_Model):
         self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path)['state_dict'])
         self.freeze_model(self._reference_model)
         self._reference_model.eval()
+        self._reference_model._no_state_dict = True
         print("Reference model loaded and frozen")
     
-    def state_dict(self):
-        # Don't save the speaker verification and codec model in the state dict
-        state_dict = super().state_dict()
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination, prefix, keep_vars)
         keys_substrings_to_exclude = ['_speaker_verification_model', '_codec_model', '_reference_model']
         for key in list(state_dict.keys()):
             if any([substring in key for substring in keys_substrings_to_exclude]):
                 del state_dict[key]
         return state_dict
+        
 
     def _get_batch_logps(self, logits, labels, loss_mask, average_log_prob=False):
         """Compute the log probabilities of the given labels under the given logits.
