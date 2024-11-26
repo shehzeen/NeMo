@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import pytorch_lightning as pl
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
-from nemo.collections.tts.models import T5TTS_Model, T5TTS_ModelInference
+from nemo.collections.tts.models import T5TTS_Model, T5TTS_ModelInference, T5TTS_ModelDPO
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
@@ -31,13 +31,19 @@ def main(cfg):
 
     if cfg.get('mode', 'train') == 'train':
         model = T5TTS_Model(cfg=cfg.model, trainer=trainer)
+    elif cfg.get('mode', 'dpo_train') == 'dpo_train':
+        model_cfg = cfg.model
+        with open_dict(model_cfg):
+            model_cfg.reference_model_ckpt_path = cfg.init_from_ptl_ckpt
+        model = T5TTS_ModelDPO(cfg=model_cfg, trainer=trainer)
     elif cfg.get('mode', 'train') == 'test':
         model = T5TTS_ModelInference(cfg=cfg.model, trainer=trainer)
     else:
-        raise NotImplementedError(f"Only train and test modes are supported. Got {cfg.mode}")
+        raise NotImplementedError(f"Only train, dpo_train and test modes are supported. Got {cfg.mode}")
 
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
-    if cfg.get('mode', 'train') == 'train':
+    
+    if cfg.get('mode', 'train') in ['train', 'dpo_train']:
         trainer.fit(model)
     elif cfg.get('mode', 'train') == 'test':
         trainer.test(model)

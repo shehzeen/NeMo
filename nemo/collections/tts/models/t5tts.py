@@ -762,10 +762,6 @@ class T5TTS_Model(ModelPT):
                 audio_path = os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}.wav')
                 sf.write(audio_path, predicted_audio_np, self.cfg.sample_rate)
 
-                predicted_codes_torch = predicted_codes[idx].cpu().type(torch.int16)
-                predicted_codes_torch = predicted_codes_torch[:, :predicted_codes_lens[idx]]
-                torch.save(predicted_codes_torch, os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}_codes.pt'))
-
 
     def on_validation_epoch_end(self):
         collect = lambda key: torch.stack([x[key] for x in self.validation_step_outputs]).mean()
@@ -871,6 +867,7 @@ class T5TTS_ModelInference(T5TTS_Model):
 
         single_space_text = single_space_text.translate(str.maketrans('', '', string.punctuation))
 
+        # @shehzeen: Added this to handle some common errors in ASR transcripts
         single_space_text.replace("h t t p", "http")
         single_space_text.replace("w w w", "www")
 
@@ -896,7 +893,6 @@ class T5TTS_ModelInference(T5TTS_Model):
             input_signal_length=batch_audio_lens
         )
         
-        # Clear the cache
         return speaker_embeddings
 
     def test_step(self, batch, batch_idx):
@@ -943,7 +939,7 @@ class T5TTS_ModelInference(T5TTS_Model):
                 spk_similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
                     np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
                 )
-
+                
                 item_metrics = {
                     'cer_gt': float(cer_gt),
                     'wer_gt': float(wer_gt),
