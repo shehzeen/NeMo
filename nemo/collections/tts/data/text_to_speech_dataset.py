@@ -534,8 +534,7 @@ class T5TTSDataset(TextToSpeechDataset):
             example["align_prior"] = align_prior
 
         example['raw_text'] = data.text
-        # TODO: Remove this, only for testing
-        example['reward'] = 1.0 if index % 2 == 0 else 0.0
+        
         if "reward" in data.manifest_entry:
             example["reward"] = data.manifest_entry["reward"]
 
