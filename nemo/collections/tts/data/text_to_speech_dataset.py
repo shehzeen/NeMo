@@ -379,8 +379,8 @@ class T5TTSDataset(TextToSpeechDataset):
     
     def __getitem__(self, index):
         data = self.data_samples[index]
-
-        tokens = self.text_tokenizer(data.text)
+        tokenizer_name = data.manifest_entry.get("language", "en") # Default to English
+        tokens = self.text_tokenizer.encode(text=data.text, tokenizer_name=tokenizer_name)
         tokens = tokens + [self.eos_id] # Not adding BOS id
         tokens = torch.tensor(tokens, dtype=torch.int32)
         text_len = tokens.shape[0]

@@ -1074,3 +1074,38 @@ class JapanesePhonemeTokenizer(BaseTokenizer):
             ps = [space] + ps + [space]
 
         return [self._token2id[p] for p in ps]
+
+class AggregatedTokenizer:
+    def __init__(self, tokenizers: List[BaseTokenizer], tokenizer_names: List[str]):
+        """A simple aggregated tokenizer. Aggregates multiple tokenizers into one by combining (simply concatenating)
+        their tokens into one vocabulary.
+        Args:
+            tokenizers: List of tokenizers to aggregate.
+            tokenizer_names: List of names for each tokenizer (usually the language identifier).
+        """
+        assert len(tokenizers) == len(tokenizer_names), "Number of tokenizers and tokenizer names must be the same."
+        tokens = []
+        toknizer_offsets = {}
+        tokenizer_offset = 0
+        self.tokenizers = {}
+        for idx, tokenizer in enumerate(tokenizers):
+            self.tokenizers[tokenizer_names[idx]] = tokenizer
+            toknizer_offsets[tokenizer_names[idx]] = tokenizer_offset
+            tokens.extend(tokenizer.tokens)
+            tokenizer_offset += len(tokenizer.tokens)
+
+        self.tokens = tokens
+        self.tokenizer_names = tokenizer_names
+        self.toknizer_offsets = toknizer_offsets
+        self.pad = self.tokenizers[tokenizer_names[0]].pad # Use the first tokenizer's pad token
+
+    def encode(self, text: str, tokenizer_name: str) -> List[int]:
+        tokenizer = self.tokenizers[tokenizer_name]
+        tokens = tokenizer.encode(text)
+        return [self.toknizer_offsets[tokenizer_name] + token for token in tokens]
+    
+    def decode(self, tokens: List[int], tokenizer_name: str) -> str:
+        tokenizer = self.tokenizers[tokenizer_name]
+        return tokenizer.decode([token - self.toknizer_offsets[tokenizer_name] for token in tokens])
+
+        
