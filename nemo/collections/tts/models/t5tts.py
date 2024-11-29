@@ -38,13 +38,13 @@ import nemo.collections.asr as nemo_asr
 import soundfile as sf
 import librosa
 from torch.utils.data import get_worker_info
-from transformers import T5Tokenizer
+from transformers import AutoTokenizer, T5Tokenizer
 import copy
 from omegaconf import OmegaConf, open_dict
 import string
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
-from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTokenizer
+from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer
 
 HAVE_WANDB = True
 try:
@@ -64,18 +64,19 @@ def worker_init_fn(worker_id):
     tokenizer_names = []
     for tokenizer_name in dataset.tokenizer_config:
         tokenizer_config = dataset.tokenizer_config[tokenizer_name]
-        text_tokenizer_kwargs = {}
-        if "g2p" in tokenizer_config:
-            # for backward compatibility
-            text_tokenizer_kwargs["g2p"] = instantiate(tokenizer_config.g2p)
-            logging.info(f"g2p instantiated: {text_tokenizer_kwargs['g2p']}")
-        tokenizer = instantiate(tokenizer_config, **text_tokenizer_kwargs)
-        if dataset.dataset_type == 'test' and hasattr(tokenizer, "set_phone_prob"):
-            logging.info("Setting phone prob to 1.0 for test dataset")
-            tokenizer.set_phone_prob(1.0)
+        if tokenizer_config._target_ == 'AutoTokenizer':
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.pretrained_model)
+        else:
+            text_tokenizer_kwargs = {}
+            if "g2p" in tokenizer_config:
+                text_tokenizer_kwargs["g2p"] = instantiate(tokenizer_config.g2p)
+            tokenizer = instantiate(tokenizer_config, **text_tokenizer_kwargs)
+            if dataset.dataset_type == 'test' and hasattr(tokenizer, "set_phone_prob"):
+                logging.info("Setting phone prob to 1.0 for test dataset")
+                tokenizer.set_phone_prob(1.0)
         tokenizers.append(tokenizer)
         tokenizer_names.append(tokenizer_name)
-    dataset.text_tokenizer = AggregatedTokenizer(tokenizers, tokenizer_names)
+    dataset.text_tokenizer = AggregatedTTSTokenizer(tokenizers, tokenizer_names)
     logging.info(f"Tokenizer instantiated: {tokenizer}")
     if dataset.use_text_conditioning_tokenizer:
         dataset.text_conditioning_tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-small") # Used for text conditioning
@@ -94,7 +95,7 @@ class T5TTS_Model(ModelPT):
         if hasattr(cfg, 'text_tokenizer'):
             # For backward compatibility for English-only models
             with open_dict(cfg):
-                cfg.text_tokenizers = {"en": cfg.text_tokenizer}
+                cfg.text_tokenizers = {"english_phoneme": cfg.text_tokenizer}
                 del cfg['text_tokenizer']
         self.tokenizer = self._setup_tokenizer(cfg)
 
@@ -211,15 +212,18 @@ class T5TTS_Model(ModelPT):
         tokenizer_names = []
         for tokenizer_name in cfg.text_tokenizers:
             tokenizer_config = cfg.text_tokenizers[tokenizer_name]
-            text_tokenizer_kwargs = {}
-            if "g2p" in tokenizer_config:
-                text_tokenizer_kwargs["g2p"] = instantiate(tokenizer_config.g2p)
-            tokenizer = instantiate(tokenizer_config, **text_tokenizer_kwargs)
-            if mode == 'test' and hasattr(tokenizer, "set_phone_prob"):
-                tokenizer.set_phone_prob(1.0)
+            if tokenizer_config._target_ == 'AutoTokenizer':
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.pretrained_model)
+            else:
+                text_tokenizer_kwargs = {}
+                if "g2p" in tokenizer_config:
+                    text_tokenizer_kwargs["g2p"] = instantiate(tokenizer_config.g2p)
+                tokenizer = instantiate(tokenizer_config, **text_tokenizer_kwargs)
+                if mode == 'test' and hasattr(tokenizer, "set_phone_prob"):
+                    tokenizer.set_phone_prob(1.0)
             tokenizers.append(tokenizer)
             tokenizer_names.append(tokenizer_name)
-        aggregated_tokenizer = AggregatedTokenizer(tokenizers, tokenizer_names)
+        aggregated_tokenizer = AggregatedTTSTokenizer(tokenizers, tokenizer_names)
         return aggregated_tokenizer
 
     @property

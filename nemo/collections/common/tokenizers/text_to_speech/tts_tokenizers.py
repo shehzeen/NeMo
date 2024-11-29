@@ -17,7 +17,7 @@ import itertools
 import string
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import (
     get_grapheme_character_set,
@@ -36,7 +36,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tokenizer_utils import (
 )
 from nemo.utils import logging
 from nemo.utils.decorators import experimental
-
+from transformers import PreTrainedTokenizerBase
 
 class BaseTokenizer(ABC):
     PAD, BLANK, OOV = '<pad>', '<blank>', '<oov>'
@@ -1075,8 +1075,8 @@ class JapanesePhonemeTokenizer(BaseTokenizer):
 
         return [self._token2id[p] for p in ps]
 
-class AggregatedTokenizer:
-    def __init__(self, tokenizers: List[BaseTokenizer], tokenizer_names: List[str]):
+class AggregatedTTSTokenizer:
+    def __init__(self, tokenizers: List[Union[BaseTokenizer, PreTrainedTokenizerBase]], tokenizer_names: List[str]):
         """A simple aggregated tokenizer. Aggregates multiple tokenizers into one by combining (simply concatenating)
         their tokens into one vocabulary.
         Args:
@@ -1091,8 +1091,16 @@ class AggregatedTokenizer:
         for idx, tokenizer in enumerate(tokenizers):
             self.tokenizers[tokenizer_names[idx]] = tokenizer
             toknizer_offsets[tokenizer_names[idx]] = tokenizer_offset
-            tokens.extend(tokenizer.tokens)
-            tokenizer_offset += len(tokenizer.tokens)
+            if isinstance(tokenizer, BaseTokenizer):
+                tokens.extend(tokenizer.tokens)
+                num_tokens = len(tokenizer.tokens)
+            elif isinstance(tokenizer, PreTrainedTokenizerBase):
+                _tokens = list(tokenizer.get_vocab().keys())
+                tokens.extend(_tokens)
+                num_tokens = len(_tokens)
+            else:
+                raise ValueError("Tokenizers must be either BaseTokenizer or HuggingFace PreTrainedTokenizerBase.")
+            tokenizer_offset += num_tokens
 
         self.tokens = tokens
         self.tokenizer_names = tokenizer_names
