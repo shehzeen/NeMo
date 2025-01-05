@@ -99,6 +99,7 @@ def create_audio_context_record(text, audio_context, record_type):
     }
     if 'context_audio_codes_path' in audio_context:
         record['context_audio_codes_path'] = audio_context['context_audio_codes_path']
+        record['target_audio_codes_path'] = audio_context['context_audio_codes_path']
     
     return record
 
