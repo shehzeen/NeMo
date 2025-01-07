@@ -299,12 +299,13 @@ We pair a list of challenging texts with context audios from from Riva and Libri
 
 ```
 python scripts/t5tts/dpo/create_text_contextpairs.py \
---challenging_texts /Data/challenging_texts_nemollm.txt \
---riva_manifest /Data/CodecDatasets/speechllm_codecdatasets_new/manifests/rivaLindyRodney__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json \
---libri_manifest /Data/CodecDatasets/speechllm_codecdatasets_new/manifests/libri360__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json \
---riva_textcontext_manifest /Data/CodecDatasets/speechllm_codecdatasets_new/manifests/rivaLindyRodneyTextContext__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM.json \
---output_manifest /Data/CodecDatasets/speechllm_codecdatasets_new/manifests/dpo_textcontext_pairs.json \
---nsamples_perpair 6 \
+    --challenging_texts /Data/DPOPairsInputData/challenging_texts_nemollm.txt \
+    --regular_texts_for_audiocontext /Data/DPOPairsInputData/regular_texts_for_audiocontext.txt \
+    --regular_texts_for_textcontext /Data/DPOPairsInputData/regular_texts_for_textcontext.txt \
+    --audio_contexts /Data/DPOPairsInputData/audio_context_list.json \
+    --text_contexts /Data/DPOPairsInputData/text_context_list.txt \
+    --output_manifest /Data/DPOPairsInputData/text_context_pairs_v2.json \
+    --nsamples_perpair 6 ;
 ```
 Each pair is repeated `nsamples_perpair` times which specifies how many samples we want to generate for each pair. The output manifest serves as the input for the next step.
 
