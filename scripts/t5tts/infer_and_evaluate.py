@@ -13,30 +13,35 @@ import scipy.stats as stats
 
 dataset_meta_info = {
     'vctk': {
-        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/smallvctk__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM_simplet5_withcontextaudiopaths.json',
-        'audio_dir' : '/datap/misc/Datasets/VCTK-Corpus',
-        'feature_dir' : '/datap/misc/Datasets/VCTK-Corpus',
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/smallvctk__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM_simplet5_withcontextaudiopaths.json',
+        'audio_dir' : '/Data/VCTK-Corpus',
+        'feature_dir' : '/Data/VCTK-Corpus',
     },
     'riva_challenging': {
-        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/challengingLindyRodney__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM_simplet5_withContextAudioPaths.json',
-        'audio_dir' : '/datap/misc/Datasets/riva',
-        'feature_dir' : '/datap/misc/Datasets/riva',
-    },
-    'riva_challenging_nozeros': {
-        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/riva_challenging_nozeros.json',
-        'audio_dir' : '/datap/misc/Datasets/riva',
-        'feature_dir' : '/datap/misc/Datasets/riva',
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/challengingLindyRodney__phoneme__nemo_audio_21fps_8codebooks_2kcodes_v2bWithWavLM_simplet5_withContextAudioPaths.json',
+        'audio_dir' : '/Data/RivaData/riva',
+        'feature_dir' : '/Data/RivaData/riva',
     },
     'libri_val': {
-        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/libri360_val.json',
-        'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
-        'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/libri360_val.json',
+        'audio_dir' : '/Data/LibriTTS',
+        'feature_dir' : '/Data/LibriTTS',
     },
     'libri_unseen_val': {
-        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/dev_clean_withContextAudioPaths_evalset.json',
-        'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
-        'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
-    }
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/dev_clean_withContextAudioPaths_evalset.json',
+        'audio_dir' : '/Data/LibriTTS',
+        'feature_dir' : '/Data/LibriTTS',
+    },
+    'cissy_audiocontext': {
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/cissymanifests/combined_val.json',
+        'audio_dir' : '/Data/Ethovox/CissyJones',
+        'feature_dir' : '/Data/Ethovox/CissyJones',
+    },
+    'cissy_textcontext': {
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/cissymanifests/combined_val_textcontext.json',
+        'audio_dir' : '/Data/Ethovox/CissyJones',
+        'feature_dir' : '/Data/Ethovox/CissyJones',
+    },
 }
 
 def compute_mean_and_confidence_interval(metrics_list, metric_keys, confidence=0.90):
@@ -110,8 +115,10 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
                 load_16khz_audio=model.model_type == 'single_encoder_sv_tts',
                 use_text_conditioning_tokenizer=model.use_text_conditioning_encoder,
                 pad_context_text_to_max_duration=model.pad_context_text_to_max_duration,
-                context_duration_min=model.cfg.get('context_duration_min', 5.0),
-                context_duration_max=model.cfg.get('context_duration_max', 5.0),
+                context_duration_min=5.0,
+                context_duration_max=5.0,
+                # context_duration_min=model.cfg.get('context_duration_min', 5.0),
+                # context_duration_max=model.cfg.get('context_duration_max', 5.0),
             )
             test_dataset.text_tokenizer, test_dataset.text_conditioning_tokenizer = model._setup_tokenizers(model.cfg, mode='test')
 
@@ -119,7 +126,7 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
                 test_dataset,
                 batch_size=batch_size,
                 collate_fn=test_dataset.collate_fn,
-                num_workers=2,
+                num_workers=0,
                 shuffle=False
             )
 
@@ -180,21 +187,21 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
 
 def main():
     parser = argparse.ArgumentParser(description='Experiment Evaluation')
-    parser.add_argument('--hparams_files', type=str, default="/datap/misc/continuouscheckpoints_ks3ks3/multiencoder_small_sp_ks3_hparams.yaml,/datap/misc/continuouscheckpoints_ks3ks3/decodercontext_small_sp_ks3Correct_hparams.yaml")
-    parser.add_argument('--checkpoint_files', type=str, default="/datap/misc/continuouscheckpoints_ks3ks3/multiencoder_small_sp_ks3_epoch302.ckpt,/datap/misc/continuouscheckpoints_ks3ks3/decodercontext_small_sp_ks3Correct_epoch305.ckpt")
-    parser.add_argument('--codecmodel_path', type=str, default="/datap/misc/checkpoints/AudioCodec_21Hz_no_eliz.nemo")
-    parser.add_argument('--datasets', type=str, default="libri_unseen_val,riva_challenging_nozeros")
-    parser.add_argument('--base_exp_dir', type=str, default="/datap/misc/eosmount_4")
-    parser.add_argument('--draco_exp_dir', type=str, default="/lustre/fsw/llmservice_nemo_speechlm/users/pneekhara/gitrepos/experiments/NewT5TTS_FixedPosEmb/AllKernselSize3")
-    parser.add_argument('--server_address', type=str, default="pneekhara@login-eos02.eos.clusters.nvidia.com")
-    parser.add_argument('--exp_names', type=str, default="decodercontext_small_sp_ks3Correct_decdropout,decodercontext_small_sp_ks3Correct")
-    parser.add_argument('--local_ckpt_dir', type=str, default="/datap/misc/continuouscheckpoints_fixedposembrough")
-    parser.add_argument('--out_dir', type=str, default="/datap/misc/ContinuousEvalResults/KS3_KS3_ContinuousEval")
+    parser.add_argument('--hparams_files', type=str, default="/Data/T5Plus_Ckpts_New/continuouscheckpoints_ks3ks3/multiencoder_small_sp_ks3_hparams.yaml")
+    parser.add_argument('--checkpoint_files', type=str, default="/Data/T5Plus_Ckpts_New/continuouscheckpoints_ks3ks3/dpo_checkpoints/rpo_reward_normalized_multiencoder_small_epoch6.ckpt")
+    parser.add_argument('--codecmodel_path', type=str, default="/Data/Checkpoints/AudioCodec_21Hz_no_eliz.nemo")
+    parser.add_argument('--datasets', type=str, default="libri_val,libri_unseen_val")
+    parser.add_argument('--base_exp_dir', type=str, default="/Data/EOSExperiments")
+    parser.add_argument('--draco_exp_dir', type=str, default="/lustre/fsw/llmservice_nemo_speechlm/data/TTS/DPOData/TrainingsICML")
+    parser.add_argument('--server_address', type=str, default="shehzeenh@login-eos")
+    parser.add_argument('--exp_names', type=str, default="decodercontext_small_282_v2_goldenspeechalign_beta0.05,decodercontext_small_282_v2_generated_speechalign_beta0.05")
+    parser.add_argument('--local_ckpt_dir', type=str, default="/Data/T5Plus_Ckpts_New")
+    parser.add_argument('--out_dir', type=str, default="/Data/ICMLEvals_T5TTS/F2FEvals")
     parser.add_argument('--temperature', type=float, default=0.6)
     parser.add_argument('--use_cfg', action='store_true')
     parser.add_argument('--cfg_scale', type=float, default=1.0)
     parser.add_argument('--topk', type=int, default=80)
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_repeats', type=int, default=1)
     args = parser.parse_args()
 
