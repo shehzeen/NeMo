@@ -6,7 +6,6 @@ from pytorch_lightning.strategies import DDPStrategy
 import os
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
 import argparse
-from pytorch_lightning.utilities.rank_zero import rank_zero_only
 import nemo.collections.asr as nemo_asr
 from nemo.collections.tts.parts.utils.tts_dataset_utils import get_base_dir
 from pathlib import Path
@@ -137,7 +136,6 @@ if __name__ == "__main__":
     
     embedding_extractor = EmbeddingExtractor(args.save_dir)
 
-    # Dataset and DataLoader
     dataset = AudioDataset(
         file_list=file_list,
         base_audio_dir=args.audio_base_dir,
@@ -152,11 +150,9 @@ if __name__ == "__main__":
         collate_fn=dataset.collate_fn,
     )
 
-    # Run prediction (Saves the audio codes to files)
     trainer.predict(embedding_extractor, dataloaders=dataloader)
 
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
     print("Done")
-    # update_manifests(manifests, save_dir, dataset_names, args.codec_model_name)

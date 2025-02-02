@@ -1,9 +1,7 @@
-import json
 import random
 from pathlib import Path
 from nemo.collections.tts.parts.utils.tts_dataset_utils import get_base_dir
 import os
-import numpy as np
 import tqdm
 import torch
 import argparse
