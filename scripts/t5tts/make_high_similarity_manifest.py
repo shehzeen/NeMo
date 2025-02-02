@@ -49,6 +49,7 @@ if __name__ == "__main__":
         --audio_base_dir /Data/LibriTTS \
         --embeddings_save_dir /Data/tempspeakerembeddings \
         --n_candidates_per_record 100 \
+        --context_min_duration 5.0 \
         --similarity_threshold 0.6 ;
     """
     parser = argparse.ArgumentParser()
@@ -56,6 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("--audio_base_dir", type=str)
     parser.add_argument("--embeddings_save_dir", type=str)
     parser.add_argument("--n_candidates_per_record", type=int, default=100)
+    parser.add_argument("--context_min_duration", type=float, default=5.0)
     parser.add_argument("--similarity_threshold", type=float, default=0.6)
     args = parser.parse_args()
 
@@ -74,8 +76,11 @@ if __name__ == "__main__":
     filtered_records = []
     for ridx, record in enumerate(tqdm.tqdm(records)):
         speaker_records = speakerwise_records[record['speaker']]
-        candidate_records = random.sample(speaker_records, args.n_candidates_per_record)
-        candidate_records = [r for r in candidate_records if r['audio_filepath'] != record['audio_filepath']]
+        random.shuffle(speaker_records)
+        candidate_records = []
+        for speaker_record in speaker_records:
+            if speaker_record['audio_filepath'] != record['audio_filepath'] and speaker_record['duration'] >= args.context_min_duration:
+                candidate_records.append(speaker_record)
         
         if len(candidate_records) == 0:
             # Only one record for this speaker
