@@ -91,7 +91,7 @@ if __name__ == "__main__":
             record_copy = copy.deepcopy(record)
             record_copy['context_similarity'] = best_candidate_similarity
             record_copy['context_audio_filepath'] = best_candidate_record['audio_filepath']
-            record_copy['context_duration'] = best_candidate_record['duration']
+            record_copy['context_audio_duration'] = best_candidate_record['duration']
             filtered_records.append(record_copy)
 
     out_manifest_path = args.manifest.replace(".json", "_with_high_similarity_contexts.json")
