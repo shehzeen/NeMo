@@ -26,9 +26,10 @@ def find_best_candidate(record, candidate_records, audio_base_dir, base_dir_for_
         cand_rel_audio_path = Path(candidate_audio_file_path).relative_to(base_dir_for_file_id).with_suffix("")
         cand_rel_audio_path_as_text_id = str(cand_rel_audio_path).replace("/", "_")
         cand_embedding_fp = os.path.join(embeddings_save_dir, "{}.pt".format(cand_rel_audio_path_as_text_id))
-        cand_embedding = torch.load(cand_embedding_fp).cuda()
+        cand_embedding = torch.load(cand_embedding_fp)
         cand_embeddings.append(cand_embedding)
     cand_embeddings = torch.stack(cand_embeddings)
+    cand_embeddings = cand_embeddings.cuda()
 
     with torch.no_grad():
         similarities = torch.nn.functional.cosine_similarity(record_embedding.unsqueeze(0), cand_embeddings, dim=1)
@@ -89,7 +90,7 @@ if __name__ == "__main__":
         best_candidate_similarity, best_candidate_record = find_best_candidate(record, candidate_records, args.audio_base_dir, base_dir_for_file_id, args.embeddings_save_dir)
         if best_candidate_similarity > args.similarity_threshold:
             record_copy = copy.deepcopy(record)
-            record_copy['context_similarity'] = best_candidate_similarity
+            record_copy['context_speaker_similarity'] = best_candidate_similarity
             record_copy['context_audio_filepath'] = best_candidate_record['audio_filepath']
             record_copy['context_audio_duration'] = best_candidate_record['duration']
             filtered_records.append(record_copy)
