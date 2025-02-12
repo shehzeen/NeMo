@@ -82,6 +82,8 @@ if __name__ == "__main__":
         for speaker_record in speaker_records:
             if speaker_record['audio_filepath'] != record['audio_filepath'] and speaker_record['duration'] >= args.context_min_duration:
                 candidate_records.append(speaker_record)
+                if len(candidate_records) >= args.n_candidates_per_record:
+                    break
         
         if len(candidate_records) == 0:
             # Only one record for this speaker
