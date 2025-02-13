@@ -27,7 +27,7 @@ def compute_mean_and_confidence_interval(metrics_list, metric_keys, confidence=0
         metrics[key] = "{:.4f} +/- {:.4f}".format(mean, confidence_interval)
     return metrics
 
-def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature, topk, codecmodel_path, use_cfg, cfg_scale, batch_size, num_repeats=1):
+def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature, topk, codecmodel_path, use_cfg, cfg_scale, batch_size, sv_model, num_repeats=1):
     # import ipdb; ipdb.set_trace()
     model_cfg = OmegaConf.load(hparams_file).cfg
 
@@ -55,7 +55,7 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
     # import ipdb; ipdb.set_trace()
 
     checkpoint_name = checkpoint_file.split("/")[-1].split(".ckpt")[0]
-    checkpoint_name = "{}_Temp{}_Topk{}_Cfg_{}_{}".format(checkpoint_name, temperature, topk, use_cfg, cfg_scale)
+    checkpoint_name = "{}_Temp{}_Topk{}_Cfg_{}_{}_svmodel_{}".format(checkpoint_name, temperature, topk, use_cfg, cfg_scale, sv_model)
     dataset_meta_info = evalset_config.dataset_meta_info
     for dataset in datasets:
         metrics_n_repeated = []
@@ -147,6 +147,7 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
                 dataset_meta[dataset]['audio_dir'],
                 audio_dir,
                 language=language,
+                sv_model_type=sv_model
             )
             metrics_n_repeated.append(metrics)
             with open(os.path.join(eval_dir, f"{dataset}_metrics_{repeat_idx}.json"), "w") as f:
@@ -196,6 +197,7 @@ def main():
     parser.add_argument('--cfg_scale', type=float, default=1.0)
     parser.add_argument('--topk', type=int, default=80)
     parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--sv_model', type=str, default="titanet") # titanet, wavlm
     parser.add_argument('--num_repeats', type=int, default=1)
     args = parser.parse_args()
 
@@ -217,6 +219,7 @@ def main():
                 args.use_cfg,
                 args.cfg_scale,
                 args.batch_size,
+                args.sv_model,
                 args.num_repeats
             )
         return
@@ -268,6 +271,7 @@ def main():
                 args.codecmodel_path, 
                 args.use_cfg,
                 args.cfg_scale,
+                args.sv_model,
                 args.batch_size
             )
             

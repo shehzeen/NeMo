@@ -234,7 +234,7 @@ def main():
     if args.evalset is not None:
         dataset_meta_info = evalset_config.dataset_meta_info
         assert args.evalset in dataset_meta_info
-        args.manifest_path = dataset_meta_info[args.evalset]['manifest']
+        args.manifest_path = dataset_meta_info[args.evalset]['manifest_path']
         args.audio_dir = dataset_meta_info[args.evalset]['audio_dir']
     
     evaluate(args.manifest_path, args.audio_dir, args.generated_audio_dir, args.whisper_language, sv_model_type="wavlm")
