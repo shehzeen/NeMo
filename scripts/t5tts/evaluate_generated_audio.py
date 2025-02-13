@@ -101,6 +101,7 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
         feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
         speaker_verification_model = WavLMForXVector.from_pretrained('microsoft/wavlm-base-plus-sv').to(device).eval()
     else:
+        feature_extractor = None
         speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large') 
         speaker_verification_model = speaker_verification_model.to(device)
         speaker_verification_model.eval()
