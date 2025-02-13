@@ -63,7 +63,8 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
         for repeat_idx in range(num_repeats):
             eval_dir = os.path.join(out_dir, "{}_{}".format(checkpoint_name, dataset))
             audio_dir = os.path.join(eval_dir, "audio")
-            os.makedirs(audio_dir, exist_ok=True) 
+            pred_audio_dir = os.path.join(audio_dir, f"repeat_{repeat_idx}")
+            os.makedirs(pred_audio_dir, exist_ok=True)
             language = dataset_meta_info[dataset].get('whisper_language', 'en')
             dataset_meta_for_dl = copy.deepcopy(dataset_meta_info[dataset])
             for key in ["whisper_language", "load_cached_codes_if_available"]:
@@ -128,7 +129,7 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
                 for idx in range(predicted_audio.size(0)):
                     predicted_audio_np = predicted_audio[idx].float().detach().cpu().numpy()
                     predicted_audio_np = predicted_audio_np[:predicted_audio_lens[idx]]
-                    audio_path = os.path.join(audio_dir, f"predicted_audio_{item_idx}.wav")
+                    audio_path = os.path.join(pred_audio_dir, f"predicted_audio_{item_idx}.wav")
                     sf.write(audio_path, predicted_audio_np, model.cfg.sample_rate)
                     context_audio_path = manifest_records[item_idx].get('context_audio_filepath', None)
                     target_audio_path = manifest_records[item_idx].get('audio_filepath', None)
@@ -145,7 +146,7 @@ def run_inference(hparams_file, checkpoint_file, datasets, out_dir, temperature,
             metrics, filewise_metrics = evaluate_generated_audio.evaluate(
                 dataset_meta[dataset]['manifest_path'],
                 dataset_meta[dataset]['audio_dir'],
-                audio_dir,
+                pred_audio_dir,
                 language=language,
             )
             metrics_n_repeated.append(metrics)
