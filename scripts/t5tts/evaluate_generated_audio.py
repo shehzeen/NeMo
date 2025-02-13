@@ -11,7 +11,7 @@ from nemo.collections.asr.metrics.wer import word_error_rate_detail
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import librosa
 import evalset_config
-
+from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
 
 def find_sample_audios(audio_dir):
     file_list = []
@@ -64,7 +64,20 @@ def transcribe_with_whisper(whisper_model, whisper_processor, audio_path, langua
     result = transcription[0]
     return result
 
-def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en"):
+def extract_embedding(model, extractor, audio_path, device, sv_model_type):
+    speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
+    
+    if sv_model_type == "wavlm":
+        inputs = extractor(speech_array, sampling_rate=sampling_rate, return_tensors="pt").input_values.to(device)
+        with torch.no_grad():
+            embeddings = model(inputs).embeddings
+    else:  # Titanet
+        with torch.no_grad():
+            embeddings = model.get_embedding(audio_path).squeeze()
+    
+    return embeddings.squeeze()
+
+def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_model_type="titanet"):
     audio_file_lists = find_sample_audios(generated_audio_dir)
     records = read_manifest(manifest_path)
     assert len(audio_file_lists) == len(records)
@@ -84,13 +97,19 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en"):
         whisper_model = whisper_model.to(device)
         whisper_model.eval()
 
-    speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large') 
-    speaker_verification_model = speaker_verification_model.to(device)
-    speaker_verification_model.eval()
+    if sv_model_type == "wavlm":
+        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
+        speaker_verification_model = WavLMForXVector.from_pretrained('microsoft/wavlm-base-plus-sv').to(device).eval()
+    else:
+        speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large') 
+        speaker_verification_model = speaker_verification_model.to(device)
+        speaker_verification_model.eval()
 
     speaker_verification_model_alternate = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_small') 
     speaker_verification_model_alternate = speaker_verification_model_alternate.to(device)
     speaker_verification_model_alternate.eval()
+
+    
 
     filewise_metrics = []
     pred_texts = []
@@ -137,8 +156,8 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en"):
         pred_context_ssim = 0.0
         gt_context_ssim = 0.0
         with torch.no_grad():
-            gt_speaker_embedding = speaker_verification_model.get_embedding(gt_audio_filepath).squeeze()
-            pred_speaker_embedding = speaker_verification_model.get_embedding(pred_audio_filepath).squeeze()
+            gt_speaker_embedding = extract_embedding(speaker_verification_model, feature_extractor, gt_audio_filepath, device, sv_model_type)
+            pred_speaker_embedding = extract_embedding(speaker_verification_model, feature_extractor, pred_audio_filepath, device, sv_model_type)
             pred_gt_ssim = torch.nn.functional.cosine_similarity(gt_speaker_embedding, pred_speaker_embedding, dim=0).item()
 
             gt_speaker_embedding_alternate = speaker_verification_model_alternate.get_embedding(gt_audio_filepath).squeeze()
@@ -146,7 +165,7 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en"):
             pred_gt_ssim_alternate = torch.nn.functional.cosine_similarity(gt_speaker_embedding_alternate, pred_speaker_embedding_alternate, dim=0).item()
 
             if context_audio_filepath is not None:
-                context_speaker_embedding = speaker_verification_model.get_embedding(context_audio_filepath).squeeze()
+                context_speaker_embedding = extract_embedding(speaker_verification_model, feature_extractor, context_audio_filepath, device, sv_model_type)
                 context_speaker_embedding_alternate = speaker_verification_model_alternate.get_embedding(context_audio_filepath).squeeze()
 
                 pred_context_ssim = torch.nn.functional.cosine_similarity(pred_speaker_embedding, context_speaker_embedding, dim=0).item()
@@ -218,7 +237,7 @@ def main():
         args.manifest_path = dataset_meta_info[args.evalset]['manifest']
         args.audio_dir = dataset_meta_info[args.evalset]['audio_dir']
     
-    evaluate(args.manifest_path, args.audio_dir, args.generated_audio_dir, args.whisper_language)
+    evaluate(args.manifest_path, args.audio_dir, args.generated_audio_dir, args.whisper_language, sv_model_type="wavlm")
 
     
 
