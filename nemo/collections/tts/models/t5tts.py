@@ -744,8 +744,8 @@ class T5TTS_Model(ModelPT):
                 )
             
             for idx in range(max_decoder_steps):
-                if idx % 20 == 0:
-                    print(f"Decoding timestep {idx}")
+                # if idx % 20 == 0:
+                #     print(f"Decoding timestep {idx}")
                 audio_codes_embedded = self.embed_audio_tokens(audio_codes_input)
                 if context_tensors['additional_decoder_input'] is not None:
                     _audio_codes_embedded = torch.cat([context_tensors['additional_decoder_input'], audio_codes_embedded], dim=1)
@@ -1416,8 +1416,6 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             labels: Labels for which to compute the log probabilities. Label tokens with a value of -100 are ignored. Shape: (batch_size, sequence_length)
             average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
 
-        Returns:
-            A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
         """
         per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
         per_token_logps = per_token_logps * loss_mask
@@ -1426,9 +1424,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
     def repeat_items_in_batch(self, batch, num_repeats):
         repeated_batch = {}
         for key, value in batch.items():
-            print(key)
             if isinstance(value, torch.Tensor):
-                print(value.size())
                 repeated_value = value.repeat_interleave(num_repeats, dim=0)
             elif isinstance(value, list):
                 repeated_value = []
@@ -1470,8 +1466,8 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         audio_batch = []
         audio_lengths = []
         for filepath in filepaths:
-            if not filepath.startswith("/"):
-                filepath = "/Data/LibriTTS/" + filepath
+            # if not filepath.startswith("/"):
+            #     filepath = "/Data/LibriTTS/" + filepath
             audio, sr = sf.read(filepath)
             if sr != 16000:
                 audio = librosa.core.resample(audio, orig_sr=sr, target_sr=16000)
@@ -1499,7 +1495,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
         predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens = self.infer_batch(
             batch_repeated,
-            max_decoder_steps=self.cfg.get('max_decoder_steps', 50),
+            max_decoder_steps=self.cfg.get('max_decoder_steps', 430),
             temperature=temperature,
             topk=topk,
             use_cfg=use_cfg,
@@ -1559,6 +1555,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
                 'spk_similarity': float(spk_similarity),
                 'pred_transcript': pred_transcript,
                 'gt_transcript': gt_transcript,
+                'codes_len': predicted_codes_lens[idx].item(),
             }
             with open(os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}_metrics.json'), 'w') as f:
                 json.dump(item_metrics, f)
@@ -1566,22 +1563,34 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             batch_metrics.append(item_metrics)
 
         num_groups = len(batch['audio_filepaths'])
+        best_cer_achievable = 0.0 # Examples with this CER will have CER reward of 1
+        worst_cer_allowed = 0.60 # Examples with this CER will have CER or higher will have CER reward of 0
+        best_ssim_achievable = 0.90 # Examples with this speaker similarity or higher will have SSIM reward of 1
+        worst_ssim_allowed = 0.50 # Examples with this speaker similarity or lower will have SSIM reward of 0
+
         for group_idx in range(num_groups):
             group_start_idx = group_idx * num_generations_per_item
             group_end_idx = group_start_idx + num_generations_per_item
-            group_metrics = batch_metrics[group_start_idx:group_end_idx]
-            group_min_cer = min([x['cer_gt'] for x in group_metrics])
-            group_max_spk_similarity = max([x['spk_similarity'] for x in group_metrics])
-            group_max_cer = max([x['cer_gt'] for x in group_metrics])
-            group_min_spk_similarity = min([x['spk_similarity'] for x in group_metrics])
             group_rewards = []
             mean_reward = 0
+            eps = 0.0001
             for idx in range(group_start_idx, group_end_idx):
                 # Lower CER and higher speaker similarity is better, means high advantage
                 # Advantage for best CER and best speaker similarity should be 1
-                cer_reward = 1 - (batch_metrics[idx]['cer_gt'] - group_min_cer) / (group_max_cer - group_min_cer)
-                spk_similarity_reward = 1 - (group_max_spk_similarity - batch_metrics[idx]['spk_similarity']) / (group_max_spk_similarity - group_min_spk_similarity)
-                batch_metrics[idx]['reward'] = cer_reward + spk_similarity_reward
+                item_cer = batch_metrics[idx]['cer_gt']
+                item_ssim = batch_metrics[idx]['spk_similarity']
+                item_cer = min( max(item_cer, best_cer_achievable), worst_cer_allowed)
+                item_ssim = max( min(item_ssim, best_ssim_achievable), worst_ssim_allowed)
+                
+                cer_reward = 1 - (item_cer - best_cer_achievable + eps) / (worst_cer_allowed - best_cer_achievable + eps)
+                spk_similarity_reward = 1 - (best_ssim_achievable - item_ssim + eps) / (best_ssim_achievable - worst_ssim_allowed + eps)
+
+                batch_metrics[idx]['reward'] = (cer_reward + spk_similarity_reward)/2.0
+                
+                if (batch_metrics[idx]['codes_len'] >= 425) or (batch_metrics[idx]['codes_len'] <= 3): # TODO: Remove hardcode
+                    # Did not complete the sentence
+                    batch_metrics[idx]['reward'] = 0.0
+                print("Item idx: ", idx, " CER: ", item_cer, " SSIM: ", item_ssim, " Reward: ", batch_metrics[idx]['reward'], " Codes len: ", batch_metrics[idx]['codes_len'])
                 batch_metrics[idx]['cer_reward'] = cer_reward
                 batch_metrics[idx]['spk_similarity_reward'] = spk_similarity_reward
                 mean_reward += batch_metrics[idx]['reward']
@@ -1595,8 +1604,9 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         advantages = [x['advantage'] for x in batch_metrics]
         advantages = torch.tensor(advantages, device=self.device)
-
+        print("Mean reward: ", mean_reward)
         return {
+            'mean_reward': torch.tensor(mean_reward, device=self.device),
             'batch_repeated': batch_repeated,
             'metrics': batch_metrics,
             'predicted_codes': predicted_codes,
@@ -1611,14 +1621,15 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         batch_repeated = generated_codes_and_metrics['batch_repeated']
         predicted_codes = generated_codes_and_metrics['predicted_codes'] # B, 8, T
         predicted_codes_lens = generated_codes_and_metrics['predicted_codes_lens'] # B, 8
-        
+        predicted_codes = predicted_codes[:,:,:predicted_codes_lens.max()]
+
         advantages = generated_codes_and_metrics['advantages'] # B * 8
         # Add extra tokens for BOS and EOS
         bos_tensor = torch.full((predicted_codes.size(0), predicted_codes.size(1), 1), self.audio_bos_id, dtype=predicted_codes.dtype, device=predicted_codes.device)
         padding_tensor = torch.full((predicted_codes.size(0), predicted_codes.size(1), 1), 0, dtype=predicted_codes.dtype, device=predicted_codes.device)
         predicted_codes = torch.cat([bos_tensor, predicted_codes, padding_tensor], dim=2)
         for idx in range(predicted_codes.size(0)):
-            predicted_codes[idx, :, predicted_codes_lens[idx]] = self.audio_eos_id # Accounts for BOS
+            predicted_codes[idx, :, predicted_codes_lens[idx]+1] = self.audio_eos_id # Accounts for BOS
         batch_repeated['audio_codes'] = predicted_codes
         batch_repeated['audio_codes_lens'] = predicted_codes_lens + 2 # Accounts for BOS and EOS
         if 'audio' in batch_repeated:
@@ -1645,7 +1656,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             
             # https://github.com/huggingface/trl/blob/ffcb9f4aee725a2bd072d0387afe68a4b1c7967c/trl/trainer/grpo_trainer.py#L703
             per_token_codebook_kl = torch.exp(per_token_ref_codebook_log_probs - per_token_codebook_log_probs) - (per_token_ref_codebook_log_probs - per_token_codebook_log_probs) - 1
-            per_token_loss = torch.exp(per_token_ref_codebook_log_probs - per_token_ref_codebook_log_probs.detach()) * advantages.unsqueeze(1)
+            per_token_loss = torch.exp(per_token_codebook_log_probs - per_token_codebook_log_probs.detach()) * advantages.unsqueeze(1)
             per_token_loss = -(per_token_loss - self.cfg.grpo_beta * per_token_codebook_kl)
             codebook_loss = ((per_token_loss * policy_model_outputs['loss_mask']).sum(dim=1) / policy_model_outputs['loss_mask'].sum(dim=1)).mean()
             codebook_kl_loss_mean = ((per_token_codebook_kl * policy_model_outputs['loss_mask']).sum(dim=1) / policy_model_outputs['loss_mask'].sum(dim=1)).mean()
@@ -1658,27 +1669,33 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         
         total_loss /= self.cfg.num_audio_codebooks
-            
+        
         return {
+            'mean_reward': generated_codes_and_metrics['mean_reward'],
             'loss': total_loss,
             'kl_loss': total_kl,
+            'batch_metrics': generated_codes_and_metrics['metrics'],
         }
 
     def training_step(self, batch, batch_idx):
         po_outputs = self.process_batch_online_po(batch)
         self.log('train_loss', po_outputs['loss'], prog_bar=True, sync_dist=True)
         self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_mean_reward', po_outputs['mean_reward'], prog_bar=True, sync_dist=True)
         return po_outputs['loss']
     
     def validation_step(self, batch, batch_idx):
         po_outputs = self.process_batch_online_po(batch)
-        
+        batch_metrics = po_outputs['batch_metrics']
+        mean_reward = po_outputs['mean_reward']
         val_loss = po_outputs['loss']
         val_kl_loss = po_outputs['kl_loss']
         
         self.validation_step_outputs.append({
+            'mean_reward': mean_reward,
             'val_loss': val_loss,
-            'val_kl_loss': val_kl_loss
+            'val_kl_loss': val_kl_loss,
+            'batch_metrics': batch_metrics,
         })
     
     def on_validation_epoch_end(self):
@@ -1694,7 +1711,25 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         val_loss = collect("val_loss")
         val_kl_loss = collect("val_kl_loss")
+        mean_reward = collect("mean_reward")
+
         self.log("val_loss", val_loss, prog_bar=True, sync_dist=True)
         self.log("val_kl_loss", val_kl_loss, prog_bar=True, sync_dist=True)
+        self.log("val_mean_reward", mean_reward, prog_bar=True, sync_dist=True)
+
+        mean_metrics = {}
+        for val_output in self.validation_step_outputs:
+            batch_metrics = val_output['batch_metrics']
+            for item_metrics in batch_metrics:
+                for key, value in item_metrics.items():
+                    if "transcript" not in key:
+                        if key not in mean_metrics:
+                            mean_metrics[key] = []
+                        mean_metrics[key].append(value)
+        
+        for key, values in mean_metrics.items():
+            mean_metrics[key] = np.mean(values)
+            self.log(f"val_{key}", mean_metrics[key], prog_bar=True, sync_dist=True)
+
         self.validation_step_outputs.clear()
         
