@@ -1486,8 +1486,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         
         return speaker_embeddings
     
-    def generate_and_reward(self, batch):
-        num_generations_per_item = self.cfg.get('num_generations_per_item', 6)
+    def generate_and_reward(self, batch, num_generations_per_item):
         batch_repeated = self.repeat_items_in_batch(batch, num_generations_per_item)
         temperature = self.cfg.get('inference_temperature', 0.7)
         topk = self.cfg.get('inference_topk', 80)
@@ -1614,9 +1613,9 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             'advantages': advantages,
         }
     
-    def process_batch_online_po(self, batch):
+    def process_batch_online_po(self, batch, n_generations_per_item):
         with torch.no_grad():
-            generated_codes_and_metrics = self.generate_and_reward(batch)
+            generated_codes_and_metrics = self.generate_and_reward(batch, n_generations_per_item)
 
         batch_repeated = generated_codes_and_metrics['batch_repeated']
         predicted_codes = generated_codes_and_metrics['predicted_codes'] # B, 8, T
@@ -1678,14 +1677,15 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         }
 
     def training_step(self, batch, batch_idx):
-        po_outputs = self.process_batch_online_po(batch)
+        n_generations_per_item = self.cfg.get('n_generations_per_item', 6)
+        po_outputs = self.process_batch_online_po(batch, n_generations_per_item)
         self.log('train_loss', po_outputs['loss'], prog_bar=True, sync_dist=True)
         self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
         self.log('train_mean_reward', po_outputs['mean_reward'], prog_bar=True, sync_dist=True)
         return po_outputs['loss']
     
     def validation_step(self, batch, batch_idx):
-        po_outputs = self.process_batch_online_po(batch)
+        po_outputs = self.process_batch_online_po(batch, 1)
         batch_metrics = po_outputs['batch_metrics']
         mean_reward = po_outputs['mean_reward']
         val_loss = po_outputs['loss']

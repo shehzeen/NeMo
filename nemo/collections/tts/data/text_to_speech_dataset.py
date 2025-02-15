@@ -409,6 +409,9 @@ class T5TTSDataset(TextToSpeechDataset):
             example['audio_codes'] = audio_codes
             example['audio_codes_len'] = audio_codes_len
             example['audio_filepath'] = audio_codes_path
+            if 'audio_filepath' in data.manifest_entry:
+                # If audio_filepath is available, then use the actual audio file path.
+                example['audio_filepath'] = data.manifest_entry['audio_filepath']
         else:
             # Only load audio if codes are not available
             audio_array, _, audio_filepath_rel = load_audio(
