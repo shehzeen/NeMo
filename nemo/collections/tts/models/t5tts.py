@@ -1541,6 +1541,8 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             gt_speaker_embeddings = self.get_speaker_embeddings_from_filepaths(batch_repeated['audio_filepaths'])
 
         batch_metrics = []
+        cer_reward_weight = self.cfg.get('cer_reward_weight', 0.5)
+        ssim_reward_weight = 1.0 - cer_reward_weight
         for idx in range(predicted_audio.size(0)):
             audio_path = predicted_audio_paths[idx]
             item_idx = idx
@@ -1569,10 +1571,10 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             batch_metrics.append(item_metrics)
 
         num_groups = len(batch['audio_filepaths'])
-        best_cer_achievable = 0.0 # Examples with this CER will have CER reward of 1
-        worst_cer_allowed = 0.20 # Examples with this CER or higher will have CER reward of 0
-        best_ssim_achievable = 0.90 # Examples with this speaker similarity or higher will have SSIM reward of 1
-        worst_ssim_allowed = 0.50 # Examples with this speaker similarity or lower will have SSIM reward of 0
+        best_cer_achievable = self.cfg.get("reward_best_cer", 0.0) # Examples with this CER will have CER reward of 1
+        worst_cer_allowed = self.cfg.get("reward_worst_cer", 0.2) # Examples with this CER or higher will have CER reward of 0
+        best_ssim_achievable = self.cfg.get("reward_best_ssim", 0.9) # Examples with this speaker similarity or higher will have SSIM reward of 1
+        worst_ssim_allowed = self.cfg.get("reward_worst_ssim", 0.5) # Examples with this speaker similarity or lower will have SSIM reward of 0
 
         for group_idx in range(num_groups):
             group_start_idx = group_idx * num_generations_per_item
@@ -1591,7 +1593,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
                 cer_reward = 1 - (item_cer - best_cer_achievable + eps) / (worst_cer_allowed - best_cer_achievable + eps)
                 spk_similarity_reward = 1 - (best_ssim_achievable - item_ssim + eps) / (best_ssim_achievable - worst_ssim_allowed + eps)
 
-                batch_metrics[idx]['reward'] = (cer_reward + spk_similarity_reward)/2.0
+                batch_metrics[idx]['reward'] = cer_reward * cer_reward_weight + spk_similarity_reward * ssim_reward_weight
                 
                 if (batch_metrics[idx]['codes_len'] >= 425) or (batch_metrics[idx]['codes_len'] <= 3): # TODO: Remove hardcode
                     # Did not complete the sentence
