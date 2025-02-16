@@ -46,6 +46,7 @@ from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer
 from nemo.collections.tts.data.text_to_speech_dataset_lhotse import build_lhotse_dataloader, T5TTSLhotseDataset
+import random
 
 HAVE_WANDB = True
 try:
@@ -1486,12 +1487,18 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         
         return speaker_embeddings
     
-    def generate_and_reward(self, batch, num_generations_per_item):
+    def generate_and_reward(self, batch, num_generations_per_item, mode='train'):
         batch_repeated = self.repeat_items_in_batch(batch, num_generations_per_item)
         temperature = self.cfg.get('inference_temperature', 0.7)
         topk = self.cfg.get('inference_topk', 80)
-        use_cfg = self.cfg.get('inference_use_cfg', False)
-        cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
+        use_cfg = False
+        cfg_scale = 1.0
+        inference_cfg_prob = self.cfg.get('inference_cfg_prob', 0.0)
+        if (inference_cfg_prob == 1.0) or (inference_cfg_prob > 0.0 and mode == 'train'):
+            # Randomly set use_cfg based on the given probability
+            use_cfg = random.random() < self.cfg.inference_cfg_prob
+            cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
+        print("use_cfg", use_cfg)
         predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens = self.infer_batch(
             batch_repeated,
             max_decoder_steps=self.cfg.get('max_decoder_steps', 430),
@@ -1613,9 +1620,9 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             'advantages': advantages,
         }
     
-    def process_batch_online_po(self, batch, n_generations_per_item):
+    def process_batch_online_po(self, batch, n_generations_per_item, mode='train'):
         with torch.no_grad():
-            generated_codes_and_metrics = self.generate_and_reward(batch, n_generations_per_item)
+            generated_codes_and_metrics = self.generate_and_reward(batch, n_generations_per_item, mode)
 
         batch_repeated = generated_codes_and_metrics['batch_repeated']
         predicted_codes = generated_codes_and_metrics['predicted_codes'] # B, 8, T
@@ -1668,7 +1675,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         
         total_loss /= self.cfg.num_audio_codebooks
-        
+        print("Total kl", total_kl, n_generations_per_item)
         return {
             'mean_reward': generated_codes_and_metrics['mean_reward'],
             'loss': total_loss,
@@ -1685,7 +1692,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         return po_outputs['loss']
     
     def validation_step(self, batch, batch_idx):
-        po_outputs = self.process_batch_online_po(batch, 1)
+        po_outputs = self.process_batch_online_po(batch, 1, mode='val')
         batch_metrics = po_outputs['batch_metrics']
         mean_reward = po_outputs['mean_reward']
         val_loss = po_outputs['loss']
