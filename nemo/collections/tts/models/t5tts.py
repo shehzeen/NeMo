@@ -1570,7 +1570,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         num_groups = len(batch['audio_filepaths'])
         best_cer_achievable = 0.0 # Examples with this CER will have CER reward of 1
-        worst_cer_allowed = 0.60 # Examples with this CER will have CER or higher will have CER reward of 0
+        worst_cer_allowed = 0.20 # Examples with this CER or higher will have CER reward of 0
         best_ssim_achievable = 0.90 # Examples with this speaker similarity or higher will have SSIM reward of 1
         worst_ssim_allowed = 0.50 # Examples with this speaker similarity or lower will have SSIM reward of 0
 
