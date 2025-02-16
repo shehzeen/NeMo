@@ -1621,8 +1621,17 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         }
     
     def process_batch_online_po(self, batch, n_generations_per_item, mode='train'):
+        use_kv_cache_during_online_po = self.cfg.get("use_kv_cache_during_online_po", False)
+        if use_kv_cache_during_online_po:
+            self.use_kv_cache_for_inference = True
+            self.t5_decoder.reset_cache(use_cache=True)
+        
         with torch.no_grad():
             generated_codes_and_metrics = self.generate_and_reward(batch, n_generations_per_item, mode)
+            
+        if use_kv_cache_during_online_po:
+            self.use_kv_cache_for_inference = False
+            self.t5_decoder.reset_cache(use_cache=False)
 
         batch_repeated = generated_codes_and_metrics['batch_repeated']
         predicted_codes = generated_codes_and_metrics['predicted_codes'] # B, 8, T
