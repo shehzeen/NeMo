@@ -1394,6 +1394,8 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         self.eval_speaker_verification_model.freeze()
         self.eval_speaker_verification_model.eval()
 
+        self.use_kv_cache_for_inference = True
+
         if cfg.get('load_whisper_model', False):
             from transformers import WhisperProcessor, WhisperForConditionalGeneration
             self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
