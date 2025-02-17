@@ -1583,8 +1583,8 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             mean_reward = 0
             eps = 0.0001
             for idx in range(group_start_idx, group_end_idx):
-                # Lower CER and higher speaker similarity is better, means high advantage
-                # Advantage for best CER and best speaker similarity should be 1
+                # Lower CER and higher speaker similarity is better, means high reward
+                # Reward for best CER and best speaker similarity should be 1
                 item_cer = batch_metrics[idx]['cer_gt']
                 item_ssim = batch_metrics[idx]['spk_similarity']
                 item_cer = min( max(item_cer, best_cer_achievable), worst_cer_allowed)
@@ -1595,8 +1595,8 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
                 batch_metrics[idx]['reward'] = cer_reward * cer_reward_weight + spk_similarity_reward * ssim_reward_weight
                 
-                if (batch_metrics[idx]['codes_len'] >= 425) or (batch_metrics[idx]['codes_len'] <= 3): # TODO: Remove hardcode
-                    # Did not complete the sentence
+                if (batch_metrics[idx]['codes_len'] >= 425) or (batch_metrics[idx]['codes_len'] <= 3): # TODO: Remove hardcoded lengths
+                    # This means it did not complete the sentence or generated an extremely short sentence
                     batch_metrics[idx]['reward'] = 0.0
                 print("Item idx: ", idx, " CER: ", item_cer, " SSIM: ", item_ssim, " Reward: ", batch_metrics[idx]['reward'], " Codes len: ", batch_metrics[idx]['codes_len'])
                 batch_metrics[idx]['cer_reward'] = cer_reward
@@ -1637,10 +1637,10 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         batch_repeated = generated_codes_and_metrics['batch_repeated']
         predicted_codes = generated_codes_and_metrics['predicted_codes'] # B, 8, T
-        predicted_codes_lens = generated_codes_and_metrics['predicted_codes_lens'] # B, 8
+        predicted_codes_lens = generated_codes_and_metrics['predicted_codes_lens'] # B
         predicted_codes = predicted_codes[:,:,:predicted_codes_lens.max()]
 
-        advantages = generated_codes_and_metrics['advantages'] # B * 8
+        advantages = generated_codes_and_metrics['advantages'] # B
         # Add extra tokens for BOS and EOS
         bos_tensor = torch.full((predicted_codes.size(0), predicted_codes.size(1), 1), self.audio_bos_id, dtype=predicted_codes.dtype, device=predicted_codes.device)
         padding_tensor = torch.full((predicted_codes.size(0), predicted_codes.size(1), 1), 0, dtype=predicted_codes.dtype, device=predicted_codes.device)
