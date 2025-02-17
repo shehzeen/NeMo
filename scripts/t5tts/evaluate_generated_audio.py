@@ -77,7 +77,7 @@ def extract_embedding(model, extractor, audio_path, device, sv_model_type):
     
     return embeddings.squeeze()
 
-def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_model_type="titanet"):
+def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_model_type="titanet", asr_model_name="stt_en_conformer_transducer_large"):
     audio_file_lists = find_sample_audios(generated_audio_dir)
     records = read_manifest(manifest_path)
     assert len(audio_file_lists) == len(records)
@@ -85,9 +85,11 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
     device = "cuda"
 
     if language == "en":
-        asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
-                        model_name="stt_en_conformer_transducer_large"
-                    )
+        if asr_model_name == "stt_en_conformer_transducer_large":
+            asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name="stt_en_conformer_transducer_large")
+        elif asr_model_name == "nvidia/parakeet-ctc-0.6b":
+            asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name="nvidia/parakeet-ctc-0.6b")
+            
         # asr_model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained(model_name="nvidia/parakeet-tdt-1.1b")
         asr_model = asr_model.to(device)
         asr_model.eval()
@@ -127,9 +129,14 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
         pred_audio_filepath = audio_file_lists[ridx]
         if language == "en":
             with torch.no_grad():
-                pred_text = asr_model.transcribe([pred_audio_filepath])[0][0]
+                if asr_model_name == "stt_en_conformer_transducer_large":
+                    pred_text = asr_model.transcribe([pred_audio_filepath])[0][0]
+                    gt_audio_text = asr_model.transcribe([gt_audio_filepath])[0][0]
+                else:
+                    pred_text = asr_model.transcribe([pred_audio_filepath])[0]
+                    gt_audio_text = asr_model.transcribe([gt_audio_filepath])[0]
+
                 pred_text = process_text(pred_text)
-                gt_audio_text = asr_model.transcribe([gt_audio_filepath])[0][0]
                 gt_audio_text = process_text(gt_audio_text)
         else:
             pred_text = transcribe_with_whisper(whisper_model, whisper_processor, pred_audio_filepath, language, device)
@@ -238,7 +245,7 @@ def main():
         args.manifest_path = dataset_meta_info[args.evalset]['manifest_path']
         args.audio_dir = dataset_meta_info[args.evalset]['audio_dir']
     
-    evaluate(args.manifest_path, args.audio_dir, args.generated_audio_dir, args.whisper_language, sv_model_type="wavlm")
+    evaluate(args.manifest_path, args.audio_dir, args.generated_audio_dir, args.whisper_language, sv_model_type="wavlm", asr_model_name="nvidia/parakeet-ctc-0.6b")
 
     
 
