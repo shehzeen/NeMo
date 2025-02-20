@@ -1402,7 +1402,8 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
     
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state_dict = super().state_dict(destination, prefix, keep_vars)
-        keys_substrings_to_exclude = ['_speaker_verification_model', '_codec_model', '_reference_model']
+        keys_substrings_to_exclude = ['_speaker_verification_model', '_codec_model', '_reference_model', 
+                                      'eval_asr_model',  'eval_speaker_verification_model', 'whisper_model']
         for key in list(state_dict.keys()):
             if any([substring in key for substring in keys_substrings_to_exclude]):
                 del state_dict[key]
@@ -1414,9 +1415,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
 
         Args:
             logits: Logits of the model (unnormalized). Shape: (batch_size, sequence_length, vocab_size)
-            labels: Labels for which to compute the log probabilities. Label tokens with a value of -100 are ignored. Shape: (batch_size, sequence_length)
-            average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
-
+            labels: Labels for which to compute the log probabilities.
         """
         per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
         per_token_logps = per_token_logps * loss_mask
@@ -1571,11 +1570,10 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
             batch_metrics.append(item_metrics)
 
         num_groups = len(batch['audio_filepaths'])
-        best_cer_achievable = self.cfg.get("reward_best_cer", 0.0) # Examples with this CER will have CER reward of 1
-        worst_cer_allowed = self.cfg.get("reward_worst_cer", 0.2) # Examples with this CER or higher will have CER reward of 0
-        best_ssim_achievable = self.cfg.get("reward_best_ssim", 0.9) # Examples with this speaker similarity or higher will have SSIM reward of 1
-        worst_ssim_allowed = self.cfg.get("reward_worst_ssim", 0.5) # Examples with this speaker similarity or lower will have SSIM reward of 0
-
+        
+        best_ssim_achievable = self.cfg.get("best_ssim_achievable", 0.9) # Examples with this speaker similarity or higher will have SSIM reward of 1
+        mean_cer_dataset = self.cfg.get("mean_cer_dataset", 0.1) # CER equal to this value will have reward of 0.5
+        mean_ssim_dataset = self.cfg.get("mean_ssim_dataset", 0.6) # SSIM equal to this value will have reward of 0.5
         for group_idx in range(num_groups):
             group_start_idx = group_idx * num_generations_per_item
             group_end_idx = group_start_idx + num_generations_per_item
@@ -1587,11 +1585,16 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
                 # Reward for best CER and best speaker similarity should be 1
                 item_cer = batch_metrics[idx]['cer_gt']
                 item_ssim = batch_metrics[idx]['spk_similarity']
-                item_cer = min( max(item_cer, best_cer_achievable), worst_cer_allowed)
-                item_ssim = max( min(item_ssim, best_ssim_achievable), worst_ssim_allowed)
-                
-                cer_reward = 1 - (item_cer - best_cer_achievable + eps) / (worst_cer_allowed - best_cer_achievable + eps)
-                spk_similarity_reward = 1 - (best_ssim_achievable - item_ssim + eps) / (best_ssim_achievable - worst_ssim_allowed + eps)
+                item_cer = min( max(item_cer, 0.0), 1.0)
+                item_ssim = max( min(item_ssim, best_ssim_achievable), 0.0)
+                if item_cer <= mean_cer_dataset:
+                    cer_reward = 0.5 + 0.5 * (mean_cer_dataset - item_cer) / mean_cer_dataset # 0.5 to 1
+                else:
+                    cer_reward = 0.5 - 0.5 * (item_cer - mean_cer_dataset) / (1 - mean_cer_dataset) # 0 to 0.5
+                if item_ssim >= mean_ssim_dataset:
+                    spk_similarity_reward = 0.5 + 0.5 * (item_ssim - mean_ssim_dataset) / (best_ssim_achievable - mean_ssim_dataset)
+                else:
+                    spk_similarity_reward = 0.5 - 0.5 * (mean_ssim_dataset - item_ssim) / (mean_ssim_dataset)
 
                 batch_metrics[idx]['reward'] = cer_reward * cer_reward_weight + spk_similarity_reward * ssim_reward_weight
                 
@@ -1663,7 +1666,7 @@ class T5TTS_ModelOnlinePO(T5TTS_Model):
         for codebook_idx in range(self.cfg.num_audio_codebooks):
             si = codebook_idx * self.cfg.num_audio_tokens_per_codebook
             ei = si + self.cfg.num_audio_tokens_per_codebook
-            codebook_logits = policy_model_outputs['logits'][:, :, si:ei]
+            codebook_logits = policy_model_outputs['logits'][:, :, si:ei] # B, T, C
             ref_codebook_logits = reference_model_output['logits'][:, :, si:ei]
 
             codebook_labels = batch_repeated['audio_codes'][:,codebook_idx,1:]
