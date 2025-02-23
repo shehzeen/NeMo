@@ -18,7 +18,7 @@ import random
 from nemo.collections.tts.models import T5TTS_Model
 
 class T5TTS_Model_PrefDataGen(T5TTS_Model):
-    """Small override to save inference metrics, used for datagen in DPO"""
+    """Small override to save inference metrics, used for datagen in Offline PO"""
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
         if cfg.get('pref_set_language', "en") == "en":
@@ -76,7 +76,7 @@ class T5TTS_Model_PrefDataGen(T5TTS_Model):
                     with torch.no_grad():
                         try:
                             if self.cfg.get("pref_set_language", "en") == "en":
-                                pred_transcripts = self.eval_asr_model.transcribe(predicted_audio_paths, batch_size=len(predicted_audio_paths))[0]
+                                pred_transcripts = self.eval_asr_model.transcribe(predicted_audio_paths, batch_size=len(predicted_audio_paths))
                                 pred_transcripts = [ process_text_for_cer(transcript) for transcript in pred_transcripts ]
                             else:
                                 pred_transcripts = []
@@ -477,8 +477,9 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
                 pred_transcripts = [ process_text_for_cer(transcript) for transcript in pred_transcripts ]
             else:
                 pred_transcripts = []
-                for audio_path in predicted_audio_paths:
-                    transcript = transcribe_with_whisper(audio_path, self.cfg.pref_set_language, self.whisper_processor, self.whisper_model, self.device)
+                for item_idx, audio_path in enumerate(predicted_audio_paths):
+                    language = batch_repeated['languages'][item_idx]
+                    transcript = transcribe_with_whisper(audio_path, language, self.whisper_processor, self.whisper_model, self.device)
                     pred_transcripts.append(transcript)
                 pred_transcripts = [process_text_for_cer(transcript) for transcript in pred_transcripts]
             

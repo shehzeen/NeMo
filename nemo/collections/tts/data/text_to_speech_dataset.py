@@ -544,6 +544,7 @@ class T5TTSDataset(TextToSpeechDataset):
             example["align_prior"] = align_prior
 
         example['raw_text'] = data.text
+        example['language'] = data.manifest_entry.get('language', 'en')
         
         if "reward" in data.manifest_entry:
             example["reward"] = data.manifest_entry["reward"]
@@ -571,10 +572,12 @@ class T5TTSDataset(TextToSpeechDataset):
         context_has_text_context_list = []
         reward_list = []
         raw_text_list = []
+        language_list = []
         for example in batch:
             dataset_name_list.append(example["dataset_name"])
             audio_filepath_list.append(example["audio_filepath"])
             raw_text_list.append(example["raw_text"])
+            language_list.append(example["language"])
 
             token_list.append(example["tokens"])
             token_len_list.append(example["text_len"])
@@ -617,6 +620,7 @@ class T5TTSDataset(TextToSpeechDataset):
         batch_dict = {
             "dataset_names": dataset_name_list,
             "raw_texts": raw_text_list,
+            "languages": language_list,
             "audio_filepaths": audio_filepath_list,
             "text": batch_tokens,
             "text_lens": batch_token_len,
