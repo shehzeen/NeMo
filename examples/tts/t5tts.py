@@ -15,7 +15,7 @@
 import pytorch_lightning as pl
 from omegaconf import OmegaConf, open_dict
 
-from nemo.collections.tts.models import T5TTS_Model, T5TTS_ModelInference, T5TTS_ModelDPO, T5TTS_ModelOnlinePO
+from nemo.collections.tts.models import T5TTS_Model, T5TTS_Model_PrefDataGen, T5TTS_Model_OfflinePO, T5TTS_Model_OnlinePO
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
@@ -36,14 +36,14 @@ def main(cfg):
         model_cfg = cfg.model
         with open_dict(model_cfg):
             model_cfg.reference_model_ckpt_path = cfg.init_from_ptl_ckpt
-        model = T5TTS_ModelDPO(cfg=model_cfg, trainer=trainer)
+        model = T5TTS_Model_OfflinePO(cfg=model_cfg, trainer=trainer)
     elif cfg.get('mode', 'train') == 'onlinepo_train':
         model_cfg = cfg.model
         with open_dict(model_cfg):
             model_cfg.reference_model_ckpt_path = cfg.init_from_ptl_ckpt
-        model = T5TTS_ModelOnlinePO(cfg=model_cfg, trainer=trainer)
+        model = T5TTS_Model_OnlinePO(cfg=model_cfg, trainer=trainer)
     elif cfg.get('mode', 'train') == 'test':
-        model = T5TTS_ModelInference(cfg=cfg.model, trainer=trainer)
+        model = T5TTS_Model_PrefDataGen(cfg=cfg.model, trainer=trainer)
     else:
         raise NotImplementedError(f"Only train, dpo_train and test modes are supported. Got {cfg.mode}")
 
