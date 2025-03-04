@@ -807,7 +807,7 @@ class T5TTS_Model(ModelPT):
                 audio_codes_input = torch.cat([audio_codes_input, audio_codes_next.unsqueeze(-1)], dim=-1) # (B, C, T')
                 audio_codes_lens = audio_codes_lens + 1
                 audio_codes_mask = get_mask_from_lengths(audio_codes_lens)
-                if len(end_indices) == text.size(0):
+                if len(end_indices) == text.size(0) and len(all_predictions) >= 4:
                     print("All ends reached")
                     break
             

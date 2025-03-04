@@ -771,7 +771,7 @@ def get_speaker_embeddings_from_filepaths(filepaths, speaker_verification_model,
         return speaker_embeddings
 
 def transcribe_with_whisper(audio_filepath, language, whisper_processor, whisper_model, device):
-    print("Transcribing with whisper")
+    print("Transcribing with whisper", language)
     speech_array, sampling_rate = librosa.load(audio_filepath, sr=16000)
     forced_decoder_ids = whisper_processor.get_decoder_prompt_ids(language=language) if language else None
     inputs = whisper_processor(speech_array, sampling_rate=sampling_rate, return_tensors="pt").input_features
