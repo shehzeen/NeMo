@@ -140,7 +140,7 @@ class T5TTS_Model_OfflinePO(T5TTS_Model):
             ref_model_cfg.validation_ds = None
         self._reference_model = T5TTS_Model(cfg=ref_model_cfg)
         print("Loading reference model from checkpoint")
-        self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path, map_location="cpu")['state_dict'])
+        self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path, map_location="cpu", weights_only=False)['state_dict'])
         self.freeze_model(self._reference_model)
         self._reference_model.eval()
         self._reference_model._no_state_dict = True
@@ -376,7 +376,7 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
         if not self.reference_free:
             self._reference_model = T5TTS_Model(cfg=ref_model_cfg)
             print("Loading reference model from checkpoint")
-            self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path, map_location="cpu")['state_dict'])
+            self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path, map_location="cpu", weights_only=False)['state_dict'])
             self.freeze_model(self._reference_model)
             self._reference_model.eval()
             self._reference_model._no_state_dict = True
@@ -628,7 +628,8 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
             codebook_logits = policy_model_outputs['logits'][:, :, si:ei] # B, T, C
             codebook_labels = batch_repeated['audio_codes'][:,codebook_idx,1:]
             per_token_codebook_log_probs = self._get_per_token_logps(codebook_logits, codebook_labels, policy_model_outputs['loss_mask'])
-            per_token_loss = torch.exp(per_token_codebook_log_probs - per_token_codebook_log_probs.detach()) * advantages.unsqueeze(1)
+            per_token_loss = -(torch.exp(per_token_codebook_log_probs - per_token_codebook_log_probs.detach()) * advantages.unsqueeze(1))
+            
 
             if not self.reference_free:
                 with torch.no_grad():
@@ -636,7 +637,7 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
                     per_token_ref_codebook_log_probs = self._get_per_token_logps(ref_codebook_logits, codebook_labels, reference_model_output['loss_mask'])
                     # https://github.com/huggingface/trl/blob/ffcb9f4aee725a2bd072d0387afe68a4b1c7967c/trl/trainer/grpo_trainer.py#L703
                 per_token_codebook_kl = torch.exp(per_token_ref_codebook_log_probs - per_token_codebook_log_probs) - (per_token_ref_codebook_log_probs - per_token_codebook_log_probs) - 1
-                per_token_loss = -(per_token_loss - self.cfg.grpo_beta * per_token_codebook_kl)
+                per_token_loss = per_token_loss + self.cfg.grpo_beta * per_token_codebook_kl
                 codebook_kl_loss_mean = ((per_token_codebook_kl * policy_model_outputs['loss_mask']).sum(dim=1) / policy_model_outputs['loss_mask'].sum(dim=1)).mean()
             else:
                 codebook_kl_loss_mean = torch.tensor(0.0, device=self.device)

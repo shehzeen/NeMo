@@ -61,7 +61,7 @@ def run_inference(
 
     # Load weights from checkpoint file
     print("Loading weights from checkpoint")
-    ckpt = torch.load(checkpoint_file)
+    ckpt = torch.load(checkpoint_file, weights_only=False)
     model.load_state_dict(ckpt['state_dict'])
     print("Loaded weights.")
     model.cuda()
