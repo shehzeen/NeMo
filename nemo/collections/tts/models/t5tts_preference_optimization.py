@@ -15,7 +15,15 @@ import string
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 import random
+try:
+    import torchaudio
+    from torchaudio.pipelines import SQUIM_OBJECTIVE
+    HAVE_TORCHAUDIO = True
+except ImportError:
+    HAVE_TORCHAUDIO = False
+
 from nemo.collections.tts.models import T5TTS_Model
+
 
 class T5TTS_Model_PrefDataGen(T5TTS_Model):
     """Small override to save inference metrics, used for datagen in Offline PO"""
@@ -403,6 +411,12 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
             self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
             self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3")
             self.whisper_model.eval()
+        
+        use_pesq = self.cfg.get('use_pesq', False)
+        if use_pesq:
+            # import ipdb; ipdb.set_trace()
+            assert HAVE_TORCHAUDIO, "torchaudio is required for PESQ reward"
+            self.squim_objective_model = SQUIM_OBJECTIVE.get_model()
     
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state_dict = super().state_dict(destination, prefix, keep_vars)
@@ -445,6 +459,7 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
         topk = self.cfg.get('inference_topk', 80)
         use_cfg = False
         cfg_scale = 1.0
+        use_pesq = self.cfg.get('use_pesq', False)
         inference_cfg_prob = self.cfg.get('inference_cfg_prob', 0.0)
         if (inference_cfg_prob == 1.0) or (inference_cfg_prob > 0.0 and mode == 'train'):
             # Randomly set use_cfg based on the given probability
@@ -495,10 +510,12 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
             
             pred_speaker_embeddings = get_speaker_embeddings_from_filepaths(predicted_audio_paths, self.eval_speaker_verification_model, self.device)
             gt_speaker_embeddings = get_speaker_embeddings_from_filepaths(batch_repeated['audio_filepaths'], self.eval_speaker_verification_model, self.device)
+            
 
         batch_metrics = []
         cer_reward_weight = self.cfg.get('cer_reward_weight', 0.5)
-        ssim_reward_weight = 1.0 - cer_reward_weight
+        ssim_reward_weight = self.cfg.get('ssim_reward_weight', 0.5)
+        pesq_reward_weight = self.cfg.get('pesq_reward_weight', 0.0)
         for idx in range(predicted_audio.size(0)):
             audio_path = predicted_audio_paths[idx]
             item_idx = idx
@@ -511,6 +528,11 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
             spk_similarity = np.dot(spk_embedding_pred, spk_embedding_gt) / (
                 np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt)
             )
+            if use_pesq:
+                sample_audio, sr = torchaudio.load(audio_path)
+                sample_audio = torchaudio.functional.resample(sample_audio, sr, 16000)
+                _, pesq_hyp, _ = self.squim_objective_model(sample_audio)
+                pesq_hyp = pesq_hyp.item()
 
             item_metrics = {
                 'cer_gt': float(cer_gt),
@@ -520,6 +542,7 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
                 'pred_transcript': pred_transcript,
                 'gt_transcript': gt_transcript,
                 'codes_len': predicted_codes_lens[idx].item(),
+                'pesq' : pesq_hyp if use_pesq else 0.0,
             }
             with open(os.path.join(audio_dir, f'predicted_audioRank{self.global_rank}_{item_idx}_metrics.json'), 'w') as f:
                 json.dump(item_metrics, f)
@@ -536,14 +559,15 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
             group_end_idx = group_start_idx + num_generations_per_item
             group_rewards = []
             mean_reward = 0
-            eps = 0.0001
             for idx in range(group_start_idx, group_end_idx):
                 # Lower CER and higher speaker similarity is better, means high reward
+                # Higher pesq is better, means high reward
                 # Reward for best CER and best speaker similarity should be 1
                 item_cer = batch_metrics[idx]['cer_gt']
                 item_ssim = batch_metrics[idx]['spk_similarity']
                 item_cer = min( max(item_cer, 0.0), 1.0)
                 item_ssim = max( min(item_ssim, best_ssim_achievable), 0.0)
+                item_pesq = batch_metrics[idx]['pesq']
                 if item_cer <= mean_cer_dataset:
                     cer_reward = 0.5 + 0.5 * (mean_cer_dataset - item_cer) / mean_cer_dataset # 0.5 to 1
                 else:
@@ -552,8 +576,12 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
                     spk_similarity_reward = 0.5 + 0.5 * (item_ssim - mean_ssim_dataset) / (best_ssim_achievable - mean_ssim_dataset)
                 else:
                     spk_similarity_reward = 0.5 - 0.5 * (mean_ssim_dataset - item_ssim) / (mean_ssim_dataset)
+                if use_pesq:
+                    pesq_reward = item_pesq / 4.5
+                else:
+                    pesq_reward = 0.0
 
-                batch_metrics[idx]['reward'] = cer_reward * cer_reward_weight + spk_similarity_reward * ssim_reward_weight
+                batch_metrics[idx]['reward'] = cer_reward * cer_reward_weight + spk_similarity_reward * ssim_reward_weight + pesq_reward * pesq_reward_weight
                 
                 if (batch_metrics[idx]['codes_len'] >= 425) or (batch_metrics[idx]['codes_len'] <= 3): # TODO: Remove hardcoded lengths
                     # This means it did not complete the sentence or generated an extremely short sentence
@@ -561,6 +589,7 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
                 print("Item idx: ", idx, " CER: ", item_cer, " SSIM: ", item_ssim, " Reward: ", batch_metrics[idx]['reward'], " Codes len: ", batch_metrics[idx]['codes_len'])
                 batch_metrics[idx]['cer_reward'] = cer_reward
                 batch_metrics[idx]['spk_similarity_reward'] = spk_similarity_reward
+                batch_metrics[idx]['pesq_reward'] = pesq_reward
                 mean_reward += batch_metrics[idx]['reward']
                 group_rewards.append(batch_metrics[idx]['reward'])
             
