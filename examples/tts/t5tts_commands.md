@@ -286,9 +286,11 @@ Ignore the other params in the file, I also use this for evaluating ongoing expe
 
 Inference Notebook: `t5tts_inference.ipynb` For quickly trying custom texts/contexts.
 
-### DPO Preference Alignment
+### Offline Preference Alignment (DPO/RPO)
 
-Preference Alignment (DPO) involves the following steps
+Code: `nemo/collections/tts/models/t5tts_preference_optimization.py`
+
+Preference Alignment (DPO/RPO) involves the following steps
 1) Create a list of text-context pairs for which we will generate preference data.
 2) For each text-context pair generate multiple audios from a base T5-TTS checkpoint and calculate metrics (CER/SSIM) for each generation.
 3) Create chosen-rejected pairs from the generated audio.
@@ -320,6 +322,7 @@ Sample sub file on EOS: `/lustre/fsw/llmservice_nemo_speechlm/users/shehzeenh/la
 ```
 python examples/tts/t5tts.py \
 --config-name=t5tts_inference \
+mode=test \
 batch_size=64 \
 +init_from_ptl_ckpt="/mountdir/checkpoints/continuouscheckpoints_ks1_ks3/decodercontext_small_282.ckpt" \
 exp_manager.exp_dir="/lustre/fsw/llmservice_nemo_speechlm/data/TTS/DPOData/Generations/decodercontext_small_282" \
@@ -336,7 +339,6 @@ model.codecmodel_path="/mountdir/checkpoints/AudioCodec_21Hz_no_eliz.nemo" \
 model.alignment_loss_scale=0.002 \
 model.prior_scaling_factor=null \
 model.load_cached_codes_if_available=false \
-+model.use_kv_cache_for_inference=true \
 trainer.num_nodes=${SLURM_JOB_NUM_NODES}
 ```
 #### 3. Create chosen-rejected pairs from the generations
@@ -401,3 +403,60 @@ model.validation_ds.dataset._target_="nemo.collections.tts.data.text_to_speech_d
 ```
 
 Again, our manifest contain absolute paths so we specify `audio_dir="/"` .
+
+### Online Preference Optimization (GRPO)
+
+For online preference optmization, process is much simpler.
+
+1) Create a list of text-context pairs for which we will generate preference data (just one pair for a text-context not repeated).
+We'll use the same process as above, just set `nsamples_perpair 1` in the command.
+```
+python scripts/t5tts/dpo/create_text_contextpairs.py \
+    --challenging_texts /Data/DPOPairsInputData/challenging_texts_nemollm.txt \
+    --regular_texts_for_audiocontext /Data/DPOPairsInputData/regular_texts_for_audiocontext.txt \
+    --regular_texts_for_textcontext /Data/DPOPairsInputData/regular_texts_for_textcontext.txt \
+    --audio_contexts /Data/DPOPairsInputData/audio_context_list.json \
+    --text_contexts /Data/DPOPairsInputData/text_context_list.txt \
+    --output_manifest /Data/DPOPairsInputData/text_context_pairs_v2.json \
+    --nsamples_perpair 1 ;
+```
+
+2. Train using GRPO
+
+```
+python examples/tts/t5tts.py \
++mode="onlinepo_train" \
++init_from_ptl_ckpt="/Data/ICML2025_CKPTS/icml2025_base_checkpoints/decodercontext_small_sp_ks3CorrectWithPrior_onlyphoneme_epoch161.ckpt" \
+max_epochs=1000 \
+exp_manager.exp_dir="/Data/Experiments/NewT5TTSGRPO/Try3NoDropoutBeta0.01_CFG/" \
++train_ds_meta.grpotrainnomls.manifest_path="/Data/DPOPairsInputDatav2/text_context_pairs_grpo_train_nomls.json" \
++train_ds_meta.grpotrainnomls.audio_dir="/" \
++train_ds_meta.grpotrainnomls.feature_dir="/" \
++val_ds_meta.grpovalnomls.manifest_path="/Data/DPOPairsInputDatav2/text_context_pairs_grpo_val_unseenspeakers_tinysubset.json" \
++val_ds_meta.grpovalnomls.audio_dir="/" \
++val_ds_meta.grpovalnomls.feature_dir="/" \
++model.num_generations_per_item=6 \
++model.grpo_beta=0.01 \
+model.t5_decoder.p_dropout=0.0 \
+model.t5_encoder.p_dropout=0.0 \
+model.model_type="decoder_context_tts" \
+model.use_text_conditioning_encoder=true \
+model.context_duration_min=5.0 \
+model.context_duration_max=5.0 \
+model.codecmodel_path="/Data/Checkpoints/AudioCodec_21Hz_no_eliz.nemo" \
+model.alignment_loss_scale=0.0 \
+model.prior_scaling_factor=null \
+model.train_ds.dataloader_params.num_workers=0 \
+model.validation_ds.dataloader_params.num_workers=0 \
+exp_manager.checkpoint_callback_params.monitor="val_mean_reward" \
+exp_manager.checkpoint_callback_params.mode="max" \
++trainer.use_distributed_sampler=False \
++model.inference_cfg_prob=0.5 \
++model.inference_cfg_scale=2.5 \
+batch_size=2 \
+model.optim.lr=1e-6 \
+trainer.devices=2 \
+trainer.log_every_n_steps=1 \
+trainer.val_check_interval=50 \
+~model.optim.sched ;
+```
