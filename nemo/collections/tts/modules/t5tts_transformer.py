@@ -19,6 +19,18 @@ import torch
 import torch.nn.functional as F
 from nemo.utils import logging
 
+import importlib
+from packaging import version
+
+def is_torch_greater_or_equal(library_version: str):
+    return version.parse(importlib.metadata.version("torch")) >= version.parse(library_version)
+
+if is_torch_greater_or_equal("2.5"):
+    from torch.nn.attention.flex_attention import flex_attention, and_masks, create_block_mask
+    HAS_FLEX_ATTENTION = True
+else:
+    HAS_FLEX_ATTENTION = False
+
 # TODO: Move the cache implementation out of the Module class, and pass it as part of the forward so we can reset
 # as needed in the inference pipeline.
 
@@ -222,6 +234,7 @@ class Attention(torch.nn.Module):
         if mask is not None:
             # assumes there's at least one mask
             attn_score.masked_fill_(mask == 0, float('-inf'))
+
         if self.is_causal:
             attn_score.masked_fill_(self.causal_mask[..., :T, :T] == 0, float('-inf'))
 
@@ -275,6 +288,164 @@ class Attention(torch.nn.Module):
         y = self.dropout(self.o_net(y))
 
         return y, attn_prob
+
+
+class SelfFlexAttention(torch.nn.Module):
+    def __init__(
+        self,
+        n_heads: int,
+        d_model: int,
+        p_dropout: float,
+        is_causal: bool = False,
+        max_length_causal_mask: int = 4096,
+        sliding_window_size: int = None,
+    ):
+        """
+        Base Attention parent class. Users should not be instantiating this class, but rather use SelfAttention or
+        CrossAttention classes as appropriate.
+        Does DotProductionAttention and additionally dropout inside the module. The class does not currently support
+        RoPE nor ALiBi.
+
+        Args:
+            n_heads (int): Number of attention heads.
+            d_model (int): Dimension of the model.
+            p_dropout (float): Dropout probability.
+            is_causal (bool): Whether to use causal attention. Only supported when used in SelfAttention.
+        """
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model % n_head != 0"
+        self.max_length_causal_mask = max_length_causal_mask
+        self.d_head = d_model // n_heads
+        self.n_heads = n_heads
+        self.d_model = d_model
+        self.scale = self.d_head**-0.5
+        self.o_net = torch.nn.Linear(n_heads * self.d_head, d_model, bias=False)
+        self.use_cache = False
+        self.cache = self._init_cache()
+        self.qkv_net = torch.nn.Linear(d_model, 3 * n_heads * self.d_head, bias=False)
+        self.dropout = torch.nn.Dropout(p_dropout)
+        # create block mask
+        def causal_mask_flexattention(b, h, q_idx, kv_idx):
+            return q_idx >= kv_idx
+
+        def sliding_window_flexattention(b, h, q_idx, kv_idx):
+            return q_idx - kv_idx <= sliding_window_size
+
+        if sliding_window_size and is_causal:
+            self.attn_mask_fn = and_masks(*[causal_mask_flexattention, sliding_window_flexattention])
+        elif sliding_window_size and not is_causal:
+            self.attn_mask_fn = sliding_window_flexattention
+        elif not sliding_window_size and is_causal:
+            self.attn_mask_fn = causal_mask_flexattention
+        else: # not sliding window and not causal
+            self.attn_mask_fn = None
+
+        # init as None and on forward update the mask if needed, we cant init it here because of devices issues, block_mask is not automatically converted to the right cuda device and .to(device) is not working
+        self.attn_block_mask = None
+        # create block mask if needed, first step will be slower, but after that it should be fast
+        if self.attn_mask_fn is not None:
+            block_mask = create_block_mask(self.attn_mask_fn, B=None, H=None, Q_LEN=self.max_length_causal_mask, KV_LEN=self.max_length_causal_mask)
+            self.attn_block_mask = block_mask
+
+
+    @abstractmethod
+    def compute_qkv_and_mask(
+        self,
+        query: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
+        memory: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+    ):
+        B, T, _ = query.shape
+        qkv = self.qkv_net(query).reshape(B, T, 3, self.n_heads, self.d_head)
+        q, k, v = qkv.chunk(3, dim=2)
+        q, k, v = q.squeeze(2), k.squeeze(2), v.squeeze(2)
+        if self.use_cache:
+            if self.cache['self_k'] is not None:
+                k = torch.cat([self.cache['self_k'], k], dim=1)
+                v = torch.cat([self.cache['self_v'], v], dim=1)
+            self.cache['self_k'] = k
+            self.cache['self_v'] = v
+        mask = query_mask[:, None, :, None] if query_mask is not None else None
+        return q, k, v, mask
+
+    @staticmethod
+    def _init_cache() -> Dict[str, Optional[Union[bool, torch.Tensor]]]:
+        return {
+            'is_initialized': False,
+            'self_k': None,
+            'self_v': None,
+            'cross_kv': None,
+            'cross_k': None,
+            'cross_v': None,
+        }
+
+    def reset_cache(self, use_cache: bool = False):
+        self.use_cache = use_cache
+        self.cache = self._init_cache()
+
+    def attn_naive(
+        self,
+        query: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
+        memory: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        attn_prior: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        if self.use_cache:
+            if self.cache['is_initialized']:
+                query = query[:, -1:, :]
+                query_mask = query_mask[:, -1:] if query_mask is not None else None
+            else:
+                self.cache['is_initialized'] = True
+
+        # compute qkv tensors and mask tensor
+        q, k, v, mask = self.compute_qkv_and_mask(
+            query=query, query_mask=query_mask, memory=memory, memory_mask=memory_mask
+        )
+        
+        # (B, T, nh, dh) -> (B, nh, T, dh)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        B, T, _ = query.shape
+
+        self.attn_block_mask = self.attn_block_mask.to(q.device) if self.attn_block_mask is not None else None
+        y, attn_prob = flex_attention(q, k, v, block_mask=self.attn_block_mask, return_lse=True) # (batch_size, n_heads, max_seq_len, d_head)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
+
+        return y, attn_prob
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
+        memory: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        attn_prior: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """
+        Forward pass of the Attention module.
+
+        Args:
+            query (torch.Tensor): Input tensor of shape (B, T1, C).
+            query_mask (Optional[torch.Tensor]): Mask for query tensor of shape (B, T1).
+            memory (Optional[torch.Tensor]): Memory tensor for cross-attention of shape (B, T2, C).
+            memory_mask (Optional[torch.Tensor]): Mask for memory tensor of shape (B, T2).
+            attn_prior (Optional[torch.Tensor]): Prior attention weights of shape (B, T1, T2).
+
+        Returns:
+            Tuple[torch.Tensor, List[torch.Tensor]]:
+                - y: Attention module tensor output of shape (B, T1, C).
+                - attn_prob: List containing attention probabilities and scores. returned only in attn_naive.
+                    [0]: Attention probabilities used for logging during validation.
+        """
+        # print("using flex attention")
+        y, attn_prob = self.attn_naive(query, query_mask, memory, memory_mask, attn_prior)
+        y = self.dropout(self.o_net(y))
+
+        return y, [attn_prob]
 
 
 class SelfAttention(Attention):
@@ -394,7 +565,6 @@ class CrossAttention(Attention):
         mask = memory_mask[:, None, None] if memory_mask is not None else None
         return q, k, v, mask
 
-
 class TransformerLayer(torch.nn.Module):
     def __init__(
         self,
@@ -410,6 +580,8 @@ class TransformerLayer(torch.nn.Module):
         apply_norm_to_cond: bool = True,
         max_length_causal_mask: int = 4096,
         conv_non_linearity: Callable = torch.nn.GELU(approximate="tanh"),
+        use_flexattention: bool = False,
+        sliding_window_size: int = None,
     ):
         """
         One layer of the Transformer.
@@ -431,13 +603,23 @@ class TransformerLayer(torch.nn.Module):
         self.has_xattn = has_xattn
 
         self.norm_self = torch.nn.LayerNorm(d_model, bias=False)
-        self.self_attention = SelfAttention(
-            n_heads=sa_n_heads,
-            d_model=d_model,
-            p_dropout=p_dropout,
-            max_length_causal_mask=max_length_causal_mask,
-            is_causal=is_causal,
-        )
+        if use_flexattention:
+            self.self_attention = SelfFlexAttention(
+                n_heads=sa_n_heads,
+                d_model=d_model,
+                p_dropout=p_dropout,
+                max_length_causal_mask=max_length_causal_mask,
+                is_causal=is_causal,
+                sliding_window_size=sliding_window_size,
+            )
+        else:
+            self.self_attention = SelfAttention(
+                n_heads=sa_n_heads,
+                d_model=d_model,
+                p_dropout=p_dropout,
+                max_length_causal_mask=max_length_causal_mask,
+                is_causal=is_causal,
+            )
 
         if self.has_xattn:
             self.apply_norm_to_cond = apply_norm_to_cond
@@ -552,6 +734,8 @@ class Transformer(torch.nn.Module):
         max_length_causal_mask: int = 4096,
         use_learnable_pos_emb: bool = False,
         conv_non_linearity: Callable = torch.nn.GELU(approximate="tanh"),
+        use_flexattention: bool = False,
+        sliding_window_size: int = None,
     ):
         """
         Initializes a stack of transformer layers. Can be used for both encoder and decoder.
@@ -578,7 +762,17 @@ class Transformer(torch.nn.Module):
         if has_xattn and (xa_d_memory is None or xa_n_heads is None):
             raise ValueError("It requires that `xa_d_memory` and `xa_n_heads` are specified when `has_xattn` is True!")
 
+        if sliding_window_size and not use_flexattention:
+            raise ValueError("Sliding Window can be used only when `use_flexattention` is True!")
+
+        if use_flexattention and p_dropout:
+            print("Attention score dropout is currently not available on FlexAttention, we will use only attention layer output dropout!")
+
+        if use_flexattention and not HAS_FLEX_ATTENTION:
+            raise ValueError("FlexAttention is only supported on pytorch >= 2.5!")
+
         super().__init__()
+        self.use_flexattention = use_flexattention
         self.dropout = torch.nn.Dropout(p_dropout)
         self.p_dropout_out = p_dropout_out
 
@@ -609,6 +803,8 @@ class Transformer(torch.nn.Module):
                     apply_norm_to_cond=apply_norm_to_cond,
                     max_length_causal_mask=max_length_causal_mask,
                     conv_non_linearity=conv_non_linearity,
+                    use_flexattention=use_flexattention,
+                    sliding_window_size=sliding_window_size,
                 )
             )
 
