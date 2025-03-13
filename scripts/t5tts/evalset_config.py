@@ -15,7 +15,8 @@ dataset_meta_info = {
         'feature_dir' : '/Data/RivaData/riva',
     },
     'riva_challenging_nozeros': {
-        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/riva_challenging_nozeros.json',
+        # 'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/riva_challenging_nozeros.json',
+        'manifest_path': '/home/pneekhara/2023/SimpleT5NeMo/manifests/riva_challenging_filtered.json',
         'audio_dir' : '/datap/misc/Datasets/riva',
         'feature_dir' : '/datap/misc/Datasets/riva',
     },
@@ -23,6 +24,12 @@ dataset_meta_info = {
         'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/libri360_val.json',
         'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
         'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+    },
+    'libri_val_12.5': {
+        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/libri360_val.json',
+        'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'load_cached_codes_if_available': False
     },
     'libri_val_shehzeen': {
         'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/libri360_val.json',
@@ -33,6 +40,12 @@ dataset_meta_info = {
         'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/test_clean_withContextAudioPaths.json',
         'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
         'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+    },
+    'libri_unseen_test_12.5': {
+        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/test_clean_withContextAudioPaths.json',
+        'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'load_cached_codes_if_available': False
     },
     'libri_unseen_test_shehzeen_phoneme': {
         'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/test_clean_withContextAudioPaths.json',

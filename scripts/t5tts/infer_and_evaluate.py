@@ -14,6 +14,7 @@ import scipy.stats as stats
 import copy
 import shutil
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
+from PIL import Image
 
 def compute_mean_and_confidence_interval(metrics_list, metric_keys, confidence=0.90):
     metrics = {}
@@ -41,6 +42,14 @@ def run_inference(
         sv_model, 
         asr_model_name, 
         num_repeats=1
+        apply_attention_prior=False,
+        attention_prior_epsilon=1e-3,
+        attention_prior_lookahead_window=10,
+        estimate_alignment_from_layers=None,
+        apply_prior_to_layers=None,
+        start_prior_after_n_audio_steps=10,
+        confidence_level=0.95,
+        use_local_transformer=False
     ):
     # import ipdb; ipdb.set_trace()
     model_cfg = OmegaConf.load(hparams_file).cfg
@@ -69,7 +78,21 @@ def run_inference(
     # import ipdb; ipdb.set_trace()
 
     checkpoint_name = checkpoint_file.split("/")[-1].split(".ckpt")[0]
-    checkpoint_name = "{}_Temp{}_Topk{}_Cfg_{}_{}_svmodel_{}".format(checkpoint_name, temperature, topk, use_cfg, cfg_scale, sv_model)
+    checkpoint_name = "{}_Temp{}_Topk{}_Cfg_{}_{}_Prior_{}_{}_{}_start{}_Estlayers{}_PrLayers{}_LT_{}_sv_{}".format(
+        checkpoint_name, 
+        temperature, 
+        topk, 
+        use_cfg, 
+        cfg_scale, 
+        apply_attention_prior, 
+        attention_prior_epsilon, 
+        attention_prior_lookahead_window,
+        start_prior_after_n_audio_steps,
+        "".join([str(l) for l in estimate_alignment_from_layers]) if estimate_alignment_from_layers is not None else "None",
+        "".join([str(l) for l in apply_prior_to_layers]) if apply_prior_to_layers is not None else "None",
+        use_local_transformer,
+        sv_model
+    )
     dataset_meta_info = evalset_config.dataset_meta_info
     for dataset in datasets:
         metrics_n_repeated = []
@@ -77,7 +100,8 @@ def run_inference(
         for repeat_idx in range(num_repeats):
             eval_dir = os.path.join(out_dir, "{}_{}".format(checkpoint_name, dataset))
             audio_dir = os.path.join(eval_dir, "audio")
-            os.makedirs(audio_dir, exist_ok=True) 
+            pred_audio_dir = os.path.join(audio_dir, f"repeat_{repeat_idx}")
+            os.makedirs(pred_audio_dir, exist_ok=True)
             language = dataset_meta_info[dataset].get('whisper_language', 'en')
             dataset_meta_for_dl = copy.deepcopy(dataset_meta_info[dataset])
             for key in ["whisper_language", "load_cached_codes_if_available"]:
@@ -125,6 +149,7 @@ def run_inference(
             )
 
             item_idx = 0
+            all_rtf_metrics = []
             for bidx, batch in enumerate(test_data_loader):
                 print("Processing batch {} out of {} of dataset {}".format(bidx, len(test_data_loader), dataset))
                 batch_cuda ={}
@@ -136,13 +161,32 @@ def run_inference(
                 
                 import time
                 st = time.time()
-                predicted_audio, predicted_audio_lens, _, _ = model.infer_batch(batch_cuda, max_decoder_steps=440, temperature=temperature, topk=topk, use_cfg=use_cfg, cfg_scale=cfg_scale)
+                predicted_audio, predicted_audio_lens, _, _, rtf_metrics, cross_attention_maps, _  = model.infer_batch(
+                    batch_cuda, 
+                    max_decoder_steps=440, 
+                    temperature=temperature, 
+                    topk=topk, 
+                    use_cfg=use_cfg, 
+                    cfg_scale=cfg_scale, 
+                    return_cross_attn_probs=True, 
+                    apply_attention_prior=apply_attention_prior,
+                    prior_epsilon=attention_prior_epsilon,
+                    lookahead_window_size=attention_prior_lookahead_window,
+                    estimate_alignment_from_layers=estimate_alignment_from_layers,
+                    apply_prior_to_layers=apply_prior_to_layers,
+                    start_prior_after_n_audio_steps=start_prior_after_n_audio_steps,
+                    use_local_transformer_for_inference=use_local_transformer
+                )
+                all_rtf_metrics.append(rtf_metrics)
                 et = time.time()
                 print(f"Time taken for inference: {et-st}", predicted_audio.size())
                 for idx in range(predicted_audio.size(0)):
+                    cross_attn_map_image = Image.fromarray(cross_attention_maps[idx])
+                    cross_attn_map_image.save(os.path.join(audio_dir, f"cross_attn_map_{item_idx}.png"))
+
                     predicted_audio_np = predicted_audio[idx].float().detach().cpu().numpy()
                     predicted_audio_np = predicted_audio_np[:predicted_audio_lens[idx]]
-                    audio_path = os.path.join(audio_dir, f"predicted_audio_{item_idx}.wav")
+                    audio_path = os.path.join(pred_audio_dir, f"predicted_audio_{item_idx}.wav")
                     sf.write(audio_path, predicted_audio_np, model.cfg.sample_rate)
                     context_audio_path = manifest_records[item_idx].get('context_audio_filepath', None)
                     target_audio_path = manifest_records[item_idx].get('audio_filepath', None)
@@ -156,10 +200,14 @@ def run_inference(
                         shutil.copy(target_audio_path, os.path.join(audio_dir, f"target_audio_{item_idx}.wav"))
                     item_idx += 1
             
+            mean_rtf_metrics = {}
+            for key in all_rtf_metrics[0]:
+                mean_rtf_metrics[key] = float(np.mean([m[key] for m in all_rtf_metrics]))
+            
             metrics, filewise_metrics = evaluate_generated_audio.evaluate(
                 dataset_meta[dataset]['manifest_path'],
                 dataset_meta[dataset]['audio_dir'],
-                audio_dir,
+                pred_audio_dir,
                 language=language,
                 sv_model_type=sv_model,
                 asr_model_name=asr_model_name,
@@ -171,6 +219,9 @@ def run_inference(
             with open(os.path.join(eval_dir, f"{dataset}_filewise_metrics_{repeat_idx}.json"), "w") as f:
                 # Indent for better readability
                 json.dump(filewise_metrics, f, indent=4)
+            
+            with open(os.path.join(eval_dir, f"{dataset}_rtf_metrics_{repeat_idx}.json"), "w") as f:
+                json.dump(mean_rtf_metrics, f, indent=4)
 
             all_experiment_csv = os.path.join(out_dir, "all_experiment_metrics.csv")
             if not os.path.exists(all_experiment_csv):
@@ -185,7 +236,7 @@ def run_inference(
                        'ssim_pred_gt_avg_alternate', 'ssim_pred_context_avg_alternate', 'ssim_gt_context_avg_alternate',
                        'cer_gt_audio_cumulative', 'wer_gt_audio_cumulative'
                        ]
-        metrics_mean_ci = compute_mean_and_confidence_interval(metrics_n_repeated, metric_keys)
+        metrics_mean_ci = compute_mean_and_confidence_interval(metrics_n_repeated, metric_keys, confidence=confidence_level)
         all_experiment_csv_with_ci = os.path.join(out_dir, "all_experiment_metrics_with_ci.csv")
         if not os.path.exists(all_experiment_csv_with_ci):
             with open(all_experiment_csv_with_ci, "w") as f:
@@ -199,23 +250,38 @@ def main():
     parser = argparse.ArgumentParser(description='Experiment Evaluation')
     parser.add_argument('--hparams_files', type=str, default="/datap/misc/continuouscheckpoints_ks3ks3/multiencoder_small_sp_ks3_hparams.yaml,/datap/misc/continuouscheckpoints_ks3ks3/decodercontext_small_sp_ks3Correct_hparams.yaml")
     parser.add_argument('--checkpoint_files', type=str, default="/datap/misc/continuouscheckpoints_ks3ks3/multiencoder_small_sp_ks3_epoch302.ckpt,/datap/misc/continuouscheckpoints_ks3ks3/decodercontext_small_sp_ks3Correct_epoch305.ckpt")
-    parser.add_argument('--codecmodel_path', type=str, default="/datap/misc/checkpoints/AudioCodec_21Hz_no_eliz.nemo")
-    parser.add_argument('--datasets', type=str, default="libri_seen_test,libri_unseen_test")
-    parser.add_argument('--base_exp_dir', type=str, default="/datap/misc/eosmount4/AllKernselSize3/NewTransformer")
-    parser.add_argument('--draco_exp_dir', type=str, default="/lustre/fsw/llmservice_nemo_speechlm/users/pneekhara/gitrepos/experiments/NewT5TTS_FixedPosEmb/AllKernselSize3/NewTransformer")
+    parser.add_argument('--codecmodel_path', type=str, default="/datap/misc/checkpoints/12.5_FPS_causal_13codebooks_codecmodel.nemo")
+    parser.add_argument('--datasets', type=str, default="libri_unseen_test_12.5")
+    parser.add_argument('--base_exp_dir', type=str, default="/datap/misc/eosmountedresson/")
+    parser.add_argument('--draco_exp_dir', type=str, default="/lustre/fsw/llmservice_nemo_speechlm/users/pneekhara/gitrepos/experiments/NewT5TTS_FixedPosEmb/AllKernselSize3/EdressonCodecExperiments/")
     parser.add_argument('--server_address', type=str, default="pneekhara@login-eos02.eos.clusters.nvidia.com")
-    parser.add_argument('--exp_names', type=str, default="multiencoder_small_sp_ks3_lnormapplied")
-    parser.add_argument('--local_ckpt_dir', type=str, default="/datap/misc/continuouscheckpoints_fixedposembrough")
-    parser.add_argument('--out_dir', type=str, default="/datap/misc/ContinuousEvalResults/NewTransformerKoelTTS")
+    parser.add_argument('--exp_names', type=str, default="koel_12.5_FPS_causal_13codebooks_codecmodel_context5sec_LTN1,koel_12.5_FPS_causal_13codebooks_codecmodel_context5sec_LTN3")
+    parser.add_argument('--local_ckpt_dir', type=str, default="/datap/misc/experiment_checkpoints/localtransformer")
+    parser.add_argument('--out_dir', type=str, default="/datap/misc/Evals/LocalTransformerAblations2")
     parser.add_argument('--temperature', type=float, default=0.6)
     parser.add_argument('--use_cfg', action='store_true')
-    parser.add_argument('--cfg_scale', type=float, default=1.0)
+    parser.add_argument('--use_local_transformer', action='store_true')
+    parser.add_argument('--cfg_scale', type=float, default=2.5)
+    parser.add_argument('--apply_attention_prior', action='store_true')
+    parser.add_argument('--attention_prior_epsilon', type=float, default=1e-3)
+    parser.add_argument('--attention_prior_lookahead_window', type=int, default=10)
+    parser.add_argument('--estimate_alignment_from_layers', type=str, default=None)
+    parser.add_argument('--apply_prior_to_layers', type=str, default=None)
+    parser.add_argument('--start_prior_after_n_audio_steps', type=int, default=10)
     parser.add_argument('--topk', type=int, default=80)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--sv_model', type=str, default="titanet") # titanet, wavlm
     parser.add_argument('--asr_model_name', type=str, default="stt_en_conformer_transducer_large") # stt_en_conformer_transducer_large, nvidia/parakeet-ctc-0.6b
     parser.add_argument('--num_repeats', type=int, default=1)
+    parser.add_argument('--confidence_level', type=float, default=0.95)
     args = parser.parse_args()
+
+    estimate_alignment_from_layers = None
+    if args.estimate_alignment_from_layers is not None:
+        estimate_alignment_from_layers = [int(l.strip()) for l in args.estimate_alignment_from_layers.split(",")]
+    apply_prior_to_layers = None
+    if args.apply_prior_to_layers is not None:
+        apply_prior_to_layers = [int(l.strip()) for l in args.apply_prior_to_layers.split(",")]
 
     if (args.hparams_files is not None) and (args.checkpoint_files is not None) and (args.hparams_files != "null"):
         hparam_files = args.hparams_files.split(",")
@@ -225,19 +291,27 @@ def main():
         assert len(hparam_files) == len(checkpoint_files), "Number of hparams files and checkpoint files should be the same."
         for hparams_file, checkpoint_file in zip(hparam_files, checkpoint_files):
             run_inference(
-                hparams_file, 
-                checkpoint_file,
-                args.datasets.split(","),
-                args.out_dir,
-                args.temperature,
-                args.topk,
-                args.codecmodel_path,
-                args.use_cfg,
-                args.cfg_scale,
-                args.batch_size,
-                args.sv_model,
-                args.asr_model_name,
-                args.num_repeats
+                hparams_file=hparams_file, 
+                checkpoint_file=checkpoint_file,
+                datasets=args.datasets.split(","),
+                out_dir=args.out_dir,
+                temperature=args.temperature,
+                topk=args.topk,
+                codecmodel_path=args.codecmodel_path,
+                use_cfg=args.use_cfg,
+                cfg_scale=args.cfg_scale,
+                batch_size=args.batch_size,
+                sv_model=args.sv_model,
+                asr_model_name=args.asr_model_name,
+                num_repeats=args.num_repeats,
+                apply_attention_prior=args.apply_attention_prior,
+                attention_prior_epsilon=args.attention_prior_epsilon,
+                attention_prior_lookahead_window=args.attention_prior_lookahead_window,
+                estimate_alignment_from_layers=estimate_alignment_from_layers,
+                apply_prior_to_layers=apply_prior_to_layers,
+                start_prior_after_n_audio_steps=args.start_prior_after_n_audio_steps,
+                confidence_level=args.confidence_level,
+                use_local_transformer=args.use_local_transformer
             )
         return
     else:
@@ -281,17 +355,25 @@ def main():
             run_inference(
                 hparams_copy_path, 
                 checkpoint_copy_path, 
-                args.datasets.split(","), 
-                args.out_dir, 
-                args.temperature, 
-                args.topk, 
-                args.codecmodel_path, 
-                args.use_cfg,
-                args.cfg_scale,
-                args.batch_size,
-                args.sv_model,
-                args.asr_model_name,
-                args.num_repeats
+                datasets=args.datasets.split(","),
+                out_dir=args.out_dir,
+                temperature=args.temperature,
+                topk=args.topk,
+                codecmodel_path=args.codecmodel_path,
+                use_cfg=args.use_cfg,
+                cfg_scale=args.cfg_scale,
+                batch_size=args.batch_size,
+                sv_model=args.sv_model,
+                asr_model_name=args.asr_model_name,
+                num_repeats=args.num_repeats,
+                apply_attention_prior=args.apply_attention_prior,
+                attention_prior_epsilon=args.attention_prior_epsilon,
+                attention_prior_lookahead_window=args.attention_prior_lookahead_window,
+                estimate_alignment_from_layers=estimate_alignment_from_layers,
+                apply_prior_to_layers=apply_prior_to_layers,
+                start_prior_after_n_audio_steps=args.start_prior_after_n_audio_steps,
+                confidence_level=args.confidence_level,
+                use_local_transformer=args.use_local_transformer
             )
             
 
