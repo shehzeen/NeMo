@@ -530,7 +530,9 @@ class T5TTS_Model_OnlinePO(T5TTS_Model):
             )
             if use_pesq:
                 sample_audio, sr = torchaudio.load(audio_path)
-                sample_audio = torchaudio.functional.resample(sample_audio, sr, 16000)
+                sample_audio = sample_audio.to(self.device)
+                if sr != 16000:
+                    sample_audio = torchaudio.functional.resample(sample_audio, sr, 16000)
                 _, pesq_hyp, _ = self.squim_objective_model(sample_audio)
                 pesq_hyp = pesq_hyp.item()
 
