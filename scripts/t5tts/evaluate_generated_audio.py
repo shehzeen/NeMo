@@ -12,6 +12,12 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import librosa
 import evalset_config
 from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
+from torchaudio.pipelines import SQUIM_OBJECTIVE
+try:
+    HAVE_TORCHAUDIO = True
+    import torchaudio
+except ImportError:
+    HAVE_TORCHAUDIO = False
 
 def find_sample_audios(audio_dir):
     file_list = []
@@ -112,6 +118,8 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
     speaker_verification_model_alternate = speaker_verification_model_alternate.to(device)
     speaker_verification_model_alternate.eval()
 
+    if HAVE_TORCHAUDIO:
+        squim_objective_model = SQUIM_OBJECTIVE.get_model().to(device)
     
 
     filewise_metrics = []
@@ -181,6 +189,16 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
 
                 pred_context_ssim_alternate = torch.nn.functional.cosine_similarity(pred_speaker_embedding_alternate, context_speaker_embedding_alternate, dim=0).item()
                 gt_context_ssim_alternate = torch.nn.functional.cosine_similarity(gt_speaker_embedding_alternate, context_speaker_embedding_alternate, dim=0).item()
+            
+            pesq_hyp = 0.0
+            if HAVE_TORCHAUDIO:
+                pred_audio, sr = torchaudio.load(pred_audio_filepath)
+                pred_audio = pred_audio.to(device)
+                if sr != 16000:
+                    pred_audio = torchaudio.functional.resample(pred_audio, sr, 16000)
+                _, pesq_hyp, _ = squim_objective_model(pred_audio)
+                pesq_hyp = pesq_hyp.item()
+
                 
         
 
@@ -198,12 +216,13 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
             'pred_gt_ssim_alternate': pred_gt_ssim_alternate,
             'pred_context_ssim_alternate': pred_context_ssim_alternate,
             'gt_context_ssim_alternate': gt_context_ssim_alternate,
+            'pesq': pesq_hyp,
             'gt_audio_filepath': gt_audio_filepath,
             'pred_audio_filepath': pred_audio_filepath,
             'context_audio_filepath': context_audio_filepath
         })
     
-    filewise_metrics_keys_to_save = ['cer', 'wer', 'pred_context_ssim', 'pred_text', 'gt_text', 'gt_audio_filepath', 'pred_audio_filepath', 'context_audio_filepath']
+    filewise_metrics_keys_to_save = ['cer', 'wer', 'pred_context_ssim', 'pred_text', 'gt_text', 'gt_audio_filepath', 'pred_audio_filepath', 'context_audio_filepath', 'pesq']
     filtered_filewise_metrics = []
     for m in filewise_metrics:
         filtered_filewise_metrics.append({k: m[k] for k in filewise_metrics_keys_to_save})
@@ -222,6 +241,7 @@ def evaluate(manifest_path, audio_dir, generated_audio_dir, language="en", sv_mo
     avg_metrics['ssim_pred_gt_avg_alternate'] = sum([m['pred_gt_ssim_alternate'] for m in filewise_metrics]) / len(filewise_metrics)
     avg_metrics['ssim_pred_context_avg_alternate'] = sum([m['pred_context_ssim_alternate'] for m in filewise_metrics]) / len(filewise_metrics)
     avg_metrics['ssim_gt_context_avg_alternate'] = sum([m['gt_context_ssim_alternate'] for m in filewise_metrics]) / len(filewise_metrics)
+    avg_metrics['pesq_avg'] = sum([m['pesq'] for m in filewise_metrics]) / len(filewise_metrics)
     avg_metrics["cer_gt_audio_cumulative"] = word_error_rate_detail(hypotheses=gt_audio_texts, references=gt_texts, use_cer=True)[0]
     avg_metrics["wer_gt_audio_cumulative"] = word_error_rate_detail(hypotheses=gt_audio_texts, references=gt_texts, use_cer=False)[0]
 

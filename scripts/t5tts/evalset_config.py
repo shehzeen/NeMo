@@ -53,6 +53,12 @@ dataset_meta_info = {
         'feature_dir' : '/Data/LibriTTS',
         'tokenizer_names': ['english_phoneme'],
     },
+    'libri_unseen_test_shehzeen_phoneme_small': {
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/verysmallsubset.json',
+        'audio_dir' : '/Data/LibriTTS',
+        'feature_dir' : '/Data/LibriTTS',
+        'tokenizer_names': ['english_phoneme'],
+    },
     'libri_unseen_test_shehzeen_sep_char': {
         'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/test_clean_withContextAudioPaths.json',
         'audio_dir' : '/Data/LibriTTS',
@@ -233,6 +239,14 @@ dataset_meta_info = {
         'audio_dir': '/Data/CML/cml_tts_dataset_portuguese_v0.1',
         'feature_dir': '/Data/CML/cml_tts_dataset_portuguese_v0.1',
         'tokenizer_names': ['portuguese_chartokenizer'],
+        'whisper_language': 'pt',
+        'load_cached_codes_if_available': False
+    },
+    'portuguese_cml_shared_char': {
+        'manifest_path' : '/Data/CML/manifests_with_codecs/cml_tts_dataset_portuguese_v0.1/test_withAudioCodes_codec21Khz_no_eliz_filtered_100subset.json',
+        'audio_dir': '/Data/CML/cml_tts_dataset_portuguese_v0.1',
+        'feature_dir': '/Data/CML/cml_tts_dataset_portuguese_v0.1',
+        'tokenizer_names': ['chartokenizer'],
         'whisper_language': 'pt',
         'load_cached_codes_if_available': False
     },
