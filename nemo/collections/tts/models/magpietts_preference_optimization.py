@@ -86,7 +86,7 @@ class MagpieTTSModelPrefDataGen(MagpieTTSModel):
                         try:
                             if self.cfg.get("pref_set_language", "en") == "en":
                                 pred_transcripts = self.eval_asr_model.transcribe(predicted_audio_paths, batch_size=len(predicted_audio_paths))
-                                pred_transcripts = [ process_text_for_cer(transcript) for transcript in pred_transcripts ]
+                                pred_transcripts = [ process_text_for_cer(transcript.text) for transcript in pred_transcripts ]
                             else:
                                 pred_transcripts = []
                                 for audio_path in predicted_audio_paths:
@@ -140,9 +140,13 @@ class MagpieTTSModelPrefDataGen(MagpieTTSModel):
                     json.dump(item_metrics, f)
 
 class MagpieTTSModelOfflinePO(MagpieTTSModel):
+    """
+    MagpieTTS_Model_OfflinePO is a class that extends MagpieTTS_Model to support 
+    offline preference optimization (DPO, IPO, RPO). 
+    Set cfg.model.dpo_loss_type to 'dpo', 'ipo', or 'rpo' to use the corresponding loss.
+    """
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
-        # Copy cfg
         ref_model_cfg = copy.deepcopy(cfg)
         with open_dict(ref_model_cfg):
             ref_model_cfg.train_ds = None
@@ -163,7 +167,6 @@ class MagpieTTSModelOfflinePO(MagpieTTSModel):
                 del state_dict[key]
         return state_dict
 
-
     def _get_batch_logps(self, logits, labels, loss_mask, average_log_prob=False):
         """Compute the log probabilities of the given labels under the given logits.
 
@@ -182,7 +185,6 @@ class MagpieTTSModelOfflinePO(MagpieTTSModel):
         else:
             return (per_token_logps * loss_mask).sum(-1)
 
-    # https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py
     def preference_loss(self, policy_chosen_logps,
                     policy_rejected_logps,
                     reference_chosen_logps,
@@ -195,7 +197,7 @@ class MagpieTTSModelOfflinePO(MagpieTTSModel):
                     loss_type="dpo",
                     reference_free=False):
         """Compute the DPO loss for a batch of policy and reference model log probabilities.
-
+        Referenced From: https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py
         Args:
             policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
             policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
@@ -373,6 +375,10 @@ class MagpieTTSModelOfflinePO(MagpieTTSModel):
         self.validation_step_outputs.clear()
 
 class MagpieTTSModelOnlinePO(MagpieTTSModel):
+    """
+    MagpieTTS_Model_OnlinePO is a class that extends MagpieTTS_Model to support
+    online preference optimization (GRPO).
+    """
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
         # Copy cfg
@@ -500,7 +506,7 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
         with torch.no_grad():
             if self.cfg.get("reward_asr_model", "nemo") == "nemo":
                 pred_transcripts = self.eval_asr_model.transcribe(predicted_audio_paths, batch_size=len(predicted_audio_paths))
-                pred_transcripts = [ process_text_for_cer(transcript) for transcript in pred_transcripts ]
+                pred_transcripts = [ process_text_for_cer(transcript.text) for transcript in pred_transcripts ]
             elif self.cfg.get("reward_asr_model", "nemo") == "whisper":
                 pred_transcripts = []
                 for item_idx, audio_path in enumerate(predicted_audio_paths):
