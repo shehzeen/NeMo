@@ -26,8 +26,12 @@ except ImportError:
 from nemo.collections.tts.models import MagpieTTSModel
 
 
-class MagpieTTSModelPrefDataGen(MagpieTTSModel):
-    """Small override to save inference metrics, used for datagen in Offline PO"""
+class MagpieTTSModelInference(MagpieTTSModel):
+    """Small override of MagpieTTSModel for parallel multi-GPU inference and metrics calculation.
+    This class is used in 'test' mode and leverages trainer.test() for multi-GPU/multi-node inference.
+    Saves the predicted audio files and logs the CER/WER metrics as individual json files for each audio.
+    """
+    
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
         if cfg.get('pref_set_language', "en") == "en":

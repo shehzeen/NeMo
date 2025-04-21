@@ -61,8 +61,6 @@ def main(cfg):
         model = MagpieTTSModelOnlinePO(cfg=model_cfg, trainer=trainer)
     elif cfg.get('mode', 'train') == 'test':
         model = MagpieTTSModelInference(cfg=cfg.model, trainer=trainer)
-    # elif cfg.get('mode', 'train') == 'test':
-    #     model = MagpieTTSModelPrefDataGen(cfg=cfg.model, trainer=trainer)
     else:
         raise NotImplementedError(f"Only train, dpo_train and test modes are supported. Got {cfg.mode}")
 
