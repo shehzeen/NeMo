@@ -226,6 +226,10 @@ class MagpieTTSModel(ModelPT):
         if alignment_encoder_loss_scale > 0.0:
             self.alignment_encoder_loss = ForwardSumLoss(loss_scale=alignment_encoder_loss_scale)
 
+    def freeze_model(self, model):
+        for param in model.parameters():
+            param.requires_grad = False
+            
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         if hasattr(self, '_no_state_dict') and self._no_state_dict:
             return {}
