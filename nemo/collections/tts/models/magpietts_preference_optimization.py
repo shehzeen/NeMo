@@ -37,11 +37,9 @@ class MagpieTTSModelInference(MagpieTTSModel):
         if cfg.get('pref_set_language', "en") == "en":
             self.eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name="nvidia/parakeet-ctc-0.6b")
             self.eval_asr_model.freeze()
-            self.eval_asr_model.eval()
 
         self.eval_speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large')
         self.eval_speaker_verification_model.freeze()
-        self.eval_speaker_verification_model.eval()
 
         if cfg.get('load_whisper_model', False):
             from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -158,8 +156,7 @@ class MagpieTTSModelOfflinePO(MagpieTTSModel):
         self._reference_model = MagpieTTSModel(cfg=ref_model_cfg)
         print("Loading reference model from checkpoint")
         self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path, map_location="cpu", weights_only=False)['state_dict'])
-        self.freeze_model(self._reference_model)
-        self._reference_model.eval()
+        self._reference_model.freeze()
         self._reference_model._no_state_dict = True
         print("Reference model loaded and frozen")
 
@@ -396,15 +393,13 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
             self._reference_model = MagpieTTSModel(cfg=ref_model_cfg)
             print("Loading reference model from checkpoint")
             self._reference_model.load_state_dict(torch.load(cfg.reference_model_ckpt_path, map_location="cpu", weights_only=False)['state_dict'])
-            self.freeze_model(self._reference_model)
-            self._reference_model.eval()
+            self._reference_model.freeze()
             self._reference_model._no_state_dict = True
             print("Reference model loaded and frozen")
 
         if cfg.get('reward_asr_model', "nemo") == "nemo":
             self.eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name="nvidia/parakeet-ctc-0.6b")
             self.eval_asr_model.freeze()
-            self.eval_asr_model.eval()
         elif cfg.get('reward_asr_model', "nemo") == "whisper":
             from transformers import WhisperForConditionalGeneration, WhisperProcessor
             self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
@@ -415,7 +410,6 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
 
         self.eval_speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large')
         self.eval_speaker_verification_model.freeze()
-        self.eval_speaker_verification_model.eval()
 
         if cfg.get('load_whisper_model', False):
             from transformers import WhisperForConditionalGeneration, WhisperProcessor
