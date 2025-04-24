@@ -26,7 +26,7 @@ except ImportError:
 from nemo.collections.tts.models import MagpieTTSModel
 
 
-class MagpieTTSModelPrefDataGen(MagpieTTSModel):
+class MagpieTTSModelOfflinePODataGen(MagpieTTSModel):
     """Small override of MagpieTTSModel for parallel multi-GPU inference and metrics calculation.
     This class is used in 'test' mode and leverages trainer.test() for multi-GPU/multi-node inference.
     Saves the predicted audio files and logs the CER/WER metrics as individual json files for each audio.
