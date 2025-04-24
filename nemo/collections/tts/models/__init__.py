@@ -21,7 +21,7 @@ from nemo.collections.tts.models.magpietts import MagpieTTSModel
 from nemo.collections.tts.models.magpietts_preference_optimization import (
     MagpieTTSModelOfflinePO,
     MagpieTTSModelOnlinePO,
-    MagpieTTSModelInference,
+    MagpieTTSModelPrefDataGen,
 )
 from nemo.collections.tts.models.mixer_tts import MixerTTSModel
 from nemo.collections.tts.models.radtts import RadTTSModel
@@ -45,7 +45,7 @@ __all__ = [
     "MixerTTSModel",
     "RadTTSModel",
     "MagpieTTSModel",
-    "MagpieTTSModelInference",
+    "MagpieTTSModelPrefDataGen",
     "MagpieTTSModelOfflinePO",
     "MagpieTTSModelOnlinePO",
     "Tacotron2Model",
