@@ -106,7 +106,7 @@ class CharAwareSubwordEncoder(NeuralModule):
     This module takes subword ids as input, maps them to character ids, and then applies a transformer encoder to the character embeddings.
     The output is a tensor of shape (batch_size, max_subword_length, d_embed).
     """
-    def __init__(self, d_embed: int, llm_tokenizer_vocab: dict, subword_padding_idx: int, special_vocab: dict = None):
+    def __init__(self, d_embed: int, llm_tokenizer_vocab: dict, subword_padding_idx: int, special_vocab: dict = None, add_bpe_embeddings: bool = False):
         """
         Args:
             d_embed (int): The dimension of the embedding.
@@ -129,6 +129,10 @@ class CharAwareSubwordEncoder(NeuralModule):
             max_length_causal_mask=256,
             use_learnable_pos_emb=True
         )
+        self.add_bpe_embeddings = add_bpe_embeddings
+        if self.add_bpe_embeddings:
+            num_subwords = len(self.subword_id_to_char_ids)
+            self.embed_subwords = torch.nn.Embedding(num_subwords, d_embed)
 
     @property
     def vocab_size(self):
@@ -180,5 +184,8 @@ class CharAwareSubwordEncoder(NeuralModule):
         mean_emb = ((x / char_mask.unsqueeze(-1).sum(1, keepdim=True)) * char_mask.unsqueeze(-1)).sum(1)
         subword_emb = torch.zeros((subword_mask.size(0), subword_mask.size(1), mean_emb.size(-1)), device=device)
         subword_emb[subword_mask.unsqueeze(-1).expand(-1, -1, mean_emb.size(-1))] = mean_emb.view(-1)
+
+        if self.add_bpe_embeddings:
+            subword_emb += self.embed_subwords(subword_ids)
         
         return subword_emb

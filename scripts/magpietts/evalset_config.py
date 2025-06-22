@@ -28,7 +28,7 @@ dataset_meta_info = {
         'feature_dir' : '/Data/RivaData/riva',
     },
     'rough_qwen': {
-        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifests/rough.json',
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifest_rough_ipa/rough_ipa.json',
         'audio_dir' : '/Data/RivaData/riva',
         'feature_dir' : '/Data/RivaData/riva',
         'tokenizer_names': ['qwen'],

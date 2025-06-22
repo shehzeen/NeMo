@@ -103,6 +103,7 @@ class MagpieTTSModel(ModelPT):
         self.num_all_tokens_per_codebook = cfg.get('forced_num_all_tokens_per_codebook',num_audio_tokens + len(SpecialAudioToken))
         self.mask_token_id = cfg.get('forced_mask_token_id', num_audio_tokens + SpecialAudioToken.MASK_TOKEN.value)
         self.use_bpe_char_tokenizer = cfg.get('use_bpe_char_tokenizer', False)
+        self.add_bpe_embeddings = cfg.get('add_bpe_embeddings', False)
 
         # Setup tokenizer
         if hasattr(cfg, 'text_tokenizer'):
@@ -164,7 +165,8 @@ class MagpieTTSModel(ModelPT):
                     d_embed=cfg.embedding_dim,
                     llm_tokenizer_vocab=subword_vocab,
                     subword_padding_idx=self.tokenizer.pad,
-                    special_vocab=special_vocab
+                    special_vocab=special_vocab,
+                    add_bpe_embeddings=self.add_bpe_embeddings,
                 )
             else:
                 # Regular text embedding
