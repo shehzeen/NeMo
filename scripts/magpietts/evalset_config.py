@@ -27,8 +27,15 @@ dataset_meta_info = {
         'audio_dir' : '/Data/RivaData/riva',
         'feature_dir' : '/Data/RivaData/riva',
     },
-    'rough_qwen': {
+    'rough_qwen_ipa': {
         'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifest_rough_ipa/rough_ipa.json',
+        'audio_dir' : '/Data/RivaData/riva',
+        'feature_dir' : '/Data/RivaData/riva',
+        'tokenizer_names': ['qwen'],
+        'load_cached_codes_if_available': False,
+    },
+    'rough_qwen': {
+        'manifest_path' : '/home/shehzeenh/Code/NewT5TTS/manifest_rough_ipa/rough_noipa.json',
         'audio_dir' : '/Data/RivaData/riva',
         'feature_dir' : '/Data/RivaData/riva',
         'tokenizer_names': ['qwen'],
