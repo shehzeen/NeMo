@@ -745,8 +745,8 @@ class MagpieTTSDecoderModel(ModelPT):
         context_text_embedded = self.decoder.get_input_embeddings()(context_text_tokens)  # (B, L, E)
     
         full_context_embedding, full_context_lens = self.join_embeddings_temporally(
-            embeddings=[context_audio_embedded, context_text_embedded, text_embedded],
-            lengths=[context_audio_codes_lens, context_text_lens, text_lens],
+            embeddings=[context_text_embedded, context_audio_embedded, text_embedded],
+            lengths=[context_text_lens, context_audio_codes_lens, text_lens],
         )
 
         return {
