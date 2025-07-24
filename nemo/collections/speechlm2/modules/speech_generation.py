@@ -347,6 +347,17 @@ class TransformerARSpeechDecoder(NeuralModule):
         if self.cond_on_asr_emb:
             self.asr_emb_projection = nn.Linear(self.asr_emb_dim, self.speech_decoder_parms["d_model"])
 
+    def setup_speaker_encoder(self):
+        with fp32_precision():
+            self.speaker_encoder = EncDecSpeakerLabelModel.from_pretrained(model_name=self.speaker_encoder_model_name)
+
+        # freeze the pretrained speaker encoder
+        self.speaker_encoder.eval()
+        self.speaker_encoder.freeze()
+
+        for p in self.speaker_encoder.parameters():
+            p.requires_grad = False
+
     @property
     def device(self):
         return next(self.parameters()).device
