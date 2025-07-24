@@ -1292,7 +1292,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         if (
             self.cfg.get("debug_dataloader_audios_path", None)
             and self.training
-            and "s2s_duplex_overlap_as_s2s_duplex" not in batch["formatter"][0]
+            and "s2s_duplex_overlap_as_s2s_duplex" in batch["formatter"][0]
         ):
 
             def count_leading_silence_tokens(tensor: torch.Tensor, silence_token: int = 0) -> int:
@@ -1707,6 +1707,13 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 * "audio": generated waveform of shape (B, T3) (`decode_audio=True`).
                 * "audio_len" output lengths as number of waveform samples of shape (B,) (when `decode_audio=True`).
         """
+        if self.cfg.get("custom_sample_inference", None):
+            device = input_signal.device
+            input_signal, sr = torchaudio.load(self.cfg.custom_sample_inference)
+            input_signal = input_signal.to(device)[:1, :]
+            input_signal = resample(input_signal, sr, self.source_sample_rate)
+            input_signal_lens = torch.tensor([input_signal.size(-1)]).to(device)
+
         source_encoded, lengths, asr_emb = self.perception(
             input_signal=input_signal, input_signal_length=input_signal_lens, return_encoder_emb=True
         )
@@ -1996,6 +2003,11 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
 
         # Call reset_input_and_kv_cache to reset cache for TransformerARSpeechDecoder
         self.speech_generation.reset_input_and_kv_cache(use_cache=False)
+
+        if self.cfg.get("custom_sample_inference", None):
+            print(ans["audio"].shape, input_signal.shape)
+            self.results_logger.merge_and_save_audio(self.cfg.custom_sample_inference+"inf.wav", pred_audio=ans["audio"][0], pred_audio_sr=self.target_sample_rate, user_audio=input_signal[0], user_audio_sr=self.source_sample_rate)
+            exit()
         return ans
 
     def backward(self, *args, **kwargs):
