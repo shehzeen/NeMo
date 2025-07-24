@@ -210,9 +210,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # move back text channel by x, in inference it advance the text channel prediction by x frames
         self.advance_text_channel_by = self.cfg.get("advance_text_channel_by", None)
+
+        # tts general configs
         self.use_bpe_char_tokenizer = self.cfg.get("use_bpe_char_tokenizer", False)
         self.condition_spk_emb_on_bos_position = self.cfg.get("condition_spk_emb_on_bos_position", False)
+        self.cfg_unconditional_prob = self.cfg.get('cfg_unconditional_prob', 0.0)
+        self.cfg_scale = self.cfg.get('cfg_scale', None)
 
+        # codec configs
         setup_audio_codec(self)
         self._codebook_size = self.audio_codec.vector_quantizer.codebook_size_per_group
         self._num_codebooks = self.audio_codec.vector_quantizer.num_groups
@@ -220,10 +225,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # compute target fps
         self.target_fps = self.target_sample_rate / self.audio_codec.samples_per_frame
 
-        # We load the pretrained HF LLM using "ForCausalLM" variant so that we can obtain the
-        # pretrained LM head weights.
-        # However, for S2S we need to access the activations before LM head directly
-        # to feed them to the audio codec head.
+        # Load tokenizer
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
         if 'Qwen2.5' in self.cfg.pretrained_llm:
             # For Qwen, '<|im_start|>' is a common choice for a BOS token.
@@ -231,9 +233,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             logging.warning("Tokenizer does not have a `bos_token`. Setting it to '<|im_start|>'.")
             self.tokenizer.bos_token = '<|im_start|>'
             self.tokenizer.eos_token = '<|im_end|>'
-            if self.cfg.get("use_extra_id_for_pad", False):
-                self.tokenizer.pad_token = '<|extra_1|>'
 
+        # Load ForCausalLM
         llm = load_pretrained_hf(self.cfg.pretrained_llm, pretrained_weights=self.cfg.pretrained_weights).train()
         self.decoder = llm.model  # fetch PretrainedBaseModel from model "ForCausalLM"
 
@@ -413,6 +414,21 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 (1) llm cache depends on input cache is None or Not
                 (2) speech_generation cache relys on reset_input_and_kv_cache function.
         """
+
+        if self.cfg_unconditional_prob:
+            if self.training:
+                # if training drop the "text" conditioning in a percentage of batch
+                if torch.rand(1).item() < self.cfg_unconditional_prob:
+                    # make the whole batch zeros to the unconditional model
+                    input_embeds = torch.zeros_like(input_embeds)
+            elif self.cfg_scale is not None and not self.training:
+                # if inference or evaluation create a zero tensor for decoder input and concatenate it to compute unconditional logits
+                input_embeds_zeros = torch.zeros_like(input_embeds)
+                input_embeds = torch.cat([input_embeds, input_embeds_zeros], dim=0)
+                # duplicate mask to match the new shape
+                if seq_mask is not None:
+                    seq_mask = torch.cat([seq_mask, seq_mask], dim=0)
+
         out = self.decoder(
             inputs_embeds=input_embeds,
             attention_mask=seq_mask,
@@ -423,6 +439,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # get logits
         logits = self.final_proj(out.last_hidden_state)  # (B, T', num_codebooks * _codebook_size)
 
+        # if using cfg and it is in inference or evaluation mix unconditional and coditional logits
+        if self.cfg_scale is not None and self.cfg_unconditional_prob and not self.training:
+            batch_size = logits.size(0) // 2
+            cond_logits = logits[:batch_size]
+            uncond_logits = logits[batch_size:]
+            logits = (1 - self.cfg_scale) * uncond_logits + self.cfg_scale * cond_logits
         ans = {
             "logits": logits,
         }
@@ -971,7 +993,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 * "audio_len" output lengths as number of waveform samples of shape (B,) (when `decode_audio=True`).
         """
 
-
         # get context audio embedding for the whole audio
         # make sure that the audio is in target sampling rate
         if self.source_sample_rate != self.target_sample_rate:
@@ -1087,7 +1108,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             input_embeds[:, t] += self.embed_audio_tokens(
                 prev_audio_codes
             )[:, -1]
-            
+
             # replace bos token by speaker embedding
             if self.condition_spk_emb_on_bos_position:
                 bos_mask = (text_tokens[:, t] == self.text_bos_id)  # [B]
