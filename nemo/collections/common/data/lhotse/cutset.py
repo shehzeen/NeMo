@@ -488,6 +488,73 @@ def read_lhotse_as_conversation(config) -> tuple[CutSet, bool]:
     return cuts, is_tarred
 
 
+
+@data_type_parser(["lhotse_old_tts_data_as_duplex"])
+def read_lhotse_old_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
+    def convert_lhotse_old_tts_data_as_duplex(cut):
+        # create a copy of agent supervision and original duration
+        orig_agent_sup = fastcopy(cut.supervisions[1])
+        context_audio_org_dur = cut.recording.duration
+        target_audio_org_dur = cut.target_audio.duration
+
+        # Resample both to match sample_rate
+        cut.recording = cut.recording.resample(sample_rate)
+        cut.target_audio = cut.target_audio.resample(sample_rate)
+
+        # Compute total duration (source + target)
+        total_duration = cut.recording.duration + cut.target_audio.duration
+        
+        # Convert target_audio (Recording) into MonoCut so we can pad it
+        cut_target = MonoCut(
+            id=f"{cut.id}_target",
+            start=0.0,
+            duration=cut.target_audio.duration,
+            channel=0,
+            recording=cut.target_audio,
+            supervisions=[],
+        )
+        cut_target = cut_target.pad(duration=total_duration, direction="left")
+
+        # Pad original cut to the same total duration
+        cut_source = cut.pad(duration=total_duration, direction="right")
+
+        # Save both to memory
+        cut_source = cut_source.to_mono().move_to_memory(audio_format='wav')
+        cut_target = cut_target.to_mono().move_to_memory(audio_format='wav')
+
+        # user starts on zeros with dummy text
+        user_sup = fastcopy(
+            orig_agent_sup,
+            start=0.0,
+            duration=context_audio_org_dur,
+            speaker="user",
+            text="dummy text",
+        )
+        # agent starts when user turn finish and has target_audio_dur
+        agent_sup = fastcopy(
+            orig_agent_sup,
+            start=context_audio_org_dur,
+            duration=target_audio_org_dur,
+            speaker="agent",
+        )
+        # Assemble final cut
+        cut_source.supervisions = [user_sup, agent_sup]
+        cut_source.recording = cut_source.recording
+        cut_source.target_audio = cut_target.recording
+        cut_source.duration = cut_target.duration
+        cut_source.formatter = "lhotse_old_tts_data_as_duplex"
+        return cut_source
+
+    # load lhotse cuts
+    cuts, is_tarred = read_cutset_from_config(config)
+
+    # load prompt cut
+    sample_rate = 22050
+    prompt_recording = Recording.from_file(config.prompt_audio_path)
+    # convert cuts
+    cuts = cuts.map(convert_lhotse_old_tts_data_as_duplex)
+    return cuts, is_tarred
+
 @data_type_parser(["lhotse_tts_as_repeat_after_me"])
 def read_lhotse_tts_as_repeat_after_me(config) -> tuple[CutSet, bool]:
     def convert_lhotse_tts_as_repeat_after_me(cut):

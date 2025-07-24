@@ -252,7 +252,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # audio head
         self.final_proj = nn.Linear(self.decoder.config.hidden_size, self._num_codebooks * self.speech_vocab_size)
 
-        # add loss        
+        # add loss
         self.cross_entropy_loss = nn.CrossEntropyLoss(reduction='none')
 
         # use BPE char aware tokenizer
@@ -643,7 +643,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         if (
             self.cfg.get("debug_dataloader_audios_path", None)
             and self.training
-            and "s2s_duplex_overlap_as_s2s_duplex" in batch["formatter"][0]
+            and "lhotse_old_tts_data_as_duplex" in batch["formatter"][0]
         ):
 
             def count_leading_silence_tokens(tensor: torch.Tensor, silence_token: int = 0) -> int:
@@ -678,6 +678,25 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     sr = self.target_sample_rate
                 # one_audio_signal = np.clip(one_audio_signal, -1.0, 1.0)
                 sf.write(file_name, one_audio_signal, sr)
+
+            def count_initial_pad_tokens(text_labels: torch.Tensor, text_pad_id: int) -> torch.Tensor:
+                """
+                Count the number of sequential text_pad_id tokens at the start of each sequence.
+
+                Args:
+                    text_labels: Tensor of shape [B, T] (token sequences).
+                    text_pad_id: The pad token ID to count.
+
+                Returns:
+                    Tensor of shape [B,] with counts of initial pad tokens per sequence.
+                """
+                B, T = text_labels.shape
+                is_pad = (text_labels == text_pad_id).to(torch.int32)  # [B, T]
+
+                # Compute where pad sequence breaks using cumulative product
+                mask = torch.cumprod(is_pad, dim=1)  # [B, T] will become 0 after first non-pad
+
+                return mask.sum(dim=1)  # [B,]
 
             # encode and decode the audio
             with fp32_precision(), torch.no_grad():
@@ -728,18 +747,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     ),
                     sr=self.target_sample_rate,
                 )
-                if self.cfg.get("use_eou_decoder", None) or self.cfg.get("llm_predict_eou", None):
-                    repeat_factor = int(self.target_sample_rate / self.target_fps)
-                    eou_wav = (
-                        eou_labels[i].unsqueeze(0).unsqueeze(-1).repeat(1, 1, repeat_factor)
-                    )  # (B, T, repeat_factor)
-                    eou_wav = eou_wav.view(1, -1)  # (B, T * repeat_factor)
-                    eou_wav = eou_wav.float() * 0.8  #  make 1 audible and keep 0 as total silence
-                    write_wave(
-                        eou_wav.squeeze(),
-                        os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"eou_{i}.wav"),
-                        sr=self.target_sample_rate,
-                    )
 
             num_bos_tokens = (text_labels.unsqueeze(-1) == self.text_bos_id).flatten(1, 2).sum(-1)
             # Count how many EOS tokens are present per sequence
@@ -768,6 +775,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             )
 
             print(batch["formatter"])
+            print("Consecutives pad tokens on text channel:", count_initial_pad_tokens(text_labels, self.text_pad_id))
             if audio_labels_.shape[0] > 1:
                 exit()
 
