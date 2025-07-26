@@ -34,7 +34,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 from transformers import DynamicCache
-from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 
 from nemo.collections.asr.models import EncDecSpeakerLabelModel
 
@@ -63,6 +62,38 @@ from nemo.utils import logging
 
 from nemo.collections.tts.modules import transformer_2501
 
+def get_mask_from_lengths(
+    lengths: torch.Tensor = None,
+    x: torch.Tensor = None,
+    pad_to_factor: int = None
+) -> torch.Tensor:
+    """Constructs binary mask from a 1D torch tensor of input lengths
+    Args:
+        lengths: torch.tensor (torch.tensor): 1D tensor with lengths
+        x: torch.tensor = tensor to be used on, last dimension is for mask
+    Returns:
+        mask (torch.tensor): num_sequences x max_length binary tensor
+    """
+    if lengths is None:
+        assert x is not None
+        return torch.ones(x.shape[-1], dtype=torch.bool, device=x.device)
+    else:
+        if x is None:
+            max_len = torch.max(lengths)
+        else:
+            max_len = x.shape[-1]
+
+    if pad_to_factor is not None:
+        with fp32_precision():
+            max_len = torch.ceil(max_len / pad_to_factor) * pad_to_factor
+
+    ids = torch.arange(0, max_len, device=lengths.device, dtype=lengths.dtype)
+    mask = ids < lengths.unsqueeze(1)
+    return mask
+
+def left_shift_input(tensor, pad_value=0.0):
+    # Shifts left by 1, pads last timestep
+    return torch.cat([tensor[:, 1:], torch.full_like(tensor[:, :1], pad_value)], dim=1)
 
 def build_vocabs(subword_vocab: dict, subword_padding_idx: int, special_vocab: dict = None) -> tuple[dict, dict]:
     """
@@ -216,6 +247,9 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self.condition_spk_emb_on_bos_position = self.cfg.get("condition_spk_emb_on_bos_position", False)
         self.cfg_unconditional_prob = self.cfg.get('cfg_unconditional_prob', 0.0)
         self.cfg_scale = self.cfg.get('cfg_scale', None)
+        self.use_maskgit_local_transformer = self.cfg.get('use_maskgit_local_transformer', False)
+        # ratio between the the codec frame rate and the Magpie decoder's frame rate
+        self.downsampling_factor = self.cfg.get('downsampling_factor', 1)
 
         # codec configs
         setup_audio_codec(self)
@@ -224,6 +258,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # compute target fps
         self.target_fps = self.target_sample_rate / self.audio_codec.samples_per_frame
+
+        # compute source fps
+        self.source_fps = self.source_sample_rate / (
+            self.source_sample_rate * cfg.data.frame_length
+        )  # conver frame rate in fps
+        self.source_samples_per_frame = self.source_sample_rate//self.source_fps
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
@@ -245,12 +285,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # audio embeddings
         audio_embeddings = []
-        for _ in range(self._num_codebooks):
+        for _ in range(self._num_codebooks * self.downsampling_factor):
             audio_embeddings.append(nn.Embedding(self.speech_vocab_size, self.decoder.config.hidden_size))
         self.audio_embeddings = nn.ModuleList(audio_embeddings)
 
         # audio head
-        self.final_proj = nn.Linear(self.decoder.config.hidden_size, self._num_codebooks * self.speech_vocab_size)
+        self.final_proj = nn.Linear(self.decoder.config.hidden_size, self._num_codebooks * self.speech_vocab_size * self.downsampling_factor)
 
         # add loss
         self.cross_entropy_loss = nn.CrossEntropyLoss(reduction='none')
@@ -272,6 +312,24 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 llm_tokenizer_vocab=llm_tokenizer_vocab_items,
                 subword_padding_idx=self.tokenizer.pad
             )
+
+        # if use maskgit local transformer
+        if self.use_maskgit_local_transformer:
+            self.local_transformer = transformer_2501.Transformer(
+                n_layers=self.cfg.get('local_transformer_n_layers', 2),
+                d_model=local_transformer_hidden_dim,
+                d_ffn=local_transformer_hidden_dim*4,
+                sa_n_heads=self.cfg.get('local_transformer_n_heads', 1),
+                kernel_size=1,
+                is_causal=False,
+                max_length_causal_mask=self.downsampling_factor * self._num_codebooks+2,
+                use_learnable_pos_emb=True,
+            )
+            local_transformer_out_projections = []
+            for _ in range(self._num_codebooks * self.downsampling_factor):
+                # Have a separate projection layer for each codebook, to distinguish between them
+                local_transformer_out_projections.append(nn.Linear(local_transformer_hidden_dim, self.speech_vocab_size))
+            self.local_transformer_out_projections = nn.ModuleList(local_transformer_out_projections)
 
         # init speaker encoder
         self.speaker_encoder_model_name = self.cfg.get("speaker_encoder_model_name", 'titanet_large')
@@ -388,17 +446,27 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 g = g.unsqueeze(1)
         return g
 
-    def embed_audio_tokens(self, audio_tokens):
+    def embed_audio_tokens(self, audio_tokens, lengths=None):
         audio_tokens = audio_tokens.transpose(1, 2).contiguous()
+        B, C, T = audio_tokens.shape
         # Add and average the embeddings of the audio tokens across the codebooks
         audio_embedding = None
-        for c in range(self._num_codebooks):
-            embedding = self.audio_embeddings[c](audio_tokens[:, c, :])
-            if audio_embedding is None:
-                audio_embedding = embedding
-            else:
-                audio_embedding = audio_embedding + embedding
-        audio_embedding = audio_embedding / audio_tokens.size(1)
+        for i in range(self.downsampling_factor):
+            for c in range(C):
+                tokens = audio_tokens[:,c , i::self.downsampling_factor]
+                embedding = self.audio_embeddings[c + i * C](tokens)
+                if audio_embedding is None:
+                    audio_embedding = embedding
+                else:
+                    audio_embedding += embedding
+        audio_embedding = audio_embedding / (C * self.downsampling_factor)
+
+        # if lengths is not None return the new lenghts considering the downsampling_factor
+        if lengths is not None:
+            with fp32_precision():
+                lengths = torch.ceil(lengths / self.downsampling_factor).to(lengths.dtype)
+            return audio_embedding, lengths
+
         return audio_embedding
 
     def forward(
@@ -453,6 +521,26 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         return ans
 
+    def pad_audio_codes_to_factor(self, audio_codes: torch.Tensor, downsampling_factor: int = 1, pad_token: int =0):
+        """
+        Pads the time dimension of the audio codes to a multiple of the downsampling factor.
+        Args:
+            audio_codes (torch.Tensor): B, C, T
+            downsampling_factor (int): The factor to downsample by.
+            pad_token (int): The token ID to pad with.
+        Returns:
+            B, C, T_padded
+        """
+        audio_codes = audio_codes.transpose(1, 2)
+        T = audio_codes.size(2)
+        with fp32_precision():
+            T_padded = (torch.ceil(torch.tensor(T / downsampling_factor)) * downsampling_factor).int().item()
+
+        if T_padded > T:
+            padding = pad_token * torch.ones(audio_codes.size(0), audio_codes.size(1), T_padded - T, device=audio_codes.device, dtype=audio_codes.dtype)
+            audio_codes = torch.cat([audio_codes, padding], dim=2)
+        return audio_codes.transpose(1, 2)
+
     def prepare_inputs(self, batch: dict):
         """
         Similar to DuplexS2SModel.prepare_inputs, with following changes:
@@ -496,7 +584,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         source_audio_lens = batch["source_audio_lens"]
         if self.source_sample_rate != self.target_sample_rate:
             source_audio = resample(source_audio, self.source_sample_rate, self.target_sample_rate)
-            source_audio_lens = source_audio_lens * self.target_sample_rate/self.source_sample_rate
+            with fp32_precision():
+                source_audio_lens = (source_audio_lens * (self.target_sample_rate/self.source_sample_rate)).to(lengths.dtype)
         
         # ToDo: Add a transformer encoder to help the model to better extract contextual information, replace the code bellow with it
         # extract embedding for context audios
@@ -506,30 +595,36 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             )
             source_codes = source_codes.transpose(1, 2)  # (B, K, T) -> (B, T, K)
 
-        # source codes to embeddings
-        source_audio_emb = self.embed_audio_tokens(
-            source_codes
-        )
+        # pad audio tokens to be divisible by the self.downsampling_factor
+        # ToDo pad audio instead
+        if self.downsampling_factor > 1:
+            # pad tokens with speech_delay_token
+            source_codes = self.pad_audio_codes_to_factor(source_codes, self.downsampling_factor, pad_token=self.speech_delay_id)
+            target_codes = self.pad_audio_codes_to_factor(target_codes, self.downsampling_factor, pad_token=self.speech_delay_id)
+            # increase lens to the new size
+            with fp32_precision():
+                source_codes_lens = (source_codes_lens * (source_codes.size(1) / source_codes_lens.max())).to(source_codes_lens.dtype)
+                target_codes_lens = (target_codes_lens * (target_codes.size(1) / target_codes_lens.max())).to(target_codes_lens.dtype)
 
         target_tokens = batch["target_tokens"]
-        if (diff := target_tokens.shape[1] - source_audio_emb.shape[1]) < 0:
+        if (diff := target_tokens.shape[1] - (source_codes.shape[1])//self.downsampling_factor) < 0:
             target_tokens = torch.cat(
                 [
                     target_tokens,
                     (
-                        torch.ones(source_audio_emb.shape[0], abs(diff), device=source_audio_emb.device) * self.text_pad_id
+                        torch.ones(source_codes.shape[0], abs(diff), device=source_codes.device) * self.text_pad_id
                     ).to(torch.long),
                 ],
                 dim=-1,
             )
         elif diff > 0:
-            target_tokens = target_tokens[:, : source_audio_emb.shape[1]]
+            target_tokens = target_tokens[:, : source_codes.shape[1]]
 
-        if (tl := target_codes.shape[1]) != (sl := source_audio_emb.shape[1]):
+        if (tl := target_codes.shape[1]) != (sl := source_codes.shape[1]):
             if tl < sl:
                 diff = sl - tl
-                source_audio_emb = source_audio_emb[:, :tl]
-                target_tokens = target_tokens[:, :tl]
+                source_codes = source_codes[:, :tl]
+                target_codes = target_codes[:, :tl]
                 torch.clamp_(source_codes_lens, max=tl)
             else:
                 diff = tl - sl
@@ -540,21 +635,33 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     f"A mismatch between source ({sl}) and target ({tl}) sequence length greater than 2 detected. "
                     f"This may indicate significant desynchronization in longer sessions."
                 )
+        B, T = target_tokens.shape
 
-        btt = target_tokens[..., None]
-        target_codes = torch.where(btt == self.text_bos_id, self.speech_bos_id, target_codes)
-        target_codes = torch.where(btt == self.text_eos_id, self.speech_eos_id, target_codes)
+        # Add BOS and EOS on speech channel considering self.downsampling_factor
+        bos_indices = (target_tokens == self.text_bos_id).nonzero(as_tuple=False)  # [N_bos, 2]
+        eos_indices = (target_tokens == self.text_eos_id).nonzero(as_tuple=False)  # [N_eos, 2]
+
+        # Modify target_codes in-place at aligned positions
+        if bos_indices.numel() > 0:
+            target_codes[bos_indices[:, 0], bos_indices[:, 1] * self.downsampling_factor] = self.speech_bos_id
+
+        if eos_indices.numel() > 0:
+            target_codes[eos_indices[:, 0], eos_indices[:, 1] * self.downsampling_factor] = self.speech_eos_id
+
+        # btt = target_tokens[..., None]
+        # target_codes= torch.where(btt == self.text_bos_id, self.speech_bos_id, target_codes)
+        # target_codes = torch.where(btt == self.text_eos_id, self.speech_eos_id, target_codes)
 
         # Add delay token
         target_codes = torch.cat(
             [
                 torch.full(
-                    [target_codes.shape[0], 1, target_codes.shape[-1]],
+                    [target_codes.shape[0], self.downsampling_factor, target_codes.shape[-1]],
                     fill_value=self.speech_delay_id,
                     device=self.device,
                     dtype=torch.long,
                 ),
-                target_codes[:, :-1],
+                target_codes[:, :-self.downsampling_factor],
             ],
             dim=1,
         )
@@ -571,13 +678,18 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             target_tokens = torch.cat([target_tokens[:, self.advance_text_channel_by :], pad], dim=-1)
             # make sure that eos/bos is in the place (it can cut tokens from the first advance_text_channel_by tokens and this will breaks everything)
 
+        # source codes to embeddings
+        source_audio_emb, source_audio_emb_lens = self.embed_audio_tokens(
+            source_codes, source_codes_lens
+        )
+
         # target codes to embeddings
-        target_audio_emb = self.embed_audio_tokens(
-            target_codes
+        target_audio_emb, target_audio_emb_lens = self.embed_audio_tokens(
+            target_codes, target_codes_lens
         )
 
         # create sequence mask
-        seq_mask = get_mask_from_lengths(target_codes_lens)
+        seq_mask = get_mask_from_lengths(target_audio_emb_lens)
 
         if self._use_tp:
             tp_world_size = self.device_mesh["tensor_parallel"].size()
@@ -588,6 +700,43 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 source_audio_emb = source_audio_emb[:, :-remainder]
                 target_audio_emb = target_audio_emb[:, :-remainder]
                 seq_mask = seq_mask[:, :-remainder]
+        
+        # when using self.downsampling_factor > 1 we cant remove frames from the tensor so use padding instead
+        if self.downsampling_factor > 1:
+            # Pad target_tokens (text) along time dim
+            t_pad = torch.full(
+                (target_tokens.shape[0], 1),
+                fill_value=self.text_pad_id,
+                device=target_tokens.device,
+                dtype=target_tokens.dtype,
+            )
+            target_tokens = torch.cat([target_tokens, t_pad], dim=1)  # [B, T+1]
+
+            # Pad target_codes (audio tokens) along time dim
+            a_pad = torch.full(
+                (target_codes.shape[0], 1, target_codes.shape[2]),
+                fill_value=self.speech_delay_id,
+                device=target_codes.device,
+                dtype=target_codes.dtype,
+            )
+            target_codes = torch.cat([target_codes, a_pad], dim=1)  # [B, T+1, K]
+
+            # Pad embeddings along time dim
+            e_pad = torch.zeros(
+                (source_audio_emb.shape[0], 1, source_audio_emb.shape[2]),
+                device=source_audio_emb.device,
+                dtype=source_audio_emb.dtype,
+            )
+            source_audio_emb = torch.cat([source_audio_emb, e_pad], dim=1)  # [B, T+1, D]
+            target_audio_emb = torch.cat([target_audio_emb, e_pad], dim=1)  # [B, T+1, D]
+            # pad seq_mask
+            m_pad = torch.full(
+                (seq_mask.shape[0], 1),
+                fill_value=0,
+                device=seq_mask.device,
+                dtype=seq_mask.dtype,
+            )
+            seq_mask = torch.cat([seq_mask, m_pad], dim=1)  # [B, T+1]
 
         # text labels -- tts input and audio labels are aligned
         text_labels = target_tokens[:, 1:]  # (B, T-1)
@@ -624,21 +773,74 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # ToDo: Add on speaker embedding per turn to make possible to have multi speaker as agent
         speaker_encoder_emb = None
         if self.condition_spk_emb_on_bos_position:
-            # handle speaker conditioning - extract speaker embedding
+            # Extract speaker embedding
             target_first_turn_audio = batch["target_first_turn_audio"]
             target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
             speaker_encoder_emb = self.get_speaker_embedding(
                 target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
-            ).to(target_audio_emb.dtype)
-            # project speaker embedding to match llm input size
-            speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb)  # [B, D]
-            # Expand the speaker embedding to match input_embeds at BOS positions
-            bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
-            # Expand speaker embedding to match [B, T, D]
-            speaker_embedding_projected_expanded = speaker_embedding_projected #.repeat(1, input_embeds.size(1), 1)  # [B, T, D]
-            # Replace BOS positions in input_embeds with speaker embedding
-            input_embeds = torch.where(bos_mask, speaker_embedding_projected_expanded, input_embeds)
+            ).to(target_audio_emb.dtype)  # [B, D]
+            
+            speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb) # [B, 1, D]
+            speaker_embedding_projected = speaker_embedding_projected.squeeze(1)  # → [B, D]
 
+            if self.downsampling_factor > 1:
+                bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2]
+                if bos_indices.numel() > 0:
+                    b_idx = bos_indices[:, 0]                          # [N]
+                    t_idx = bos_indices[:, 1] * self.downsampling_factor  # [N]
+
+                    # Filter out out-of-bounds indices
+                    valid = t_idx < input_embeds.shape[1]
+                    b_idx = b_idx[valid]
+                    t_idx = t_idx[valid]
+                    spk_embs = speaker_embedding_projected[b_idx]  # [N, D]
+
+                    # Apply speaker embeddings at BOS-aligned input positions
+                    input_embeds[b_idx, t_idx, :] = spk_embs
+            else:
+                # Single-turn case
+                bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
+                spk_embs = speaker_embedding_projected.unsqueeze(1)  # [B, 1, D]
+                input_embeds = torch.where(bos_mask, spk_embs, input_embeds)
+        """
+        if self.condition_spk_emb_on_bos_position:
+            if self.downsampling_factor > 1:
+                # handle speaker conditioning - extract speaker embedding
+                target_first_turn_audio = batch["target_first_turn_audio"]
+                target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
+                speaker_encoder_emb = self.get_speaker_embedding(
+                    target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
+                ).to(target_audio_emb.dtype)  # [B, D]
+
+                # project speaker embedding to match input_embeds last dimension
+                speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb)  # [B, D]
+
+                # Find BOS token positions in text_labels
+                bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2] → (batch_idx, token_idx)
+
+                # Inject speaker embedding at aligned position in input_embeds
+                if bos_indices.numel() > 0:
+                    b_idx = bos_indices[:, 0]
+                    t_idx = bos_indices[:, 1] * self.downsampling_factor  # aligned positions
+                    print(input_embeds.shape, speaker_embedding_projected.shape, speaker_embedding_projected[b_idx].squeeze(1).shape)
+                    # Correct broadcasting
+                    input_embeds[b_idx, t_idx] = speaker_embedding_projected[b_idx].squeeze(1)
+            else:
+                # handle speaker conditioning - extract speaker embedding
+                target_first_turn_audio = batch["target_first_turn_audio"]
+                target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
+                speaker_encoder_emb = self.get_speaker_embedding(
+                    target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
+                ).to(target_audio_emb.dtype)
+                # project speaker embedding to match llm input size
+                speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb)  # [B, D]
+                # Expand the speaker embedding to match input_embeds at BOS positions
+                bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
+                # Expand speaker embedding to match [B, T, D]
+                speaker_embedding_projected_expanded = speaker_embedding_projected #.repeat(1, input_embeds.size(1), 1)  # [B, T, D]
+                # Replace BOS positions in input_embeds with speaker embedding
+                input_embeds = torch.where(bos_mask, speaker_embedding_projected_expanded, input_embeds)
+        """
         # debug samples:
         if (
             self.cfg.get("debug_dataloader_audios_path", None)
@@ -757,14 +959,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             print(
                 "text_labels decoded:",
                 tokens_to_str(
-                    text_labels[-1:], target_codes_lens - 1, tokenizer=self.tokenizer, pad_id=self.text_pad_id
+                    text_labels[-1:], target_audio_emb_lens - 1, tokenizer=self.tokenizer, pad_id=self.text_pad_id
                 ),
             )
             print(
                 "target labels from dataloader decoded:",
                 tokens_to_str(
                     batch["target_tokens"][-1:],
-                    target_codes_lens - 1,
+                    target_audio_emb_lens - 1,
                     tokenizer=self.tokenizer,
                     pad_id=self.text_pad_id,
                 ),
@@ -781,62 +983,61 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         return {
             "input_embeds": input_embeds,
-            "input_lens": source_codes_lens - 1,
-            "output_lens": target_codes_lens - 1,
+            "input_lens": source_audio_emb_lens - 1 if self.downsampling_factor <= 1 else source_audio_emb_lens,
+            "output_lens": target_codes_lens - 1 if self.downsampling_factor <= 1 else target_codes_lens,
             "text_tokens": text_labels,
             "audio_labels": audio_labels,
             "seq_mask": seq_mask,
             "speaker_encoder_emb": speaker_encoder_emb,
         }
 
-    def compute_loss(self, logits, audio_codes, audio_codes_lens, mask_tokens_mask=None, loss_mask=None):
+
+    def compute_loss(self, logits, audio_codes, audio_codes_lens, mask_tokens_mask=None):
         """
         Computes the audio codebook loss. Used by
         (1) The main Magpie-TTS transformer
         (2) The local transformer, for both autoregressive and MaskGit methods
-        
-        logits: (B, T', num_codebooks * _codebook_size)
-        audio_codes: (B, T', C)
+
+        logits: (B, T', num_codebooks * num_tokens_per_codebook)
+        audio_codes: (B, C, T')
         audio_codes_lens: (B,)
         mask_tokens_mask: (B, C, T') True for tokens that were replaced with the MASK_TOKEN and should
-                                     therefore be the only ones included in the loss computation.
+                                     therefore be the only ones included in the loss computation (for MaskGit).
         """
         audio_codes = audio_codes.transpose(1, 2)
-
-        if loss_mask is None:
-            loss_mask = get_mask_from_lengths(audio_codes_lens)
-
+        loss_mask = get_mask_from_lengths(audio_codes_lens, pad_to_factor=self.downsampling_factor)
         if mask_tokens_mask is not None:
-            # For MaskGit we only compute loss for the masked tokens.
-            # *Both* conditions must be true:
-            # 1. the token is masked
-            # 2. the token is not padding
             loss_mask = loss_mask.unsqueeze(1) * mask_tokens_mask
             if not loss_mask.any():
                 # Without this we were very rarely getting NaNs in the loss
                 logging.warning("No tokens valid were found in compute_loss()!")
-                return torch.tensor(0.0, device=loss_mask.device), loss_mask 
-        else:            
+                return torch.tensor(0.0, device=loss_mask.device), loss_mask
+        else:
             # repeat loss mask for each codebook to simplify code below
             loss_mask = loss_mask.unsqueeze(1).repeat(1, audio_codes.size(1), 1)
+
         total_codebook_loss = None
-        for codebook in range(audio_codes.size(1)):
-            si = codebook * self.speech_vocab_size
-            ei = si + self.speech_vocab_size
-            codebook_logits = logits[:, :, si:ei]  # (B, T', _codebook_size)
-            codebook_targets = audio_codes[:, codebook]  # (B, T')
+        for ds_index in range(self.downsampling_factor):
+            for codebook in range(audio_codes.size(1)):
+                si = (codebook + self._num_codebooks * ds_index) * self.speech_vocab_size
+                ei = si + self.speech_vocab_size
+                codebook_logits = logits[:, :, si:ei]  # (B, T', num_tokens_per_codebook)
+                codebook_targets = audio_codes[:, codebook, ds_index::self.downsampling_factor]  # (B, T')
+                codebook_loss = self.cross_entropy_loss(
+                    codebook_logits.permute(0, 2, 1), codebook_targets  # (B, num_tokens_per_codebook, T')
+                )  # (B, T')
+                codebook_loss_mask = loss_mask[:, codebook, ds_index::self.downsampling_factor]
+                codebook_loss = codebook_loss * codebook_loss_mask
+                if codebook_loss_mask.sum() == 0:
+                    logging.warning(f"Loss mask for codebook {codebook} is all zeros, global_step: {self.global_step}")
+                    continue
+                codebook_loss = codebook_loss.sum() / codebook_loss_mask.sum()
+                if total_codebook_loss is None:
+                    total_codebook_loss = codebook_loss
+                else:
+                    total_codebook_loss = total_codebook_loss + codebook_loss
 
-            codebook_loss = self.cross_entropy_loss(
-                codebook_logits.permute(0, 2, 1), codebook_targets  # (B, _codebook_size, T')
-            )  # (B, T')
-            codebook_loss = codebook_loss * loss_mask[:, codebook, :]
-            codebook_loss = codebook_loss.sum() / loss_mask[:, codebook, :].sum()
-            if total_codebook_loss is None:
-                total_codebook_loss = codebook_loss
-            else:
-                total_codebook_loss = total_codebook_loss + codebook_loss
-
-        total_codebook_loss = total_codebook_loss / audio_codes.size(1)
+        total_codebook_loss = total_codebook_loss / (audio_codes.size(1) * self.downsampling_factor) 
         return total_codebook_loss, loss_mask
 
     def training_step(self, batch: dict, batch_idx: int):
@@ -856,7 +1057,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             seq_mask=inputs["seq_mask"]
         )
 
-        codebook_loss, loss_mask = self.compute_loss(forward_outputs["logits"], inputs["audio_labels"],  inputs["output_lens"], loss_mask=inputs["seq_mask"])
+        codebook_loss, loss_mask = self.compute_loss(forward_outputs["logits"], inputs["audio_labels"],  inputs["output_lens"])
         loss = codebook_loss
 
         # ToDo: Add local transformer losses
@@ -947,29 +1148,59 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         return text_bos, input_embeds
 
     def sample_codes_from_logits(self, all_code_logits_t, temperature=0.7, topk=80, unfinished_items={}, finished_items={}):
-        # all_code_logits_t: (B, num_codebooks * _codebook_size), logits at a given timestep
-        all_preds = []
-        for idx in range(self._num_codebooks):
-            si = idx * self.speech_vocab_size
-            ei = si + self.speech_vocab_size
-            codebook_logits = all_code_logits_t[:, si:ei]  # (B, _codebook_size)
-            for item_idx in unfinished_items:
-                codebook_logits[item_idx, self.speech_eos_id] = float('-inf')
-            for item_idx in finished_items:
-                codebook_logits[item_idx, :] = float('-inf')
-                codebook_logits[item_idx, self.speech_eos_id] = 0.0
-            codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0]  # (B, topk)
-            indices_to_remove = codebook_logits < codebook_logits_topk[:, -1].unsqueeze(
-                -1
-            )  # (B, _codebook_size)
-            codebook_logits_rescored = codebook_logits.clone()
-            codebook_logits_rescored[indices_to_remove] = float('-inf')
+        # all_code_logits_t: (B, num_codebooks * num_tokens_per_codebook), logits at a given timestep
+        all_preds = [[] for _ in range(self.downsampling_factor)]
+        for ds_index in range(self.downsampling_factor):
+            for idx in range(self._num_codebooks):
+                si = (idx + self._num_codebooks * ds_index) * self.speech_vocab_size
+                ei = si + self.speech_vocab_size
+                codebook_logits = all_code_logits_t[:, si:ei]  # (B, num_tokens_per_codebook)
+                for item_idx in unfinished_items:
+                    codebook_logits[item_idx, self.speech_eos_id] = float('-inf')
+                for item_idx in finished_items:
+                    codebook_logits[item_idx, :] = float('-inf')
+                    codebook_logits[item_idx, self.speech_eos_id] = 0.0
+                codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0]  # (B, topk)
+                indices_to_remove = codebook_logits < codebook_logits_topk[:, -1].unsqueeze(
+                    -1
+                )  # (B, num_tokens_per_codebook)
+                codebook_logits_rescored = codebook_logits.clone()
+                codebook_logits_rescored[indices_to_remove] = float('-inf')
 
-            codebook_probs = torch.softmax(codebook_logits_rescored / temperature, dim=-1)  # (B, _codebook_size)
-            codebook_preds = torch.multinomial(codebook_probs, 1)  # (B, 1)
-            all_preds.append(codebook_preds)
-        all_preds = torch.cat(all_preds, dim=1).long()  # (B, num_codebooks)
+                codebook_probs = torch.softmax(codebook_logits_rescored / temperature, dim=-1)  # (B, num_tokens_per_codebook)
+                codebook_preds = torch.multinomial(codebook_probs, 1)  # (B, 1)
+                all_preds[ds_index].append(codebook_preds)
+                
+        all_preds = [torch.cat(ds_preds, dim=1).long() for ds_preds in all_preds]  # list of downsampling_factor of (B, num_codebooks)
+
+        all_preds = torch.stack(all_preds, dim=2)  # (B, num_codebooks, downsampling_factor)
+
+        # cat to get the right shape
+        # all_preds = torch.cat(all_preds, dim=-1)# (B, num_codebooks)
         return all_preds
+
+    def pad_audio_to_factor(self, audio, audio_len, samples_per_frame, downsampling_factor: int = 1):
+        """
+        Zero pad the end of the audio so that we do not have a partial end frame.
+        The output will be zero-padded to have an integer number of frames of
+        length `samples_per_frame * downsampling_factor`.
+
+        Args:
+            audio: input time-domain signal (B, T)
+            audio_len: valid length for each example in the batch (B,)
+            samples_per_frame: number of samples per frame
+            downsampling_factor: how much each frame is downsampled in later processing
+
+        Returns:
+            padded_audio: Padded time-domain signal (B, T')
+            padded_len: Adjusted valid lengths (B,)
+        """
+        total_factor = samples_per_frame * downsampling_factor
+        padded_len = total_factor * torch.ceil(audio_len / total_factor).int()
+        max_len = padded_len.max().int().item()
+        num_padding = max_len - audio.shape[1]
+        padded_audio = F.pad(audio, (0, num_padding))
+        return padded_audio, padded_len
 
     @torch.no_grad()
     def offline_inference(
@@ -1005,7 +1236,11 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # make sure that the audio is in target sampling rate
         if self.source_sample_rate != self.target_sample_rate:
             source_audio = resample(source_audio, self.source_sample_rate, self.target_sample_rate)
-            source_audio_lens = source_audio_lens * self.target_sample_rate/self.source_sample_rate
+            with fp32_precision():
+                source_audio_lens = source_audio_lens * (self.target_sample_rate/self.source_sample_rate)
+
+
+        source_audio, source_audio_lens = self.pad_audio_to_factor(source_audio, source_audio_lens, self.source_samples_per_frame, self.downsampling_factor)
 
         # ToDo: Add a transformer encoder to help the model to better extract contextual information, replace the code bellow with it
         # extract embedding for context audios
@@ -1016,10 +1251,9 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             source_codes = source_codes.transpose(1, 2)  # (B, K, T) -> (B, T, K)
 
         # source codes to embeddings
-        source_audio_emb = self.embed_audio_tokens(
-            source_codes
+        source_audio_emb, lengths = self.embed_audio_tokens(
+            source_codes, lengths
         )
-
         text_mask = get_mask_from_lengths(lengths)
 
         # make sure text tokens and context have the same size
@@ -1061,14 +1295,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # This cache is for self.decoder
         cache = DynamicCache()
-        gen_audio = torch.zeros(B, T, self._num_codebooks, device=self.device, dtype=torch.long)
+        gen_audio = torch.zeros(B, T, self._num_codebooks, self.downsampling_factor, device=self.device, dtype=torch.long)
 
         # Add source audio first frame to the model input
         input_embeds[:, 0] = source_audio_emb[:, 0]
 
         # first audio tokens are full with speech_delay_id
         first_audio_codes = torch.full(
-            [B, 1, self._num_codebooks],
+            [B, self.downsampling_factor, self._num_codebooks],
             fill_value=self.speech_delay_id,
             device=self.device,
             dtype=torch.long,
@@ -1114,7 +1348,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             # add audio tokens
             prev_audio_codes = gen_audio[:, t - 1 : t, :]
             input_embeds[:, t] += self.embed_audio_tokens(
-                prev_audio_codes
+                prev_audio_codes.reshape(prev_audio_codes.size(0), -1, self._num_codebooks) # reshape to handle self.downsampling_factor
             )[:, -1]
 
             # replace bos token by speaker embedding
@@ -1154,18 +1388,23 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             text_tokens = text_tokens[:, :T_local]
             gen_audio = gen_audio[:, :T_local]
 
+        # expand lengths to match the new size
+        with fp32_precision():
+            tokens_audio_len = torch.ceil(lengths * self.downsampling_factor).to(lengths.dtype)
+
         ans = {
             "text": tokens_to_str(text_tokens, lengths, tokenizer=self.tokenizer, pad_id=self.text_pad_id),
             "tokens_text": text_tokens,
-            "tokens_audio": gen_audio,
-            "tokens_len": lengths,
+            "tokens_audio": gen_audio.reshape(gen_audio.size(0), -1, self._num_codebooks), # reshape to handle self.downsampling_factor
+            "tokens_text_len": lengths,
+            "tokens_audio_len": tokens_audio_len,
         }
 
         if decode_audio:
-            gen_audio_codes = replace_control_speech_codes(gen_audio, self._control_codes)
+            gen_audio_codes = replace_control_speech_codes(ans["tokens_audio"], self._control_codes)
             with fp32_precision(), torch.no_grad():
                 predicted_audio, predicted_audio_lens = self.audio_codec.decode(
-                    tokens=gen_audio_codes.transpose(1, 2), tokens_len=lengths
+                    tokens=gen_audio_codes.transpose(1, 2), tokens_len=tokens_audio_len
                 )
             ans["audio"] = predicted_audio
             ans["audio_len"] = predicted_audio_lens
