@@ -550,7 +550,7 @@ def read_lhotse_old_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
 
     # load prompt cut
     sample_rate = 22050
-    prompt_recording = Recording.from_file(config.prompt_audio_path)
+
     # convert cuts
     cuts = cuts.map(convert_lhotse_old_tts_data_as_duplex)
     return cuts, is_tarred
