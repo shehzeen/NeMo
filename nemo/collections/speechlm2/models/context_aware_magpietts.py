@@ -14,6 +14,7 @@
 import os
 import random
 import tempfile
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -140,6 +141,13 @@ def build_vocabs(subword_vocab: dict, subword_padding_idx: int, special_vocab: d
 
     return subword_id_to_char_ids, char_vocab
 
+def cosine_schedule(x: torch.Tensor):
+    """
+    Maps input values from [0, 1] to [1, 0] using the first quadrant of the cosine function.
+    Used for MaskGit mask scheduling.
+    """
+    return torch.cos(x * (torch.pi / 2))
+
 class CharAwareSubwordEncoder(NeuralModule):
     """
     Char-aware subword encoder for the MagpieTTS model.
@@ -243,11 +251,13 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self.advance_text_channel_by = self.cfg.get("advance_text_channel_by", None)
 
         # tts general configs
+        self.num_delay_tokens = self.cfg.get("num_delay_tokens", 1) # delay between text input and speech output
         self.use_bpe_char_tokenizer = self.cfg.get("use_bpe_char_tokenizer", False)
         self.condition_spk_emb_on_bos_position = self.cfg.get("condition_spk_emb_on_bos_position", False)
         self.cfg_unconditional_prob = self.cfg.get('cfg_unconditional_prob', 0.0)
         self.cfg_scale = self.cfg.get('cfg_scale', None)
-        self.use_maskgit_local_transformer = self.cfg.get('use_maskgit_local_transformer', False)
+        self.use_local_transformer = self.cfg.get('use_local_transformer', False)
+        self.local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
         # ratio between the the codec frame rate and the Magpie decoder's frame rate
         self.downsampling_factor = self.cfg.get('downsampling_factor', 1)
 
@@ -314,14 +324,24 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             )
 
         # if use maskgit local transformer
-        if self.use_maskgit_local_transformer:
+        if self.use_local_transformer:
+            self.local_transformer_type = self.cfg.get('local_transformer_type', "ar")
+            local_transformer_hidden_dim = self.cfg.get('local_transformer_hidden_dim', 256)
+            self.local_transformer_mask_token_id = self.speech_vocab_size + 1 # local transformer mask token
+
+            # projection from model backbone to local transformer
+            if local_transformer_hidden_dim != self.decoder.config.hidden_size:
+                self.local_transformer_in_projection = nn.Linear(self.decoder.config.hidden_size, local_transformer_hidden_dim)
+            else:
+                self.local_transformer_in_projection = nn.Identity()
+
             self.local_transformer = transformer_2501.Transformer(
                 n_layers=self.cfg.get('local_transformer_n_layers', 2),
                 d_model=local_transformer_hidden_dim,
                 d_ffn=local_transformer_hidden_dim*4,
                 sa_n_heads=self.cfg.get('local_transformer_n_heads', 1),
                 kernel_size=1,
-                is_causal=False,
+                is_causal=True if self.local_transformer_type == "ar" else False,
                 max_length_causal_mask=self.downsampling_factor * self._num_codebooks+2,
                 use_learnable_pos_emb=True,
             )
@@ -473,7 +493,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self,
         input_embeds: Tensor,
         cache=None,
-        seq_mask=None,
+        seq_mask=None
     ) -> dict[str, Tensor]:
         """
         Separated text and speech prediction:
@@ -513,11 +533,15 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             cond_logits = logits[:batch_size]
             uncond_logits = logits[batch_size:]
             logits = (1 - self.cfg_scale) * uncond_logits + self.cfg_scale * cond_logits
+
         ans = {
             "logits": logits,
+            "backbone_out": out.last_hidden_state,
         }
         if cache is not None:
             ans["cache"] = out["past_key_values"]
+
+
 
         return ans
 
@@ -653,15 +677,16 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # target_codes = torch.where(btt == self.text_eos_id, self.speech_eos_id, target_codes)
 
         # Add delay token
+        # ToDo: right pad audio with self.num_delay_tokens to avoid issues with the model cutting content in the target audio when self.num_delay_tokens > 1
         target_codes = torch.cat(
             [
                 torch.full(
-                    [target_codes.shape[0], self.downsampling_factor, target_codes.shape[-1]],
+                    [target_codes.shape[0], self.num_delay_tokens * self.downsampling_factor, target_codes.shape[-1]],
                     fill_value=self.speech_delay_id,
                     device=self.device,
                     dtype=torch.long,
                 ),
-                target_codes[:, :-self.downsampling_factor],
+                target_codes[:, :- self.num_delay_tokens * self.downsampling_factor],
             ],
             dim=1,
         )
@@ -802,45 +827,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
                 spk_embs = speaker_embedding_projected.unsqueeze(1)  # [B, 1, D]
                 input_embeds = torch.where(bos_mask, spk_embs, input_embeds)
-        """
-        if self.condition_spk_emb_on_bos_position:
-            if self.downsampling_factor > 1:
-                # handle speaker conditioning - extract speaker embedding
-                target_first_turn_audio = batch["target_first_turn_audio"]
-                target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
-                speaker_encoder_emb = self.get_speaker_embedding(
-                    target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
-                ).to(target_audio_emb.dtype)  # [B, D]
 
-                # project speaker embedding to match input_embeds last dimension
-                speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb)  # [B, D]
-
-                # Find BOS token positions in text_labels
-                bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2] → (batch_idx, token_idx)
-
-                # Inject speaker embedding at aligned position in input_embeds
-                if bos_indices.numel() > 0:
-                    b_idx = bos_indices[:, 0]
-                    t_idx = bos_indices[:, 1] * self.downsampling_factor  # aligned positions
-                    print(input_embeds.shape, speaker_embedding_projected.shape, speaker_embedding_projected[b_idx].squeeze(1).shape)
-                    # Correct broadcasting
-                    input_embeds[b_idx, t_idx] = speaker_embedding_projected[b_idx].squeeze(1)
-            else:
-                # handle speaker conditioning - extract speaker embedding
-                target_first_turn_audio = batch["target_first_turn_audio"]
-                target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
-                speaker_encoder_emb = self.get_speaker_embedding(
-                    target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
-                ).to(target_audio_emb.dtype)
-                # project speaker embedding to match llm input size
-                speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb)  # [B, D]
-                # Expand the speaker embedding to match input_embeds at BOS positions
-                bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
-                # Expand speaker embedding to match [B, T, D]
-                speaker_embedding_projected_expanded = speaker_embedding_projected #.repeat(1, input_embeds.size(1), 1)  # [B, T, D]
-                # Replace BOS positions in input_embeds with speaker embedding
-                input_embeds = torch.where(bos_mask, speaker_embedding_projected_expanded, input_embeds)
-        """
         # debug samples:
         if (
             self.cfg.get("debug_dataloader_audios_path", None)
@@ -1040,6 +1027,114 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         total_codebook_loss = total_codebook_loss / (audio_codes.size(1) * self.downsampling_factor) 
         return total_codebook_loss, loss_mask
 
+
+    def compute_local_transformer_logits(self, dec_out, audio_codes_target, targets_offset_by_one=False):
+        """
+        Predicts the logits for all codebooks using the local transformer. Used in both autoregressive (AR) and MaskGit (MG) modes.
+        This function is used in training and validation, not inference/sampling.
+        The sequence layout is slightly different between AR and MG modes, as shown in the diagram below,
+        (using an 8-codebook setup as an example):
+        +------------+---------+---------+---------+---------+---------+---------+---------+---------+---------+
+        | AR target  |    0    |    1    |    2    |    3    |    4    |    5    |    6    |    7    |   none  |
+        | codebook   |         |         |         |         |         |         |         |         |         |
+        +------------+---------+---------+---------+---------+---------+---------+---------+---------+---------+
+        | MG target  |  none   |    0    |    1    |    2    |    3    |    4    |    5    |    6    |    7    |
+        | codebook   |         |         |         |         |         |         |         |         |         |
+        +------------+---------+---------+---------+---------+---------+---------+---------+---------+---------+
+        |  input     | Magpie  |    0    |    1    |    2    |    3    |    4    |    5    |    6    |    7    |
+        |  codebook  | latent  | or MASK | or MASK | or MASK | or MASK | or MASK | or MASK | or MASK | or MASK |
+        +------------+---------+---------+---------+---------+---------+---------+---------+---------+---------+
+        | seq. index |    0    |    1    |    2    |    3    |    4    |    5    |    6    |    7    |    8    |
+        +------------+---------+---------+---------+---------+---------+---------+---------+---------+---------+
+        
+        dec_out: (B, T'/downsampling_factor, E)
+        audio_codes_target: (B, C, T')
+        targets_offset_by_one: bool, if False, the target for index 0 is codebook 0, for index 1 is codebook 1, etc. (autoregressive)
+                                     if True,  the target for index 1 is codebook 0, for index 2 is codebook 1, etc. 
+                                     (MaskGit)
+        """
+        audio_codes_target = audio_codes_target.transpose(1, 2)
+        C = audio_codes_target.size(1)
+        dec_out_all = dec_out.reshape(-1, dec_out.size(-1)) # (B*T', E)
+        local_transformer_input = [dec_out_all]
+        for ds_index in range(self.downsampling_factor):
+            for codebook_num in range(C):
+                codes = audio_codes_target[:, codebook_num, ds_index::self.downsampling_factor] # (B, T')
+                codes = codes.reshape(-1) # (B*T',)
+                codebook_embedding = self.audio_embeddings[codebook_num + ds_index * C](codes) # (B*T', E)
+                local_transformer_input.append(codebook_embedding)
+
+        local_transformer_input = torch.stack(local_transformer_input, dim=1) # (B*T', C+1, E)
+        local_transformer_input = self.local_transformer_in_projection(local_transformer_input) # (B*T', C+1, 128)
+        _mask = torch.ones(local_transformer_input.size(0), local_transformer_input.size(1), device=local_transformer_input.device)
+        local_transformer_output = self.local_transformer(local_transformer_input, _mask)['output'] # (B*T', C+1, E)
+        if not targets_offset_by_one:
+            # for autoregressive local transformer the target for index 0 is codebook 0, for index 1 is codebook 1, etc.
+            local_transformer_output = local_transformer_output[:, :-1, :] # (B*T', C, E)
+        else:
+            # for MaskGit the target for index **1** is codebook 0, for index 2 is codebook 1, etc.
+            local_transformer_output = local_transformer_output[:, 1:, :] # (B*T', C, E)
+        all_code_logits = []
+        for ds_index in range(self.downsampling_factor):
+            for codebook_num in range(audio_codes_target.size(1)):
+                # Using a separate projection layer for each codebook (to distinguish between them)
+                # Checked the time - this loop is not taking much time (compared to the local transformer forward pass)
+                codebook_logits = self.local_transformer_out_projections[codebook_num + ds_index*C](local_transformer_output[:, codebook_num + ds_index*C, :]) # (B*T', num_all_tokens_per_codebook)
+                all_code_logits.append(codebook_logits)
+
+        # TODO @rfejgin: make sure all downsampling_factor * num_codebooks are in the same dimension (expected by loss calculation)
+        all_code_logits = torch.cat(all_code_logits, dim=1) # (B*T'/downsampling_factor, num_codebooks * num_all_tokens_per_codebook * downsampling_factor)
+
+        all_code_logits = all_code_logits.view(
+            audio_codes_target.size(0), audio_codes_target.size(2) // self.downsampling_factor, -1
+        ) # (B, T'/downsampling_factor, C * num_all_tokens_per_codebook * downsampling_factor)
+
+        return all_code_logits
+
+
+    def maskgit_create_random_mask(self, codes):
+        """
+        Creates a mask where True indicates the positions that should be replaced with a MASK_TOKEN.
+        """
+        # Codes: (B, C, T)
+        B,C,T = codes.shape
+        # get a uniform random vector uniformly sampled from [0,1) ## Todo does it need to be inclusive on the right?
+        rand_values = torch.rand(B,T, device=codes.device)
+        # apply the cosine schedule
+        frac_masked = cosine_schedule(rand_values)
+        # how many positions to mask
+        n_masked = torch.ceil(frac_masked * C).long() # B,T
+        # start from all unmasked
+        mask = torch.zeros_like(codes, dtype=torch.bool)
+        # The code further below is the vectorized version of this:
+        #  for b in range(B):
+        #      for t in range(T):
+        #          if n_masked[b,t] > 0:
+        #              # get a random permutation of the codebook indices
+        #              perm = torch.randperm(C)
+        #              # mask the top n_masked positions
+        #              mask[b, perm[:n_masked[b,t]], t] = True
+        #
+        # Create random permutations 
+        random_permutations = torch.argsort(torch.rand(B, C, T, device=codes.device), dim=1)  # (B, C, T)        
+        # Create a mask tensor where each position indicates if it should be masked        
+        mask_indices = torch.arange(C, device=codes.device).view(1, C, 1)
+        mask = mask_indices < n_masked.view(B, 1, T) # (B, C, T)
+        # Apply the random permutations to the mask
+        mask = torch.gather(mask, 1, random_permutations)
+
+        return mask # (B, C, T).
+
+    def maskgit_apply_random_mask(self, codes):
+        # Randomly replaces some codes with the MASK_TOKEN with a proportion following the cosine schedule.
+        # Codes: (B, C, T)
+        codes = codes.transpose(1, 2)
+        mask = self.maskgit_create_random_mask(codes)
+        ## replace some tokens with MASK_TOKEN
+        codes_with_mask = torch.where(mask, self.local_transformer_mask_token_id, codes)
+        return codes_with_mask, mask
+
+
     def training_step(self, batch: dict, batch_idx: int):
         for m in (self.decoder, self.embed_text_tokens, self.audio_embeddings, self.final_proj):
             if is_frozen(m):
@@ -1047,6 +1142,11 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         if self.condition_spk_emb_on_bos_position:
             for m in (self.speaker_encoder_emb_projection, self.speaker_encoder):
+                if is_frozen(m):
+                    m.eval()
+
+        if self.use_local_transformer:
+            for m in (self.local_transformer_in_projection, self.local_transformer):
                 if is_frozen(m):
                     m.eval()
 
@@ -1058,8 +1158,24 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         )
 
         codebook_loss, loss_mask = self.compute_loss(forward_outputs["logits"], inputs["audio_labels"],  inputs["output_lens"])
-        loss = codebook_loss
 
+        # local transformer
+        local_transformer_logits = None
+        if self.use_local_transformer:
+            if self.local_transformer_type == "ar":
+                # autoregressive
+                local_transformer_logits = self.compute_local_transformer_logits(forward_outputs["backbone_out"], inputs["audio_labels"], targets_offset_by_one=False)
+                local_transformer_loss, _ = self.compute_loss(local_transformer_logits, inputs["audio_labels"], inputs["output_lens"])
+            else:
+                # randomly replace some positions with MASK_TOKEN
+                audio_codes_masked, mask_tokens_mask = self.maskgit_apply_random_mask(inputs["audio_labels"])
+                local_transformer_logits = self.compute_local_transformer_logits(forward_outputs["backbone_out"], inputs["audio_labels"], targets_offset_by_one=True)
+                local_transformer_loss, _ =  self.compute_loss(local_transformer_logits, inputs["audio_labels"], inputs["output_lens"], mask_tokens_mask)
+        else:
+            local_transformer_loss = torch.tensor(0.0, device=self.device)
+
+        loss = codebook_loss + local_transformer_loss * self.local_transformer_loss_scale
+        
         # ToDo: Add local transformer losses
         B, T = inputs["input_embeds"].shape[:2]
         num_frames = inputs["input_lens"].sum()
@@ -1179,6 +1295,246 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # all_preds = torch.cat(all_preds, dim=-1)# (B, num_codebooks)
         return all_preds
 
+    def local_transformer_sample_maskgit(self, dec_output, temperature=0.7, topk=80, unfinished_items={}, finished_items={}, use_cfg=False, cfg_scale=1.0, n_steps=3, noise_scale=0.0, fixed_schedule_n_unmasked=None, dynamic_cfg_scale=False, sampling_type=None):
+        """
+        Sample codes for one timestep from the local transformer using MaskGit.
+        """
+        # ToDo: Fix maskgit inference error
+  
+        debug_print = False
+        # dec_output: (B, E)
+        device = dec_output.device
+        # disable KV cache since our transformer is not causal
+        self.local_transformer.reset_cache(use_cache=False)
+        dec_output = dec_output.unsqueeze(1) # (B, 1, E)
+        local_transformer_input_init = self.local_transformer_in_projection(dec_output) # (B, 1, D) where D is the dimension of the local transformer
+        codebook_seq_len = self._num_codebooks * self.downsampling_factor
+        B = dec_output.size(0)
+
+        min_confidence = 0
+        # this needs to be large enough that unmasked items will always remain unmasked (even after noise addition)
+        # Setting it smaller could allow "regret", i.e. re-masking a codebook that was previously unmasked; we might want to try that
+        max_confidence = 5 
+        confidences = min_confidence * torch.ones(B, codebook_seq_len, device=device)
+        # initialize to all masked
+        codes = self.local_transformer_mask_token_id * torch.ones((B, codebook_seq_len), device=device, dtype=torch.long)
+        sampled_codes = codes.clone()
+        topk_indices = None
+        if debug_print: print(f"Sampling type: {sampling_type}")
+        if fixed_schedule_n_unmasked is not None:
+            n_steps = len(fixed_schedule_n_unmasked)
+            if debug_print: print(f"Using fixed schedule: {fixed_schedule_n_unmasked}")        
+        if dynamic_cfg_scale:
+            if debug_print: print(f"Using dynamic CFG scale")
+        for step in range(n_steps):
+            # how far along we are in the unmasking process
+            progress = step / n_steps
+            # get mask fraction
+            frac_masked = cosine_schedule(torch.tensor(progress))
+            if sampling_type == "causal":
+                frac_masked = torch.ones_like(frac_masked) * (1.0 - progress)
+            # how many codebooks to mask
+            if fixed_schedule_n_unmasked is None:
+                n_masked = torch.ceil(codebook_seq_len * frac_masked).long()
+            else:
+                n_masked = codebook_seq_len - fixed_schedule_n_unmasked[step]
+            n_unmasked = codebook_seq_len - n_masked
+
+            if sampling_type == "causal":# and n_unmasked <= self._num_codebooks:
+                # force second frame not to be unmasked
+                n_frames_to_allow = int(np.floor(progress*self.downsampling_factor+1))
+                confidences[:,n_frames_to_allow*self._num_codebooks:] = min_confidence-1 # only works for downsampling_factor=2
+            elif sampling_type == "alternate":
+                # TODO: preserve already-unmasked codebooks
+                if step % 2 == 1:
+                    confidences[:,self._num_codebooks:] = min_confidence-1
+                else:
+                    confidences[:,:self._num_codebooks] = min_confidence-1
+                # for unmasked codebooks, set confidence to max so that they will remain unmasked
+                if topk_indices is not None:
+                    confidences.scatter_(index=topk_indices, dim=1, src=max_confidence*torch.ones_like(topk_indices, dtype=torch.float))
+
+            # pick top-confidence codebooks up to n_unmasked
+            _, topk_indices = torch.topk(confidences, k=n_unmasked, dim=1)
+            if use_cfg:
+                actual_batch_size = topk_indices.size(0) // 2
+                assert (topk_indices[actual_batch_size:] == topk_indices[:actual_batch_size]).all(), f"Topk indices are not the same for conditional and unconditional codes"
+
+            # replace masks of the top-k confident codebooks with the codes that were sampled for them
+            unmasked_codes = torch.gather(sampled_codes, dim=1, index=topk_indices)
+            codes.scatter_(dim=1, index=topk_indices, src=unmasked_codes)
+            if debug_print:
+                print(f"Transformer Input at step {step} of {n_steps}")
+                self.vis_codes(codes, mask_id=self.local_transformer_mask_token_id, downsample_rate=self.downsampling_factor)
+                print("--------------------------------")
+
+            # build transformer input
+            local_transformer_input = local_transformer_input_init
+            for codebook_num in range(codebook_seq_len):
+                next_local_transformer_input = self.audio_embeddings[codebook_num](codes[:, codebook_num]).unsqueeze(1) # (B, 1, 768)
+                next_local_transformer_input = self.local_transformer_in_projection(next_local_transformer_input) # (B, 1, d_local)
+                local_transformer_input = torch.cat([local_transformer_input, next_local_transformer_input], dim=1) # (B, codebook_num+1, d_local)
+
+            # run transformer
+            _mask = torch.ones(B, codebook_seq_len+1, device=device)
+            local_transformer_output = self.local_transformer(local_transformer_input, _mask)['output'] # (B, C+1, d_local)
+
+            # get logits
+            logits = []
+            for codebook_num in range(codebook_seq_len):
+                # The `codebook_num+1` is to drop first position which corresponds to the magpie latent
+                codebook_logits = self.local_transformer_out_projections[codebook_num](local_transformer_output[:, codebook_num+1, :]) # (B, num_audio_tokens_per_codebook)
+                logits.append(codebook_logits)
+            logits = torch.stack(logits, dim=1) # (B, C*downsampling_factor, num_audio_tokens_per_codebook)
+
+            # apply CFG
+            if use_cfg:
+                actual_batch_size = logits.size(0) // 2
+                conditional_logits = logits[:actual_batch_size]
+                unconditional_logits = logits[actual_batch_size:]
+                if not dynamic_cfg_scale:
+                    current_cfg_scale = cfg_scale
+                else:
+                    # gradually increase the scale until mid point through sampling, then reduce it again
+                    progress = step / (n_steps-1)
+                    #interp = -abs(progress-0.5)+0.5 # increase from 0..1 in the interval from start to midpoint and then go back to zero
+                    #interp = 1.0 - progress  # decrease from 1 to 0
+                    interp = progress # gradually increase from 0 to 1
+                    current_cfg_scale = (cfg_scale - 1) * interp + 1.0  # 1.0 --> cfg_scale --> 1.0
+                    print(f"step={step}, current_cfg_scale={current_cfg_scale:.2f}")
+                cfg_logits = current_cfg_scale * conditional_logits +  (1.0 - current_cfg_scale) * unconditional_logits                                    
+                logits[:actual_batch_size] = cfg_logits
+
+            # handle unfinished and finished items
+            for item_idx in unfinished_items:
+                logits[item_idx, self.audio_eos_id] = float('-inf')
+            for item_idx in finished_items:
+                logits[item_idx, :, :] = float('-inf')
+                logits[item_idx, :, self.audio_eos_id] = 0.0
+
+            # HACK: disallow generation of MASK tokens. But is this happening?
+            logits[:,:,self.local_transformer_mask_token_id] = -200
+            logits[:,:,self.audio_bos_id] = -200
+            logits[:,:,self.context_audio_bos_id] = -200
+            logits[:,:,self.context_audio_eos_id] = -200
+            # sample with top-k
+            logits_topk = torch.topk(logits, topk, dim=-1)[0] # (B, C, topk)
+            indices_to_remove = logits < logits_topk[:, :, -1].unsqueeze(-1) # (B, C, num_audio_tokens_per_codebook)
+            logits_rescored = logits.clone()
+            logits_rescored[indices_to_remove] = float('-inf')
+            probs = torch.softmax(logits_rescored / temperature, dim=-1) # (B, C, num_audio_tokens_per_codebook)
+            sampled_codes = torch.multinomial(probs.view(B*codebook_seq_len, -1), 1).view(B, codebook_seq_len)
+            if use_cfg:
+                sampled_codes[actual_batch_size:] = sampled_codes[:actual_batch_size]
+                probs[actual_batch_size:] = probs[:actual_batch_size]
+            confidences = torch.gather(probs, dim=2, index=sampled_codes.unsqueeze(-1)).squeeze(-1)
+
+            # TODO
+            # * are end of utterance-logits-somehow overwritten ? should we force those to max confidence?? may require
+            #   special handling and may explain termination issues!
+
+            # replace entries in sampled_codes with previously unmasked codebooks
+            sampled_codes.scatter_(dim=1, index=topk_indices, src=unmasked_codes)
+            #  add noise to confidences (as in token-critic paper, https://arxiv.org/abs/2209.04439)
+            if noise_scale > 0.0:
+                # get noise from uniform distribution in the interval [-0.5, 0.5), scale it by `noise_scale`,
+                # and anneal it to 0 as we approach the end of the unmasking process
+                noise = (torch.rand_like(confidences) - 0.5) * noise_scale * (1-(step+2)/n_steps) # the +2 makes sure that by the last iteration the noise is exactly 0
+                confidences += noise
+                # the conditional and unconditional get different noise and must be fixed to be the same again
+                confidences[actual_batch_size:] = confidences[:actual_batch_size]                
+            confidence_eps = 0.1
+            assert confidences.max() + confidence_eps < max_confidence, f"Predicted confidence is approaching max_confidence: {confidences.max()}"
+            # for unmasked codebooks, set confidence to max so that they will remain unmasked
+            confidences.scatter_(index=topk_indices, dim=1, src=max_confidence*torch.ones_like(topk_indices, dtype=torch.float))
+        rand_sampling = False
+        if rand_sampling:
+            print("Using random sampling")
+            confidences = torch.rand_like(confidences)
+        codes = sampled_codes
+        assert not (codes == self.local_transformer_mask_token_id).any(), f"Codes contain mask tokens after completion of MaskGit sampling"
+
+        if debug_print:
+            print(f"Final codes after MaskGit sampling")
+            self.vis_codes(codes, mask_id=self.local_transformer_mask_token_id, downsample_rate=self.downsampling_factor)
+            print("--------------------------------")
+        # break downsampled groups of frames into individual frames
+        codes = codes.reshape(B, self.downsampling_factor, self._num_codebooks).permute(0,2,1) # B, C, downsampling_factor
+
+        if use_cfg: 
+            # drop unconditional codes
+            codes = codes[:actual_batch_size]
+        return codes
+
+    def local_transformer_sample_autoregressive(self, dec_output, temperature=0.7, topk=80, unfinished_items={}, finished_items={}, use_cfg=False, cfg_scale=1.0):
+        # dec_output: (B, E)
+        self.local_transformer.reset_cache(use_cache=True)
+        dec_output = dec_output.unsqueeze(1) # (B, 1, E)
+        local_transformer_input = self.local_transformer_in_projection(dec_output) # (B, 1, 128)
+        all_preds = []
+        for codebook_num in range(self._num_codebooks * self.downsampling_factor):
+            _mask = torch.ones( local_transformer_input.size(0), local_transformer_input.size(1), device=local_transformer_input.device)
+            local_transformer_output = self.local_transformer(local_transformer_input, _mask)['output'] # (B, T, 128)
+            codebook_logits = self.local_transformer_out_projections[codebook_num](local_transformer_output[:, -1, :]) # (B, num_all_tokens_per_codebook)
+            if use_cfg:
+                actual_batch_size = codebook_logits.size(0) // 2
+                conditional_logits = codebook_logits[:actual_batch_size]
+                unconditional_logits = codebook_logits[actual_batch_size:]
+                cfg_logits = cfg_scale * conditional_logits +  (1.0 - cfg_scale) * unconditional_logits
+                codebook_logits[:actual_batch_size] = cfg_logits
+
+            for item_idx in unfinished_items:
+                codebook_logits[item_idx, self.audio_eos_id] = float('-inf')
+            for item_idx in finished_items:
+                codebook_logits[item_idx, :] = float('-inf')
+                codebook_logits[item_idx, self.audio_eos_id] = 0.0
+
+            codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0] # (B, topk)
+            indices_to_remove = codebook_logits < codebook_logits_topk[:, -1].unsqueeze(-1) # (B, num_tokens_per_codebook)
+            codebook_logits_rescored = codebook_logits.clone()
+            codebook_logits_rescored[indices_to_remove] = float('-inf')
+            codebook_probs = torch.softmax(codebook_logits_rescored / temperature, dim=-1) # (B, num_tokens_per_codebook)
+            codebook_preds = torch.multinomial(codebook_probs, 1) # (B, 1)
+            if use_cfg:
+                codebook_preds[actual_batch_size:] = codebook_preds[:actual_batch_size]
+            all_preds.append(codebook_preds)
+            next_local_transformer_input = self.audio_embeddings[codebook_num](codebook_preds.squeeze(-1)).unsqueeze(1) # (B, 1, 128)
+            next_local_transformer_input = self.local_transformer_in_projection(next_local_transformer_input) # (B, 1, 128)
+            local_transformer_input = torch.cat([local_transformer_input, next_local_transformer_input], dim=1) # (B, T+1, 128)
+
+        all_preds = torch.cat(all_preds, dim=1).long() # (B, num_codebooks * downsampling_factor)
+        all_preds = all_preds.reshape(-1, self.downsampling_factor, self._num_codebooks).permute(0,2,1) # (B, num_codebooks, downsampling_factor)
+        if use_cfg:
+            all_preds = all_preds[:actual_batch_size]
+
+        return all_preds
+
+    def local_transformer_sample_codes_from_logits(self, backbone_out, temperature=0.7, topk=80, unfinished_items={}, finished_items={}, dynamic_cfg_scale=False, maskgit_n_steps=4, maskgit_noise_scale=0.0, maskgit_sampling_type="causal", fixed_schedule_n_unmasked=None):
+
+        if self.local_transformer_type == "ar" :
+            # Autoregressive sampling with local transformer
+            gen_tokens = self.local_transformer_sample_autoregressive(
+                dec_output=backbone_out,
+                temperature=temperature,
+                topk=topk,
+                use_cfg=self.cfg_unconditional_prob,
+                cfg_scale=self.cfg_scale
+            )
+        else:
+            gen_tokens = self.local_transformer_sample_maskgit(
+                dec_output=backbone_out,
+                temperature=temperature,
+                topk=topk,
+                use_cfg=self.cfg_unconditional_prob,
+                cfg_scale=self.cfg_scale,
+                n_steps=4,
+                noise_scale=maskgit_noise_scale,
+                fixed_schedule_n_unmasked=fixed_schedule_n_unmasked,
+                dynamic_cfg_scale=dynamic_cfg_scale,
+                sampling_type=maskgit_sampling_type,
+            )
+        return gen_tokens
+
     def pad_audio_to_factor(self, audio, audio_len, samples_per_frame, downsampling_factor: int = 1):
         """
         Zero pad the end of the audio so that we do not have a partial end frame.
@@ -1211,8 +1567,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         speaker_audio_lens: torch.Tensor,
         text_tokens: torch.Tensor,
         decode_audio: bool = True,
-        temperature: float = 0.7, 
-        topk: int = 80,
     ) -> dict[str, torch.Tensor]:
         """
         Autoregressive prediction.
@@ -1329,7 +1683,10 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             cache=cache,
             seq_mask=None,
         )
-        gen_audio[:, 0] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+        if self.use_local_transformer:
+            gen_audio[:, 0] = self.local_transformer_sample_codes_from_logits(ans["backbone_out"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+        else:
+            gen_audio[:, 0] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
 
         speech_state = torch.zeros(B, device=self.device, dtype=torch.long)
         # Autoregressive loop
@@ -1367,7 +1724,10 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 seq_mask=None,
             )
 
-            gen_audio[:, t] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+            if self.use_local_transformer:
+                gen_audio[:, t] = self.local_transformer_sample_codes_from_logits(ans["backbone_out"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+            else:
+                gen_audio[:, t] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
 
             if self.cfg.get('inference_force_speech_state', None):
                 # state 0 - silence, state 1 - speech
