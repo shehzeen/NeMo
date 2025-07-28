@@ -1507,6 +1507,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         if use_cfg:
             all_preds = all_preds[:actual_batch_size]
 
+        self.local_transformer.reset_cache(use_cache=False)
         return all_preds
 
     def local_transformer_sample_codes_from_logits(self, backbone_out, temperature=0.7, topk=80, unfinished_items={}, finished_items={}, dynamic_cfg_scale=False, maskgit_n_steps=4, maskgit_noise_scale=0.0, maskgit_sampling_type="causal", fixed_schedule_n_unmasked=None):
