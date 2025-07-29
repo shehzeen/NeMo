@@ -534,9 +534,10 @@ def read_lhotse_old_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
         agent_sup = fastcopy(
             orig_agent_sup,
             start=context_audio_org_dur,
-            duration=target_audio_org_dur,
+            duration=target_audio_org_dur-0.08,
             speaker="agent",
         )
+
         # Assemble final cut
         cut_source.supervisions = [user_sup, agent_sup]
         cut_source.recording = cut_source.recording
