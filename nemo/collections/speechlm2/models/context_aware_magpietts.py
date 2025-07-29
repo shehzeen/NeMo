@@ -1232,15 +1232,15 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 asr_hyps = self.asr_bleu.update(
                     name=name,
                     refs=dataset_batch["target_texts"],
-                    pred_audio=resample(results["audio"], self.target_sample_rate, self.source_sample_rate),
-                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * self.source_sample_rate).to(torch.long),
+                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
+                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
                 )
 
                 self.intelligibility.update(
                     name=name,
                     refs=dataset_batch["target_texts"],
-                    pred_audio=resample(results["audio"], self.target_sample_rate, self.source_sample_rate),
-                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * self.source_sample_rate).to(torch.long),
+                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
+                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
                     asr_hyps=asr_hyps,
                 )
 
