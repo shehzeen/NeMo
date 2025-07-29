@@ -50,6 +50,7 @@ from nemo.collections.speechlm2.parts.metrics.asr_bleu import ASRBLEU
 from nemo.collections.speechlm2.parts.metrics.bleu import BLEU
 from nemo.collections.speechlm2.parts.metrics.intelligibility import Intelligibility
 from nemo.collections.speechlm2.parts.metrics.results_logger import ResultsLogger
+from nemo.collections.speechlm2.parts.metrics.secs import SECS
 from nemo.collections.speechlm2.parts.metrics.token_accuracy import TokenAccuracy
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
 from nemo.collections.speechlm2.parts.precision import fp32_precision
@@ -1204,6 +1205,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self.results_logger = ResultsLogger(self.validation_save_path).reset()
         self.asr_bleu = ASRBLEU(self.cfg.scoring_asr).reset()
         self.intelligibility = Intelligibility(self.cfg.scoring_asr, reuse_asr_hyps=True).reset()
+        self.secs = SECS(self.cfg.get("scoring_se", "titanet_large")).reset()
 
     def on_validation_epoch_end(self, prefix="val") -> None:
         asr_bleu = self.asr_bleu.compute()
@@ -1212,7 +1214,9 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         cer_wer = self.intelligibility.compute()
         for k, m in cer_wer.items():
             self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
-
+        secs = self.secs.compute()
+        for k, m in secs.items():
+            self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
 
     def validation_step(self, batch: dict, batch_idx: int):
 
@@ -1242,6 +1246,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
                     pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
                     asr_hyps=asr_hyps,
+                )
+
+                self.secs.update(
+                    name=name,
+                    target_audio=resample(dataset_batch["target_audio"], self.target_sample_rate, 16000),
+                    target_audio_lens=(dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long),
+                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
+                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
                 )
 
                 self.results_logger.update(
