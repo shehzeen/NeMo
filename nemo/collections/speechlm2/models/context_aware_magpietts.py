@@ -48,6 +48,7 @@ from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
 from nemo.collections.speechlm2.parts.lora import maybe_install_lora
 from nemo.collections.speechlm2.parts.metrics.asr_bleu import ASRBLEU
 from nemo.collections.speechlm2.parts.metrics.bleu import BLEU
+from nemo.collections.speechlm2.parts.metrics.intelligibility import Intelligibility
 from nemo.collections.speechlm2.parts.metrics.results_logger import ResultsLogger
 from nemo.collections.speechlm2.parts.metrics.token_accuracy import TokenAccuracy
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
@@ -1202,11 +1203,16 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self.on_train_epoch_start()
         self.results_logger = ResultsLogger(self.validation_save_path).reset()
         self.asr_bleu = ASRBLEU(self.cfg.scoring_asr).reset()
+        self.intelligibility = Intelligibility(self.cfg.scoring_asr, reuse_asr_hyps=True).reset()
 
     def on_validation_epoch_end(self, prefix="val") -> None:
         asr_bleu = self.asr_bleu.compute()
         for k, m in asr_bleu.items():
             self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
+        cer_wer = self.intelligibility.compute()
+        for k, m in cer_wer.items():
+            self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
+
 
     def validation_step(self, batch: dict, batch_idx: int):
 
@@ -1228,6 +1234,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     refs=dataset_batch["target_texts"],
                     pred_audio=resample(results["audio"], self.target_sample_rate, self.source_sample_rate),
                     pred_audio_lens=(results["audio_len"] / self.target_sample_rate * self.source_sample_rate).to(torch.long),
+                )
+
+                self.intelligibility.update(
+                    name=name,
+                    refs=dataset_batch["target_texts"],
+                    pred_audio=resample(results["audio"], self.target_sample_rate, self.source_sample_rate),
+                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * self.source_sample_rate).to(torch.long),
+                    asr_hyps=asr_hyps,
                 )
 
                 self.results_logger.update(
