@@ -557,11 +557,11 @@ def read_lhotse_old_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
     return cuts, is_tarred
 
 
-@data_type_parser(["lhotse_new_tts_data_as_duplex"])
-def read_lhotse_new_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
-    def convert_lhotse_new_tts_data_as_duplex(cut):
+@data_type_parser(["lhotse_magpietts_data_as_duplex"])
+def read_lhotse_magpietts_data_as_duplex(config) -> tuple[CutSet, bool]:
+    def convert_lhotse_magpietts_data_as_duplex(cut):
         # create a copy of agent supervision and original duration
-        orig_agent_sup = fastcopy(cut.supervisions[1])
+        orig_agent_sup = fastcopy(cut.supervisions[0])
         context_audio_org_dur = cut.context_audio.duration
         target_audio_org_dur = cut.target_audio.duration
 
@@ -619,7 +619,7 @@ def read_lhotse_new_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
         cut_source.recording = cut_source.recording  # remains the resampled context_audio
         cut_source.target_audio = cut_target.recording
         cut_source.duration = cut_target.duration
-        cut_source.formatter = "lhotse_new_tts_data_as_duplex"
+        cut_source.formatter = "lhotse_magpietts_data_as_duplex"
         return cut_source
 
     # load lhotse cuts
@@ -629,7 +629,7 @@ def read_lhotse_new_tts_data_as_duplex(config) -> tuple[CutSet, bool]:
     sample_rate = 22050
 
     # convert cuts
-    cuts = cuts.map(convert_lhotse_new_tts_data_as_duplex)
+    cuts = cuts.map(convert_lhotse_magpietts_data_as_duplex)
     return cuts, is_tarred
 
 

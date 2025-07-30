@@ -437,6 +437,10 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         return self.tokenizer.bos_id
 
     @property
+    def text_zstts_task_id(self) -> int:
+        return self.tokenizer.text_to_ids("<|box_start|>") # uses <|box_start|> special token as zstts task id token
+
+    @property
     def text_eos_id(self) -> int:
         return self.tokenizer.eos_id
 
@@ -799,44 +803,62 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # Add shifted target codes embeddings
         input_embeds.add_(target_audio_emb)
 
-        # ToDo: Add on speaker embedding per turn to make possible to have multi speaker as agent
         speaker_encoder_emb = None
-        if self.condition_spk_emb_on_bos_position:
-            # Extract speaker embedding
-            target_first_turn_audio = batch["target_first_turn_audio"]
-            target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
-            speaker_encoder_emb = self.get_speaker_embedding(
-                target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
-            ).to(target_audio_emb.dtype)  # [B, D]
-            
-            speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb) # [B, 1, D]
-            speaker_embedding_projected = speaker_embedding_projected.squeeze(1)  # → [B, D]
+        # if mapieTTS task (zs-tts)
+        if batch["formatter"][0] == 'lhotse_magpietts_data_as_duplex':
+            # replace BOS token with zs-tts token task
+            bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2]
+            task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
+            if bos_indices.numel() > 0:
+                b_idx = bos_indices[:, 0]                          # [N]
+                t_idx = bos_indices[:, 1] * self.downsampling_factor  # [N]
 
-            if self.downsampling_factor > 1:
-                bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2]
-                if bos_indices.numel() > 0:
-                    b_idx = bos_indices[:, 0]                          # [N]
-                    t_idx = bos_indices[:, 1] * self.downsampling_factor  # [N]
+                # Filter out out-of-bounds indices
+                valid = t_idx < input_embeds.shape[1]
+                b_idx = b_idx[valid]
+                t_idx = t_idx[valid]
 
-                    # Filter out out-of-bounds indices
-                    valid = t_idx < input_embeds.shape[1]
-                    b_idx = b_idx[valid]
-                    t_idx = t_idx[valid]
-                    spk_embs = speaker_embedding_projected[b_idx]  # [N, D]
+                # Apply speaker embeddings at BOS-aligned input positions
+                input_embeds[b_idx, t_idx, :] = task_emb
 
-                    # Apply speaker embeddings at BOS-aligned input positions
-                    input_embeds[b_idx, t_idx, :] = spk_embs
-            else:
-                # Single-turn case
-                bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
-                spk_embs = speaker_embedding_projected.unsqueeze(1)  # [B, 1, D]
-                input_embeds = torch.where(bos_mask, spk_embs, input_embeds)
+        # For multi-turn data replace BOS with speaker embeddi
+        else:
+            # ToDo: Add on speaker embedding per turn to make possible to have multi speaker as agent
+            if self.condition_spk_emb_on_bos_position:
+                # Extract speaker embedding
+                target_first_turn_audio = batch["target_first_turn_audio"]
+                target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
+                speaker_encoder_emb = self.get_speaker_embedding(
+                    target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
+                ).to(target_audio_emb.dtype)  # [B, D]
+                
+                speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_encoder_emb) # [B, 1, D]
+                speaker_embedding_projected = speaker_embedding_projected.squeeze(1)  # → [B, D]
+
+                if self.downsampling_factor > 1:
+                    bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2]
+                    if bos_indices.numel() > 0:
+                        b_idx = bos_indices[:, 0]                          # [N]
+                        t_idx = bos_indices[:, 1] * self.downsampling_factor  # [N]
+
+                        # Filter out out-of-bounds indices
+                        valid = t_idx < input_embeds.shape[1]
+                        b_idx = b_idx[valid]
+                        t_idx = t_idx[valid]
+                        spk_embs = speaker_embedding_projected[b_idx]  # [N, D]
+
+                        # Apply speaker embeddings at BOS-aligned input positions
+                        input_embeds[b_idx, t_idx, :] = spk_embs
+                else:
+                    # Single-turn case
+                    bos_mask = (text_labels == self.text_bos_id).unsqueeze(-1)  # [B, T, 1]
+                    spk_embs = speaker_embedding_projected.unsqueeze(1)  # [B, 1, D]
+                    input_embeds = torch.where(bos_mask, spk_embs, input_embeds)
 
         # debug samples:
         if (
             self.cfg.get("debug_dataloader_audios_path", None)
             and self.training
-            and "lhotse_old_tts_data_as_duplex" in batch["formatter"][0]
         ):
 
             def count_leading_silence_tokens(tensor: torch.Tensor, silence_token: int = 0) -> int:
