@@ -259,6 +259,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self.cfg_unconditional_prob = self.cfg.get('cfg_unconditional_prob', 0.0)
         self.cfg_scale = self.cfg.get('cfg_scale', None)
         self.use_local_transformer = self.cfg.get('use_local_transformer', False)
+        self.local_transformer_type = self.cfg.get('local_transformer_type', "ar")
         self.local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
         # ratio between the the codec frame rate and the Magpie decoder's frame rate
         self.downsampling_factor = self.cfg.get('downsampling_factor', 1)
@@ -327,9 +328,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # if use maskgit local transformer
         if self.use_local_transformer:
-            self.local_transformer_type = self.cfg.get('local_transformer_type', "ar")
             local_transformer_hidden_dim = self.cfg.get('local_transformer_hidden_dim', 256)
-            self.local_transformer_mask_token_id = self.speech_vocab_size + 1 # local transformer mask token
+            self.local_transformer_mask_token_id = self.speech_vocab_size - 1# local transformer mask token
 
             # projection from model backbone to local transformer
             if local_transformer_hidden_dim != self.decoder.config.hidden_size:
@@ -372,8 +372,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self._use_tp = False
 
         # load pretrained TTS model
-        if self.cfg.get("pretrained_tts", None):
-            self.init_model_from_tts_checkpoint(self.cfg.pretrained_tts)
+        if self.cfg.get("pretrained_model", None):
+            self.init_model_from_another_checkpoint(self.cfg.pretrained_model)
 
     def setup_speaker_encoder(self):
         with fp32_precision():
@@ -386,7 +386,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         for p in self.speaker_encoder.parameters():
             p.requires_grad = False
 
-    def init_model_from_tts_checkpoint(self, checkpoint_path):
+    def init_model_from_another_checkpoint(self, checkpoint_path):
         if checkpoint_path is not None:
             if '.nemo' in checkpoint_path:
                 with tempfile.TemporaryDirectory() as tmpdir:
@@ -402,6 +402,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
     @property
     def speech_vocab_size(self):
         """Return the size of the audio codec codebook including extra speech BOS and EOS tokens."""
+        if self.use_local_transformer and self.local_transformer_type == "nar": # add extra token for mask
+            return self._codebook_size + 4
         return self._codebook_size + 3
 
     @property
@@ -1378,7 +1380,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     confidences[:,:self._num_codebooks] = min_confidence-1
                 # for unmasked codebooks, set confidence to max so that they will remain unmasked
                 if topk_indices is not None:
-                    confidences.scatter_(index=topk_indices, dim=1, src=max_confidence*torch.ones_like(topk_indices, dtype=torch.float))
+                    confidences.scatter_(index=topk_indices, dim=1, src=max_confidence*torch.ones_like(topk_indices, dtype=confidences.dtype))
 
             # pick top-confidence codebooks up to n_unmasked
             _, topk_indices = torch.topk(confidences, k=n_unmasked, dim=1)
@@ -1440,9 +1442,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
             # HACK: disallow generation of MASK tokens. But is this happening?
             logits[:,:,self.local_transformer_mask_token_id] = -200
-            logits[:,:,self.audio_bos_id] = -200
-            logits[:,:,self.context_audio_bos_id] = -200
-            logits[:,:,self.context_audio_eos_id] = -200
+            # logits[:,:,self.speech_bos_id] = -200
+
             # sample with top-k
             logits_topk = torch.topk(logits, topk, dim=-1)[0] # (B, C, topk)
             indices_to_remove = logits < logits_topk[:, :, -1].unsqueeze(-1) # (B, C, num_audio_tokens_per_codebook)
@@ -1472,7 +1473,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             confidence_eps = 0.1
             assert confidences.max() + confidence_eps < max_confidence, f"Predicted confidence is approaching max_confidence: {confidences.max()}"
             # for unmasked codebooks, set confidence to max so that they will remain unmasked
-            confidences.scatter_(index=topk_indices, dim=1, src=max_confidence*torch.ones_like(topk_indices, dtype=torch.float))
+            confidences.scatter_(index=topk_indices, dim=1, src=max_confidence*torch.ones_like(topk_indices, dtype=confidences.dtype))
         rand_sampling = False
         if rand_sampling:
             print("Using random sampling")
