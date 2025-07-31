@@ -622,11 +622,30 @@ def read_lhotse_magpietts_data_as_duplex(config) -> tuple[CutSet, bool]:
         cut_source.formatter = "lhotse_magpietts_data_as_duplex"
         return cut_source
 
+    def filter_cer(example):
+        if isinstance(example, Cut) and len(example.supervisions) > 0 and example.supervisions[0].has_custom("cer"):
+            return example.supervisions[0].cer <= MAX_CER
+        else:
+            return True
+
+    def filter_val_flag(example):
+        if isinstance(example, Cut) and example.has_custom("validation_status") and example.validation_status != KEEP_FLAG:
+            return False
+        else:
+            return True
+
     # load lhotse cuts
     cuts, is_tarred = read_cutset_from_config(config)
 
     # load prompt cut
     sample_rate = 22050
+    
+    # filter dataset
+    MAX_CER = config.get("max_cer",0.03)
+    cuts = cuts.filter(filter_cer)
+    # filter invalid samples
+    KEEP_FLAG = "pass"
+    cuts = cuts.filter(filter_val_flag)
 
     # convert cuts
     cuts = cuts.map(convert_lhotse_magpietts_data_as_duplex)
