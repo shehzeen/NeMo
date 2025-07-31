@@ -1254,6 +1254,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 speaker_audio=dataset_batch["target_first_turn_audio"],
                 speaker_audio_lens=dataset_batch["target_first_turn_audio_lens"],
                 text_tokens=dataset_batch["target_tokens"],
+                formatter=dataset_batch["formatter"][0],
             )
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
@@ -1617,6 +1618,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         speaker_audio_lens: torch.Tensor,
         text_tokens: torch.Tensor,
         decode_audio: bool = True,
+        formatter: str = "",
     ) -> dict[str, torch.Tensor]:
         """
         Autoregressive prediction.
@@ -1665,15 +1667,20 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             source_audio_emb = source_audio_emb[:, :text_tokens.size(1), :]
         else:
             text_tokens = text_tokens[:, :source_audio_emb.size(1)]
+        
+        # create the task embedding to reuse in the autoregressive loop
+        task_emb = None
+        if formatter == 'lhotse_magpietts_data_as_duplex':
+            task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
+        else:
+            # get speaker embedding
+            if self.condition_spk_emb_on_bos_position:
+                speaker_emb = self.get_speaker_embedding(
+                    speaker_audio, speaker_audio_lens, self.target_sample_rate
+                ).to(source_audio_emb.dtype).to(source_audio_emb.device)
 
-        # get speaker embedding
-        if self.condition_spk_emb_on_bos_position:
-            speaker_emb = self.get_speaker_embedding(
-                speaker_audio, speaker_audio_lens, self.target_sample_rate
-            ).to(source_audio_emb.dtype).to(source_audio_emb.device)
-
-            # project speaker embedding to match llm input size
-            speaker_embedding_projected = self.speaker_encoder_emb_projection(speaker_emb)  # [B, 1, D]
+                # project speaker embedding to match llm input size
+                task_emb = self.speaker_encoder_emb_projection(speaker_emb)  # [B, 1, D]
 
         B, T_local, H = source_audio_emb.shape
 
@@ -1758,15 +1765,19 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 prev_audio_codes.reshape(prev_audio_codes.size(0), -1, self._num_codebooks) # reshape to handle self.downsampling_factor
             )[:, -1]
 
-            # replace bos token by speaker embedding
-            if self.condition_spk_emb_on_bos_position:
+            # replace bos token by task id token
+            if task_emb is not None:
                 bos_mask = (text_tokens[:, t] == self.text_bos_id)  # [B]
-
                 if bos_mask.any():
-                    # Select embeddings for BOS samples only
-                    selected_speaker_emb = speaker_embedding_projected.squeeze(1)[bos_mask]  # [N, D]
+                    if formatter == 'lhotse_magpietts_data_as_duplex':
+                        task_emb = task_emb
+                    else:
+                        if self.condition_spk_emb_on_bos_position:
+                            # Select embeddings for BOS samples only
+                            task_emb = task_emb.squeeze(1)[bos_mask]  # [N, D]
+
                     # Assign to input embeddings at time t
-                    input_embeds[bos_mask, t] = selected_speaker_emb  # [N, D]
+                    input_embeds[bos_mask, t] = task_emb  # [N, D]
 
             ans = self(
                 input_embeds[:, t : t + 1],
