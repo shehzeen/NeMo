@@ -786,6 +786,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             drop_eos_mask = torch.rand_like(text_labels, dtype=torch.float) < drop_eos_prob
             text_labels = torch.where(eos_mask & drop_eos_mask, self.text_pad_id, text_labels)
 
+        # For the zstts task we want to retain the speech EOS token (so inference can stop),
+        # but we must strip out any text EOS tokens — in duplex S2S those would be interpreted
+        # as an instruction to interrupt speaking. Replace text EOS with padding.
+        if self.cfg.get("drop_text_eos_for_zstts_task", False) and batch["formatter"][0] == "lhotse_magpietts_data_as_duplex":
+            text_labels = torch.where(text_labels == self.text_eos_id, self.text_pad_id, text_labels)
+
         # Add source codes embeddings
         input_embeds = source_audio_emb
 
