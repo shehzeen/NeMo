@@ -614,6 +614,16 @@ def read_lhotse_magpietts_data_as_duplex(config) -> tuple[CutSet, bool]:
             speaker="agent",
         )
 
+        # Add extra sil in the end of the audio to force the model to produce silence if it receives zeros and the was all processed        
+        if ADD_EXTRA_END_SIL:
+            sil_duration = random.uniform(*SILENCE_RANGE)
+            # pad audios
+            cut_target = cut_target.pad(duration=total_duration + sil_duration, direction="right")
+            cut_source = cut_source.pad(duration=total_duration + sil_duration, direction="right")
+            # Save both to memory
+            cut_source = cut_source.to_mono().move_to_memory(audio_format='wav')
+            cut_target = cut_target.to_mono().move_to_memory(audio_format='wav')
+
         # Assemble final cut
         cut_source.supervisions = [user_sup, agent_sup]
         cut_source.recording = cut_source.recording  # remains the resampled context_audio
@@ -637,11 +647,14 @@ def read_lhotse_magpietts_data_as_duplex(config) -> tuple[CutSet, bool]:
     # load lhotse cuts
     cuts, is_tarred = read_cutset_from_config(config)
 
+    ADD_EXTRA_END_SIL = config.get("add_extra_end_silence", False)
+    SILENCE_RANGE = config.get("extra_end_silence_range", [0.5, 6.0])
+
     # load prompt cut
     sample_rate = 22050
-    
+
     # filter dataset
-    MAX_CER = config.get("max_cer",0.03)
+    MAX_CER = config.get("max_cer", 0.03)
     cuts = cuts.filter(filter_cer)
     # filter invalid samples
     KEEP_FLAG = "pass"
