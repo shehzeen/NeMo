@@ -789,7 +789,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # For the zstts task we want to retain the speech EOS token (so inference can stop),
         # but we must strip out any text EOS tokens — in duplex S2S those would be interpreted
         # as an instruction to interrupt speaking. Replace text EOS with padding.
-        if self.cfg.get("drop_text_eos_for_zstts_task", False) and batch["formatter"][0] == "lhotse_magpietts_data_as_duplex":
+        if self.cfg.get("drop_text_eos_for_zstts_task", False) and (batch["formatter"][0] == "lhotse_magpietts_data_as_duplex" or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex'):
             text_labels = torch.where(text_labels == self.text_eos_id, self.text_pad_id, text_labels)
 
         # Add source codes embeddings
@@ -811,7 +811,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         speaker_encoder_emb = None
         # if mapieTTS task (zs-tts)
-        if batch["formatter"][0] == 'lhotse_magpietts_data_as_duplex':
+        if (batch["formatter"][0] == 'lhotse_magpietts_data_as_duplex' or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex'):
             # replace BOS token with zs-tts token task
             bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2]
             task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
@@ -1676,8 +1676,11 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         
         # create the task embedding to reuse in the autoregressive loop
         task_emb = None
-        if formatter == 'lhotse_magpietts_data_as_duplex':
+        if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex':
             task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
+            # remove eos for zstts task
+            if self.cfg.get("drop_text_eos_for_zstts_task", False):
+                text_tokens = torch.where(text_tokens == self.text_eos_id, self.text_pad_id, text_tokens)
         else:
             # get speaker embedding
             if self.condition_spk_emb_on_bos_position:
@@ -1775,7 +1778,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             if task_emb is not None:
                 bos_mask = (text_tokens[:, t] == self.text_bos_id)  # [B]
                 if bos_mask.any():
-                    if formatter == 'lhotse_magpietts_data_as_duplex':
+                    if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex':
                         task_emb = task_emb
                     else:
                         if self.condition_spk_emb_on_bos_position:

@@ -46,6 +46,22 @@ class ResultsLogger:
         metadata_files = os.listdir(self.matadata_save_path)
         for f in metadata_files:
             open(os.path.join(self.matadata_save_path, f), 'w').close()
+
+        # clean out any existing .wav predictions safely
+        try:
+            audio_files = os.listdir(self.audio_save_path)
+            for f in audio_files:
+                if f.lower().endswith(".wav"):
+                    try:
+                        os.remove(os.path.join(self.audio_save_path, f))
+                    except FileNotFoundError:
+                        pass  # already gone
+                    except Exception:
+                        logging.warning(f"Failed to remove audio file {f} during reset.", stack_info=False)
+        except FileNotFoundError:
+            # directory somehow missing: recreate it
+            os.makedirs(self.audio_save_path, exist_ok=True)
+
         return self
 
     @staticmethod
