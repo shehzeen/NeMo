@@ -1771,8 +1771,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             prev_audio_codes = gen_audio_codes[:, t - 1 : t, :] 
             # gen_audio_codes B, T=?, C=8, F=2
             # prev_audio_codes  B, C=8, F=2
-            # prev_audio_codes new: B, ?, 8
-            # ToDo: move to .transpose(1, 2)
             input_embeds[:, t] += self.embed_audio_tokens(
                 prev_audio_codes.transpose(1, 2).reshape(prev_audio_codes.size(0), self._num_codebooks, -1).transpose(1, 2) # transpose(1, 2) to make the self._num_codebooks dimention as second and then collapse two last dim (T and self.downsampling_factor) then transpose it back
                 # prev_audio_codes.reshape(prev_audio_codes.size(0), -1, self._num_codebooks) # reshape to handle self.downsampling_factor: Roy: double check
@@ -1828,8 +1826,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
 
         # gen_audio_codes B, T=?, C=8, F=2
-        # prev_audio_codes new: B, ?, 8
-        # gen_audio_codes.transpose(1, 2).reshape(gen_audio_codes.size(0), -1, self._num_codebooks)
         ans = {
             "text": tokens_to_str(text_tokens, lengths, tokenizer=self.tokenizer, pad_id=self.text_pad_id),
             "tokens_text": text_tokens,
