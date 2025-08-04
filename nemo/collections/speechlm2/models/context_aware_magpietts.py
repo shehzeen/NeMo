@@ -1529,7 +1529,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         local_transformer_input = self.local_transformer_in_projection(dec_output) # (B, 1, 128)
         all_preds = []
         for codebook_num in range(self._num_codebooks * self.downsampling_factor):
-            _mask = torch.ones( local_transformer_input.size(0), local_transformer_input.size(1), device=local_transformer_input.device)
+            _mask = torch.ones(local_transformer_input.size(0), local_transformer_input.size(1), device=local_transformer_input.device)
             local_transformer_output = self.local_transformer(local_transformer_input, _mask)['output'] # (B, T, 128)
             codebook_logits = self.local_transformer_out_projections[codebook_num](local_transformer_output[:, -1, :]) # (B, num_all_tokens_per_codebook)
             if use_cfg:
@@ -1651,7 +1651,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             with fp32_precision():
                 source_audio_lens = source_audio_lens * (self.target_sample_rate/self.source_sample_rate)
 
-
         source_audio, source_audio_lens = self.pad_audio_to_factor(source_audio, source_audio_lens, self.source_samples_per_frame, self.downsampling_factor)
 
         # ToDo: Add a transformer encoder to help the model to better extract contextual information, replace the code bellow with it
@@ -1673,7 +1672,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             source_audio_emb = source_audio_emb[:, :text_tokens.size(1), :]
         else:
             text_tokens = text_tokens[:, :source_audio_emb.size(1)]
-        
+
         # create the task embedding to reuse in the autoregressive loop
         task_emb = None
         if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex':
@@ -1715,7 +1714,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # This cache is for self.decoder
         cache = DynamicCache()
-        gen_audio = torch.zeros(B, T, self._num_codebooks, self.downsampling_factor, device=self.device, dtype=torch.long)
+        gen_audio_codes = torch.zeros(B, T, self._num_codebooks, self.downsampling_factor, device=self.device, dtype=torch.long)
 
         # Add source audio first frame to the model input
         input_embeds[:, 0] = source_audio_emb[:, 0]
@@ -1750,9 +1749,9 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             seq_mask=None,
         )
         if self.use_local_transformer:
-            gen_audio[:, 0] = self.local_transformer_sample_codes_from_logits(ans["backbone_out"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+            gen_audio_codes[:, 0] = self.local_transformer_sample_codes_from_logits(ans["backbone_out"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
         else:
-            gen_audio[:, 0] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+            gen_audio_codes[:, 0] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
 
         speech_state = torch.zeros(B, device=self.device, dtype=torch.long)
         # Autoregressive loop
@@ -1769,9 +1768,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             input_embeds[:, t] += text_emb[:, -1]
 
             # add audio tokens
-            prev_audio_codes = gen_audio[:, t - 1 : t, :]
+            prev_audio_codes = gen_audio_codes[:, t - 1 : t, :] 
+            # gen_audio_codes B, T=?, C=8, F=2
+            # prev_audio_codes  B, C=8, F=2
+            # prev_audio_codes new: B, ?, 8
+            # ToDo: move to .transpose(1, 2)
             input_embeds[:, t] += self.embed_audio_tokens(
-                prev_audio_codes.reshape(prev_audio_codes.size(0), -1, self._num_codebooks) # reshape to handle self.downsampling_factor
+                prev_audio_codes.transpose(1, 2).reshape(prev_audio_codes.size(0), self._num_codebooks, -1).transpose(1, 2) # transpose(1, 2) to make the self._num_codebooks dimention as second and then collapse two last dim (T and self.downsampling_factor) then transpose it back
+                # prev_audio_codes.reshape(prev_audio_codes.size(0), -1, self._num_codebooks) # reshape to handle self.downsampling_factor: Roy: double check
             )[:, -1]
 
             # replace bos token by task id token
@@ -1795,9 +1799,9 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             )
 
             if self.use_local_transformer:
-                gen_audio[:, t] = self.local_transformer_sample_codes_from_logits(ans["backbone_out"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+                gen_audio_codes[:, t] = self.local_transformer_sample_codes_from_logits(ans["backbone_out"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
             else:
-                gen_audio[:, t] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
+                gen_audio_codes[:, t] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
 
             if self.cfg.get('inference_force_speech_state', None):
                 # state 0 - silence, state 1 - speech
@@ -1807,34 +1811,39 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 speech_state = torch.where(
                     text_tokens[:, t] == self.text_eos_id, torch.zeros_like(speech_state), speech_state
                 )
-                gen_audio[:, t] = torch.where(
+                gen_audio_codes[:, t] = torch.where(
                     speech_state.unsqueeze(-1) == 0,
-                    gen_audio[:, 0],  # silence
-                    gen_audio[:, t],  # speech
+                    gen_audio_codes[:, 0],  # silence
+                    gen_audio_codes[:, t],  # speech
                 )
 
         # Trim back to local length if padded
         if self._use_fsdp and T > T_local:
             text_tokens = text_tokens[:, :T_local]
-            gen_audio = gen_audio[:, :T_local]
+            gen_audio_codes = gen_audio_codes[:, :T_local]
 
         # expand lengths to match the new size
         with fp32_precision():
             tokens_audio_len = torch.ceil(lengths * self.downsampling_factor).to(lengths.dtype)
 
+
+        # gen_audio_codes B, T=?, C=8, F=2
+        # prev_audio_codes new: B, ?, 8
+        # gen_audio_codes.transpose(1, 2).reshape(gen_audio_codes.size(0), -1, self._num_codebooks)
         ans = {
             "text": tokens_to_str(text_tokens, lengths, tokenizer=self.tokenizer, pad_id=self.text_pad_id),
             "tokens_text": text_tokens,
-            "tokens_audio": gen_audio.reshape(gen_audio.size(0), -1, self._num_codebooks), # reshape to handle self.downsampling_factor
+            # "tokens_audio": gen_audio_codes.reshape(gen_audio_codes.size(0), -1, self._num_codebooks), # reshape to handle self.downsampling_factor --> Roy: Check if it is fine
+            "tokens_audio": gen_audio_codes.transpose(1, 2).reshape(gen_audio_codes.size(0), self._num_codebooks, -1).transpose(1, 2), # reshape to handle self.downsampling_factor --> Roy: Check if it is fine
             "tokens_text_len": lengths,
             "tokens_audio_len": tokens_audio_len,
         }
 
         if decode_audio:
-            gen_audio_codes = replace_control_speech_codes(ans["tokens_audio"], self._control_codes)
+            gen_audio_codes_codes = replace_control_speech_codes(ans["tokens_audio"], self._control_codes)
             with fp32_precision(), torch.no_grad():
                 predicted_audio, predicted_audio_lens = self.audio_codec.decode(
-                    tokens=gen_audio_codes.transpose(1, 2), tokens_len=tokens_audio_len
+                    tokens=gen_audio_codes_codes.transpose(1, 2), tokens_len=tokens_audio_len
                 )
             ans["audio"] = predicted_audio
             ans["audio_len"] = predicted_audio_lens
