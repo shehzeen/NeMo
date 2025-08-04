@@ -1839,12 +1839,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             ans["audio"] = predicted_audio
             ans["audio_len"] = predicted_audio_lens
 
-        if (
-            self.cfg.get("use_eou_decoder", None)
-            or self.cfg.get("llm_predict_eou", None)
-            or self.cfg.get("inference_use_external_eou_predictor", None) or self.cfg.get("inference_eou_from_bos_eos", None)
-        ):
-            ans["gen_eou"] = gen_eou
         return ans
 
     def backward(self, *args, **kwargs):
