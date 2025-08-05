@@ -501,7 +501,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self,
         input_embeds: Tensor,
         cache=None,
-        seq_mask=None
+        seq_mask=None,
+        force_disable_cfg=False,
     ) -> dict[str, Tensor]:
         """
         Separated text and speech prediction:
@@ -511,7 +512,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 (2) speech_generation cache relys on reset_input_and_kv_cache function.
         """
 
-        if self.cfg_unconditional_prob:
+        if self.cfg_unconditional_prob and not force_disable_cfg:
             if self.training:
                 # if training drop the "text" conditioning in a percentage of batch
                 if torch.rand(1).item() < self.cfg_unconditional_prob:
@@ -536,7 +537,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         logits = self.final_proj(out.last_hidden_state)  # (B, T', num_codebooks * _codebook_size)
 
         # if using cfg and it is in inference or evaluation mix unconditional and coditional logits
-        if self.cfg_scale is not None and self.cfg_unconditional_prob and not self.training:
+        if self.cfg_scale is not None and self.cfg_unconditional_prob and not self.training and not force_disable_cfg:
             batch_size = logits.size(0) // 2
             cond_logits = logits[:batch_size]
             uncond_logits = logits[batch_size:]
@@ -639,7 +640,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 target_codes_lens = (target_codes_lens * (target_codes.size(1) / target_codes_lens.max())).to(target_codes_lens.dtype)
 
         target_tokens = batch["target_tokens"]
-        if (diff := target_tokens.shape[1] - (source_codes.shape[1])//self.downsampling_factor) < 0:
+        if (diff := target_tokens.shape[1] - ((source_codes.shape[1])//self.downsampling_factor)) < 0:
             target_tokens = torch.cat(
                 [
                     target_tokens,
@@ -1166,6 +1167,32 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         codes_with_mask = torch.where(mask, self.local_transformer_mask_token_id, codes)
         return codes_with_mask, mask
 
+    def logits_to_audio_codes(self, all_code_logits, audio_codes_lens):
+        # all_code_logits: (B, T', num_codebooks * num_tokens_per_codebook)
+        # audio_codes_lens: (B,)
+        all_preds = [[] for _ in range(self.downsampling_factor)]
+        for ds_index in range(self.downsampling_factor):
+            for idx in range(self._num_codebooks):
+                si = (idx + self._num_codebooks * ds_index) * self.speech_vocab_size
+                ei = si + self.speech_vocab_size
+                codebook_logits = all_code_logits[:, :, si:ei]
+                codebook_probs = torch.softmax(codebook_logits, dim=-1)  # (B, T', num_tokens_per_codebook)
+                # argmax to get the tokens
+                codebook_preds = torch.argmax(codebook_probs, dim=-1)  # (B, T')
+                all_preds[ds_index].append(codebook_preds)
+        all_preds = [torch.stack(p, dim=1) for p in all_preds] # list of `downsampling_factor`` elements of shape (B,C,T) each
+        all_preds = torch.stack(all_preds, dim=-1) # B, C, T, downsampling_factor
+        # interleave the time dimension, undoing the frame stacking
+        all_preds = all_preds.reshape(all_preds.size(0), all_preds.size(1), -1) # B, C, T*downsampling_factor
+        pred_max_len = all_preds.size(2)
+        real_max_len = audio_codes_lens.max()
+        assert (pred_max_len - real_max_len) < self.downsampling_factor
+        # trim padding introduced for frame stacking
+        all_preds = all_preds[:,:, :real_max_len]
+        audio_mask = get_mask_from_lengths(audio_codes_lens)
+        all_preds = all_preds * audio_mask.unsqueeze(1)
+
+        return all_preds
 
     def training_step(self, batch: dict, batch_idx: int):
         for m in (self.decoder, self.embed_text_tokens, self.audio_embeddings, self.final_proj):
@@ -1188,16 +1215,64 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             inputs["input_embeds"],
             seq_mask=inputs["seq_mask"]
         )
-
+    
         codebook_loss, loss_mask = self.compute_loss(forward_outputs["logits"], inputs["audio_labels"],  inputs["output_lens"])
 
         # local transformer
         local_transformer_logits = None
         if self.use_local_transformer:
             if self.local_transformer_type == "ar":
+
                 # autoregressive
                 local_transformer_logits = self.compute_local_transformer_logits(forward_outputs["backbone_out"], inputs["audio_labels"], targets_offset_by_one=False)
                 local_transformer_loss, _ = self.compute_loss(local_transformer_logits, inputs["audio_labels"], inputs["output_lens"])
+                if (
+                    self.cfg.get("debug_comp_loss_audios_path", None)
+                    and self.training
+                ):
+
+                    def write_wave(one_audio_signal, file_name, sr=None):
+                        import numpy as np
+                        import soundfile as sf
+
+                        one_audio_signal = one_audio_signal.cpu().numpy()
+                        one_audio_signal = one_audio_signal.astype(np.float32)
+                        if sr is None:
+                            sr = self.target_sample_rate
+                        # one_audio_signal = np.clip(one_audio_signal, -1.0, 1.0)
+                        sf.write(file_name, one_audio_signal, sr)
+
+                    # encode and decode the audio
+                    with fp32_precision(), torch.no_grad():
+                        # reconstruct wav
+                        audio_labels_ = replace_control_speech_codes(inputs["audio_labels"], self._control_codes)
+                        with fp32_precision(), torch.no_grad():
+                            lengths = torch.tensor([audio_labels_.shape[1]] * audio_labels_.shape[0]).to(
+                                self.audio_codec.device
+                            )
+                            reconstructed_audio_from_tokens, _ = self.audio_codec.decode(
+                                tokens=audio_labels_.transpose(1, 2), tokens_len=lengths
+                            )
+                        # teaching force prediction
+                        tf_audio_from_tokens = self.get_teacher_force_inference_audio(batch)
+
+                    for i in range(audio_labels_.shape[0]):
+                        write_wave(
+                            reconstructed_audio_from_tokens[i],
+                            os.path.join(
+                                self.cfg.get("debug_comp_loss_audios_path"), f"target_audio_reconstructed_from_tokens_{i}.wav"
+                            ),
+                            sr=self.target_sample_rate,
+                        )
+                        write_wave(
+                            tf_audio_from_tokens[i],
+                            os.path.join(
+                                self.cfg.get("debug_comp_loss_audios_path"),
+                                f"target_audio_reconstructed_from_tf_{i}.wav",
+                            ),
+                            sr=self.target_sample_rate,
+                        )
+                    exit()
             else:
                 # randomly replace some positions with MASK_TOKEN
                 audio_codes_masked, mask_tokens_mask = self.maskgit_apply_random_mask(inputs["audio_labels"])
@@ -1248,12 +1323,49 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         for k, m in secs.items():
             self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
 
+    def get_teacher_force_inference_audio(self, batch):
+        inputs = self.prepare_inputs(batch)
+
+        forward_outputs = self(
+            inputs["input_embeds"],
+            seq_mask=inputs["seq_mask"],
+            force_disable_cfg=True,
+        )
+
+        # local transformer
+        local_transformer_logits = None
+        if self.use_local_transformer:
+            if self.local_transformer_type == "ar":
+                # autoregressive
+                local_transformer_logits = self.compute_local_transformer_logits(forward_outputs["backbone_out"], inputs["audio_labels"], targets_offset_by_one=False)
+            else:
+                # randomly replace some positions with MASK_TOKEN
+                audio_codes_masked, mask_tokens_mask = self.maskgit_apply_random_mask(inputs["audio_labels"])
+                local_transformer_logits = self.compute_local_transformer_logits(forward_outputs["backbone_out"], inputs["audio_labels"], targets_offset_by_one=True)
+
+            lengths = torch.tensor([inputs["audio_labels"].shape[1]] * inputs["audio_labels"].shape[0]).to(self.audio_codec.device)
+            tf_audio_codes_pred = self.logits_to_audio_codes(local_transformer_logits, lengths).transpose(1, 2)
+        else:
+            lengths = torch.tensor([inputs["audio_labels"].shape[1]] * inputs["audio_labels"].shape[0]).to(self.audio_codec.device)
+            tf_audio_codes_pred = self.logits_to_audio_codes(forward_outputs["backbone_out"], lengths).transpose(1, 2)
+
+        # decode audio
+        tf_audio_codes_pred = replace_control_speech_codes(tf_audio_codes_pred, self._control_codes)
+        with fp32_precision(), torch.no_grad():
+            lengths = torch.tensor([tf_audio_codes_pred.shape[1]] * tf_audio_codes_pred.shape[0]).to(
+                self.audio_codec.device
+            )
+            tf_audio_pred, _ = self.audio_codec.decode(
+                tokens=tf_audio_codes_pred.transpose(1, 2), tokens_len=lengths
+            )
+
+        return tf_audio_pred
+
     def validation_step(self, batch: dict, batch_idx: int):
 
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
                 continue  # some dataset is exhausted
-
             results = self.offline_inference(
                 dataset_batch["source_audio"],
                 dataset_batch["source_audio_lens"],
@@ -1262,6 +1374,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 text_tokens=dataset_batch["target_tokens"],
                 formatter=dataset_batch["formatter"][0],
             )
+
+            results["tf_audio_pred"] = self.get_teacher_force_inference_audio(dataset_batch)
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
                 asr_hyps = self.asr_bleu.update(
@@ -1294,6 +1408,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     asr_hyps=asr_hyps,
                     samples_id=dataset_batch['sample_id'],
                     pred_audio=results["audio"],
+                    pred_audio_tf=results["tf_audio_pred"],
                     pred_audio_sr=self.target_sample_rate,
                     user_audio=dataset_batch["source_audio"],
                     user_audio_sr=self.source_sample_rate,
@@ -1823,7 +1938,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # expand lengths to match the new size
         with fp32_precision():
             tokens_audio_len = torch.ceil(lengths * self.downsampling_factor).to(lengths.dtype)
-
 
         # gen_audio_codes B, T=?, C=8, F=2
         ans = {
