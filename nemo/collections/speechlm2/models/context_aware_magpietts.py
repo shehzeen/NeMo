@@ -233,6 +233,82 @@ class CharAwareSubwordEncoder(NeuralModule):
         
         return subword_emb
 
+class GroupedCodec(NeuralModule):
+    def __init__(self, codec, frame_stacking_factor):
+        super().__init__()
+        self.codec = codec
+        self.frame_stacking_factor = frame_stacking_factor
+
+    @property
+    def device(self):
+        return self.codec.device
+
+    @property
+    def _codebook_size(self):
+        return self.codec.vector_quantizer.codebook_size_per_group
+
+    @property
+    def _num_codebooks(self):
+        return self.codec.vector_quantizer.num_groups * self.frame_stacking_factor
+
+    @property
+    def samples_per_frame(self):
+        return self.codec.samples_per_frame * self.frame_stacking_factor
+
+    def encode(self, audio, audio_len):
+        with fp32_precision():
+            # make the audio divisible by frame rate and also by self.frame_stacking_factor with extra frames of 1 to avoid issues because we are removing a audio frame to shift target and input for TF
+            audio, audio_len = self.pad_audio_to_factor(audio, audio_len, self.samples_per_frame, extra_frames=1)
+            # encodes audio using the codec
+            tokens, tokens_len = self.codec.encode(audio=audio, audio_len=audio_len)  # B, C, T
+            tokens = tokens.transpose(1, 2)  # → B, T, C
+            B, T, C = tokens.shape
+            assert T % self.frame_stacking_factor == 0
+            grouped = tokens.reshape(B, T // self.frame_stacking_factor, C * self.frame_stacking_factor)
+            tokens_len = tokens_len // self.frame_stacking_factor
+            return grouped.transpose(1, 2), tokens_len
+
+    def decode(self, tokens, tokens_len):
+        with fp32_precision():
+            tokens = tokens.transpose(1, 2)
+            # tokens: B, T', C'
+            B, T, Cg = tokens.shape
+            assert Cg % self.frame_stacking_factor == 0
+            C = Cg // self.frame_stacking_factor
+            ungrouped = tokens.reshape(B, T * self.frame_stacking_factor, C)  # → [B, T, C]
+            ungrouped = ungrouped.transpose(1, 2)      # → [B, C, T] for decode
+            tokens_len = torch.ceil(tokens_len * self.frame_stacking_factor).to(tokens_len.dtype)
+            audio, audio_len = self.codec.decode(tokens=ungrouped, tokens_len=tokens_len)
+        return audio, audio_len
+
+    def forward(self, audio, audio_len):
+        tokens, tokens_len = self.encode(audio, audio_len)
+        audio, audio_len = self.decode(tokens, tokens_len)
+        return audio, audio_len
+
+    def pad_audio_to_factor(self, audio, audio_len, samples_per_frame, extra_frames: int = 0):
+        """
+        Zero pad the end of the audio so that we do not have a partial end frame.
+        The output will be zero-padded to have an integer number of frames of
+        length `samples_per_frame * frame_stacking_factor`.
+
+        Args:
+            audio: input time-domain signal (B, T)
+            audio_len: valid length for each example in the batch (B,)
+            samples_per_frame: number of samples per frame
+
+        Returns:
+            padded_audio: Padded time-domain signal (B, T')
+            padded_len: Adjusted valid lengths (B,)
+        """
+        with fp32_precision():
+            padded_len = (samples_per_frame * torch.ceil(audio_len / samples_per_frame).int()) + (extra_frames * samples_per_frame)
+        max_len = padded_len.max().int().item()
+        num_padding = (max_len - audio.shape[1])
+        padded_audio = F.pad(audio, (0, num_padding))   
+        return padded_audio, padded_len
+
+
 class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
     def __init__(self, cfg: dict) -> None:
         assert isinstance(cfg, dict), (
@@ -263,11 +339,17 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         self.local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
         # ratio between the the codec frame rate and the Magpie decoder's frame rate
         self.downsampling_factor = self.cfg.get('downsampling_factor', 1)
+        self.frame_stacking_factor = self.cfg.get('frame_stacking_factor', 1)
 
         # codec configs
         setup_audio_codec(self)
-        self._codebook_size = self.audio_codec.vector_quantizer.codebook_size_per_group
-        self._num_codebooks = self.audio_codec.vector_quantizer.num_groups
+        if self.frame_stacking_factor > 1:
+            self.audio_codec = GroupedCodec(self.audio_codec, self.frame_stacking_factor)
+            self._codebook_size = self.audio_codec._codebook_size
+            self._num_codebooks = self.audio_codec._num_codebooks
+        else:
+            self._codebook_size = self.audio_codec.vector_quantizer.codebook_size_per_group
+            self._num_codebooks = self.audio_codec.vector_quantizer.num_groups
 
         # compute target fps
         self.target_fps = self.target_sample_rate / self.audio_codec.samples_per_frame
@@ -554,7 +636,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         return ans
 
-    def pad_audio_codes_to_factor(self, audio_codes: torch.Tensor, downsampling_factor: int = 1, pad_token: int =0):
+    def pad_audio_codes_to_factor(self, audio_codes: torch.Tensor, downsampling_factor: int = 1, pad_token: int = 0):
         """
         Pads the time dimension of the audio codes to a multiple of the downsampling factor.
         Args:
@@ -1117,7 +1199,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # TODO @rfejgin: make sure all downsampling_factor * num_codebooks are in the same dimension (expected by loss calculation)
         all_code_logits = torch.cat(all_code_logits, dim=1) # (B*T'/downsampling_factor, num_codebooks * num_all_tokens_per_codebook * downsampling_factor)
-
         all_code_logits = all_code_logits.view(
             audio_codes_target.size(0), audio_codes_target.size(2) // self.downsampling_factor, -1
         ) # (B, T'/downsampling_factor, C * num_all_tokens_per_codebook * downsampling_factor)
@@ -1179,6 +1260,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 codebook_probs = torch.softmax(codebook_logits, dim=-1)  # (B, T', num_tokens_per_codebook)
                 # argmax to get the tokens
                 codebook_preds = torch.argmax(codebook_probs, dim=-1)  # (B, T')
+                # codebook_preds = target_audio_codes[:, idx, ds_index::self.downsampling_factor]
                 all_preds[ds_index].append(codebook_preds)
         all_preds = [torch.stack(p, dim=1) for p in all_preds] # list of `downsampling_factor`` elements of shape (B,C,T) each
         all_preds = torch.stack(all_preds, dim=-1) # B, C, T, downsampling_factor
@@ -1215,7 +1297,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             inputs["input_embeds"],
             seq_mask=inputs["seq_mask"]
         )
-    
+
         codebook_loss, loss_mask = self.compute_loss(forward_outputs["logits"], inputs["audio_labels"],  inputs["output_lens"])
 
         # local transformer
@@ -1282,8 +1364,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             local_transformer_loss = torch.tensor(0.0, device=self.device)
 
         loss = codebook_loss + local_transformer_loss * self.local_transformer_loss_scale
-        
-        # ToDo: Add local transformer losses
+
         B, T = inputs["input_embeds"].shape[:2]
         num_frames = inputs["input_lens"].sum()
         ans = {
@@ -1302,6 +1383,11 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
     def on_train_epoch_start(self) -> None:
         setup_audio_codec(self)  # potentially reloads the audio codec to make sure it's in fp32
+        # Replace audio_codec with GroupedCodec to enable frame stacking (downsampling).
+        # The isinstance check prevents infinite recursion, since setup_audio_codec may already return a GroupedCodec when the codec is set to fp32.
+        if self.frame_stacking_factor > 1 and not isinstance(self.audio_codec, GroupedCodec):
+            self.audio_codec = GroupedCodec(self.audio_codec, self.frame_stacking_factor)
+
         if self.condition_spk_emb_on_bos_position:
             self.setup_speaker_encoder()  # potentially reloads the speaker encoder to make sure it's in fp32
 
@@ -1366,6 +1452,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
                 continue  # some dataset is exhausted
+
             results = self.offline_inference(
                 dataset_batch["source_audio"],
                 dataset_batch["source_audio_lens"],
@@ -1723,11 +1810,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             padded_audio: Padded time-domain signal (B, T')
             padded_len: Adjusted valid lengths (B,)
         """
-        total_factor = samples_per_frame * downsampling_factor
-        padded_len = total_factor * torch.ceil(audio_len / total_factor).int()
-        max_len = padded_len.max().int().item()
-        num_padding = max_len - audio.shape[1]
-        padded_audio = F.pad(audio, (0, num_padding))
+        with fp32_precision():
+            total_factor = samples_per_frame * downsampling_factor
+            padded_len = total_factor * torch.ceil(audio_len / total_factor).int()
+            max_len = padded_len.max().int().item()
+            num_padding = max_len - audio.shape[1]
+            padded_audio = F.pad(audio, (0, num_padding))
         return padded_audio, padded_len
 
     @torch.no_grad()
