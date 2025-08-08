@@ -340,6 +340,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # ratio between the the codec frame rate and the Magpie decoder's frame rate
         self.downsampling_factor = self.cfg.get('downsampling_factor', 1)
         self.frame_stacking_factor = self.cfg.get('frame_stacking_factor', 1)
+        self.use_cas_embeddings_only = self.cfg.get('use_cas_embeddings_only', False)
 
         # codec configs
         setup_audio_codec(self)
@@ -878,13 +879,17 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # Add source codes embeddings
         input_embeds = source_audio_emb
 
+
         # get embedding for text tokens
         text_embedded = self.embed_text_tokens(text_labels)
 
         # if use bpe char tokenizer sum the embeddings
         if self.use_bpe_char_tokenizer:
             cas_embedding = self.cas_encoder(text_labels, subword_mask=seq_mask)  # (B, L, E)
-            text_embedded = text_embedded + cas_embedding
+            if self.use_cas_embeddings_only:
+                text_embedded = cas_embedding
+            else:
+                text_embedded = text_embedded + cas_embedding
 
         # Add text to the model input
         input_embeds.add_(text_embedded)
@@ -1868,7 +1873,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         source_audio_emb, lengths = self.embed_audio_tokens(
             source_codes, lengths
         )
-        text_mask = get_mask_from_lengths(lengths)
+        # seq_mask = get_mask_from_lengths(lengths)
 
         # make sure text tokens and context have the same size
         if source_audio_emb.size(1)> text_tokens.size(1):
@@ -1935,7 +1940,10 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # if use bpe char tokenizer sum the embeddings
         if self.use_bpe_char_tokenizer:
             cas_embedding = self.cas_encoder(text_pad_token.unsqueeze(0), subword_mask=None).squeeze(0)  # (B, L, E)
-            text_pad_embedded = text_pad_embedded + cas_embedding
+            if self.use_cas_embeddings_only:
+                text_pad_embedded = cas_embedding
+            else:
+                text_pad_embedded = text_pad_embedded + cas_embedding
 
         # Add text to the model input
         input_embeds[:, 0] += text_pad_embedded # padding token is the first thing that the model see in text channel, because the target text channel is padded with pad during the context audio condition
@@ -1966,8 +1974,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
             # if use bpe char tokenizer sum the embeddings
             if self.use_bpe_char_tokenizer:
-                cas_embedding = self.cas_encoder(text_tokens[:, t : t + 1], subword_mask=text_mask[:, t : t + 1])  # (B, L, E)
-                text_emb = text_emb + cas_embedding
+                cas_embedding = self.cas_encoder(text_tokens[:, t : t + 1], subword_mask=None)  # (B, L, E)
+                if self.use_cas_embeddings_only:
+                    text_emb = cas_embedding
+                else:
+                    text_emb = text_emb + cas_embedding
+
             input_embeds[:, t] += text_emb[:, -1]
 
             # add audio tokens
