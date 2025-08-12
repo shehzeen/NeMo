@@ -1917,7 +1917,9 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         # create the task embedding to reuse in the autoregressive loop
         task_emb = None
+        force_silence_after_first_speech_eos = False
         if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex':
+            force_silence_after_first_speech_eos = True
             task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
             # remove eos for zstts task
             if self.cfg.get("drop_text_eos_for_zstts_task", False):
@@ -1999,6 +2001,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             gen_audio_codes[:, 0] = self.sample_codes_from_logits(ans["logits"][:, -1], temperature=self.cfg.get('temperature', 0.7), topk=self.cfg.get('topk', 80)) # (B, num_codebooks)
 
         speech_state = torch.zeros(B, device=self.device, dtype=torch.long)
+
+        end_indices = torch.full((B,), fill_value=-1, dtype=torch.long, device=gen_audio_codes.device)  # -1 means "not ended yet"
         # Autoregressive loop
         for t in range(1, T):
 
@@ -2063,6 +2067,25 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     gen_audio_codes[:, 0],  # silence
                     gen_audio_codes[:, t],  # speech
                 )
+
+            if force_silence_after_first_speech_eos:
+                # check for EOS prediction in any codebook
+                eos_pred_mask_old = (gen_audio_codes[:, t] == self.speech_eos_id).any(dim=-1)  # [B]
+                eos_pred_mask = (gen_audio_codes[:, t, :, :] == self.speech_eos_id).any(dim=(1, 2))  # → [B] --> any codebooks
+                # eos_pred_mask = (gen_audio_codes[:, t, 0, :] == self.speech_eos_id).any(dim=-1)  # shape [B] --> first codebook
+                # mark end index for batches that just predicted EOS for the first time
+                newly_ended = (end_indices == -1) & eos_pred_mask
+                if newly_ended.any():
+                    detected_batches = torch.nonzero(newly_ended, as_tuple=False).squeeze(-1)
+                    for b in detected_batches.tolist():
+                        print(f"[DEBUG] speech_eos_id detected for batch {b} at timestep {t}", gen_audio_codes[b, t])
+
+                end_indices[newly_ended] = t
+                # enforce silence for sequences that have ended
+                ended_mask = end_indices != -1
+                if ended_mask.any():
+                    gen_audio_codes[ended_mask, t] = gen_audio_codes[ended_mask, 0]  # silence token
+
 
         # Trim back to local length if padded
         if self._use_fsdp and T > T_local:
