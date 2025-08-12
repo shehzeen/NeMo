@@ -718,6 +718,17 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 waveform=batch["source_audio"], sample_rate=self.source_sample_rate, cutoff_freq=cutoff_freq
             )
 
+        source_audio = batch["source_audio"]
+        source_audio_lens = batch["source_audio_lens"]
+
+        # pad audio to avoid cut due the addition of delay token
+        if self.num_delay_tokens > 1:
+            extra_frames = int(self.num_delay_tokens * self.source_samples_per_frame)
+            source_audio = F.pad(source_audio, (0, extra_frames))
+            source_audio_lens = source_audio_lens + extra_frames
+            batch["target_audio"] = F.pad(batch["target_audio"], (0, extra_frames))
+            batch["target_audio_lens"] = batch["target_audio_lens"] + extra_frames
+
         # extract target audio codes
         with fp32_precision(), torch.no_grad():
             target_codes, target_codes_lens = self.audio_codec.encode(
@@ -725,13 +736,11 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             )
             target_codes = target_codes.transpose(1, 2)  # (B, K, T) -> (B, T, K)
 
-        source_audio = batch["source_audio"]
-        source_audio_lens = batch["source_audio_lens"]
         if self.source_sample_rate != self.target_sample_rate:
             source_audio = resample(source_audio, self.source_sample_rate, self.target_sample_rate)
             with fp32_precision():
                 source_audio_lens = (source_audio_lens * (self.target_sample_rate/self.source_sample_rate)).to(lengths.dtype)
-        
+
         # pad audio to a factor to avoid division erros in the context encoder
         if self.use_context_encoder:
             source_audio, source_audio_lens = self.pad_audio_to_factor(source_audio, source_audio_lens, self.source_samples_per_frame, self.downsampling_factor)
