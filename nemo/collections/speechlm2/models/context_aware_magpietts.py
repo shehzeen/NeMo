@@ -1509,6 +1509,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
                 metric_audio_target = resample(dataset_batch["target_audio"], self.target_sample_rate, 16000)
                 metric_audio_target_len = (dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long)
+
+                """
                 # if using trimmed audio, trim also target
                 if results["trimmed_audio"] is not None:
                     bos_indices = results["bos_indices"]
@@ -1530,7 +1532,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                         audio_trimmed = metric_audio_target[b, start_sample:end_sample]
                         trimmed_audios.append(audio_trimmed)
                         trimmed_audio_lens.append(audio_trimmed.size(-1))
-
+                
                     # Pad trimmed audio back into tensor
                     max_audio_len = max(trimmed_audio_lens)
                     audio_trimmed_padded = metric_audio_target.new_zeros((metric_audio_target.size(0), max_audio_len))
@@ -1539,6 +1541,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
                     trimmed_audio_lens = torch.tensor(trimmed_audio_lens).to(metric_audio_target.device)
                     metric_audio_target = audio_trimmed_padded
+                """
 
                 asr_hyps = self.asr_bleu.update(
                     name=name,
