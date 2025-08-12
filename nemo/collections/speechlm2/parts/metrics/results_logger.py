@@ -99,6 +99,7 @@ class ResultsLogger:
         user_audio: torch.Tensor,
         user_audio_sr: int,
         pred_audio_tf: torch.Tensor = None,
+        pre_audio_trimmed: torch.Tensor = None,
         eou_pred: torch.Tensor = None,
         fps: float = None,
         results=None,
@@ -127,6 +128,10 @@ class ResultsLogger:
                 eou_pred_wav = eou_pred_wav.view(1, -1)  # (B, T * repeat_factor)
                 eou_pred_wav = eou_pred_wav.float() * 0.8  #  make 1 audible and keep 0 as total silence
                 torchaudio.save(out_audio_path_eou, eou_pred_wav.squeeze().unsqueeze(0).detach().cpu(), pred_audio_sr)
+
+            if pre_audio_trimmed is not None:
+                out_audio_path_trimmed = os.path.join(self.audio_save_path, f"{name}_{sample_id}_pred_trimmed.wav")
+                torchaudio.save(out_audio_path_trimmed, pre_audio_trimmed[i].squeeze().unsqueeze(0).detach().cpu(), pred_audio_sr)
 
             # cache metadata
             out_dict = {

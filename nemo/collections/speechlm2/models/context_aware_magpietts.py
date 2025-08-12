@@ -1500,27 +1500,67 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             results["tf_audio_pred"] = self.get_teacher_force_inference_audio(dataset_batch)
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
+                # if trimmed audio is available use it
+                metric_audio_pred = results["trimmed_audio"] if results["trimmed_audio"] is not None else results["audio"]
+                metric_audio_pred_lens = results["trimmed_audio_len"]if results["trimmed_audio_len"] is not None else results["audio_len"]
+                # resample audio to the asr sampling rate
+                metric_audio_pred = resample(metric_audio_pred, self.target_sample_rate, 16000)
+                metric_audio_pred_lens = (metric_audio_pred_lens / self.target_sample_rate * 16000).to(torch.long)
+
+                metric_audio_target = resample(dataset_batch["target_audio"], self.target_sample_rate, 16000)
+                metric_audio_target_len = (dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long)
+                # if using trimmed audio, trim also target
+                if results["trimmed_audio"] is not None:
+                    bos_indices = results["bos_indices"]
+                    eos_indices = results["eos_indices"]
+
+                    trimmed_audios = []
+                    trimmed_audio_lens = []
+                    for b in range(metric_audio_target.size(0)):
+                        bos_t = bos_indices[b].item()
+                        eos_t = eos_indices[b].item()
+                        if bos_t == -1:
+                            bos_t = 0
+                        if eos_t == -1 or (eos_t < bos_t):
+                            eos_t = metric_audio_target.size(1) / self.audio_codec.samples_per_frame
+
+                        start_sample = int(bos_t * self.audio_codec.samples_per_frame)
+                        end_sample = int((eos_t + 1) * self.audio_codec.samples_per_frame) # include EOS frame
+
+                        audio_trimmed = metric_audio_target[b, start_sample:end_sample]
+                        trimmed_audios.append(audio_trimmed)
+                        trimmed_audio_lens.append(audio_trimmed.size(-1))
+
+                    # Pad trimmed audio back into tensor
+                    max_audio_len = max(trimmed_audio_lens)
+                    audio_trimmed_padded = metric_audio_target.new_zeros((metric_audio_target.size(0), max_audio_len))
+                    for b, audio in enumerate(trimmed_audios):
+                        audio_trimmed_padded[b, :audio.size(-1)] = audio
+
+                    trimmed_audio_lens = torch.tensor(trimmed_audio_lens).to(metric_audio_target.device)
+                    metric_audio_target = audio_trimmed_padded
+
                 asr_hyps = self.asr_bleu.update(
                     name=name,
                     refs=dataset_batch["target_texts"],
-                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
-                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
+                    pred_audio=metric_audio_pred,
+                    pred_audio_lens=metric_audio_pred_lens,
                 )
 
                 self.intelligibility.update(
                     name=name,
                     refs=dataset_batch["target_texts"],
-                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
-                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
+                    pred_audio=metric_audio_pred,
+                    pred_audio_lens=metric_audio_pred_lens,
                     asr_hyps=asr_hyps,
                 )
 
                 self.secs.update(
                     name=name,
-                    target_audio=resample(dataset_batch["target_audio"], self.target_sample_rate, 16000),
-                    target_audio_lens=(dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long),
-                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
-                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
+                    target_audio=metric_audio_target,
+                    target_audio_lens=metric_audio_target_len,
+                    pred_audio=metric_audio_pred,
+                    pred_audio_lens=metric_audio_pred_lens,
                 )
 
                 self.results_logger.update(
@@ -1531,6 +1571,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     samples_id=dataset_batch['sample_id'],
                     pred_audio=results["audio"],
                     pred_audio_tf=results["tf_audio_pred"],
+                    pre_audio_trimmed=results["trimmed_audio"],
                     pred_audio_sr=self.target_sample_rate,
                     user_audio=dataset_batch["source_audio"],
                     user_audio_sr=self.source_sample_rate,
@@ -2002,7 +2043,8 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         speech_state = torch.zeros(B, device=self.device, dtype=torch.long)
 
-        end_indices = torch.full((B,), fill_value=-1, dtype=torch.long, device=gen_audio_codes.device)  # -1 means "not ended yet"
+        bos_indices = torch.full((B,), fill_value=-1, dtype=torch.long, device=gen_audio_codes.device)
+        eos_indices = torch.full((B,), fill_value=-1, dtype=torch.long, device=gen_audio_codes.device)  # -1 means "not ended yet"
         # Autoregressive loop
         for t in range(1, T):
 
@@ -2029,9 +2071,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 # prev_audio_codes.reshape(prev_audio_codes.size(0), -1, self._num_codebooks) # reshape to handle self.downsampling_factor: Roy: double check
             )[:, -1]
 
+
+            # Track BOS in text tokens
+            bos_mask = (text_tokens[:, t] == self.text_bos_id)
+            newly_bos = (bos_indices == -1) & bos_mask
+            bos_indices[newly_bos] = t
+
             # replace bos token by task id token
             if task_emb is not None:
-                bos_mask = (text_tokens[:, t] == self.text_bos_id)  # [B]
                 if bos_mask.any():
                     if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex':
                         task_emb = task_emb
@@ -2074,15 +2121,15 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 eos_pred_mask = (gen_audio_codes[:, t, :, :] == self.speech_eos_id).any(dim=(1, 2))  # → [B] --> any codebooks
                 # eos_pred_mask = (gen_audio_codes[:, t, 0, :] == self.speech_eos_id).any(dim=-1)  # shape [B] --> first codebook
                 # mark end index for batches that just predicted EOS for the first time
-                newly_ended = (end_indices == -1) & eos_pred_mask
+                newly_ended = (eos_indices == -1) & eos_pred_mask
                 if newly_ended.any():
                     detected_batches = torch.nonzero(newly_ended, as_tuple=False).squeeze(-1)
                     for b in detected_batches.tolist():
                         print(f"[DEBUG] speech_eos_id detected for batch {b} at timestep {t}", gen_audio_codes[b, t])
 
-                end_indices[newly_ended] = t
+                eos_indices[newly_ended] = t
                 # enforce silence for sequences that have ended
-                ended_mask = end_indices != -1
+                ended_mask = eos_indices != -1
                 if ended_mask.any():
                     gen_audio_codes[ended_mask, t] = gen_audio_codes[ended_mask, 0]  # silence token
 
@@ -2107,13 +2154,46 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         }
 
         if decode_audio:
-            gen_audio_codes_codes = replace_control_speech_codes(ans["tokens_audio"], self._control_codes)
+            gen_audio_codes = replace_control_speech_codes(ans["tokens_audio"], self._control_codes)
             with fp32_precision(), torch.no_grad():
                 predicted_audio, predicted_audio_lens = self.audio_codec.decode(
-                    tokens=gen_audio_codes_codes.transpose(1, 2), tokens_len=tokens_audio_len
+                    tokens=gen_audio_codes.transpose(1, 2), tokens_len=tokens_audio_len
                 )
             ans["audio"] = predicted_audio
             ans["audio_len"] = predicted_audio_lens
+            ans["trimmed_audio"] = None
+            ans["trimmed_audio_len"] = None
+
+            # trim audio directly using BOS/EOS for make the metrics computation right for TTS task
+            if force_silence_after_first_speech_eos:
+                trimmed_audios = []
+                trimmed_audio_lens = []
+                for b in range(predicted_audio.size(0)):
+                    bos_t = bos_indices[b].item()
+                    eos_t = eos_indices[b].item()
+
+                    if bos_t == -1:
+                        bos_t = 0
+                    if eos_t == -1 or (eos_t < bos_t):
+                        eos_t = gen_audio_codes.size(1)
+
+                    start_sample = int(bos_t * self.audio_codec.samples_per_frame)
+                    end_sample = int((eos_t + 1) * self.audio_codec.samples_per_frame) # include EOS frame
+                    audio_trimmed = predicted_audio[b, start_sample:end_sample]
+                    trimmed_audios.append(audio_trimmed)
+                    trimmed_audio_lens.append(audio_trimmed.size(-1))
+
+                # Pad trimmed audio back into tensor
+                max_audio_len = max(trimmed_audio_lens)
+                audio_trimmed_padded = predicted_audio.new_zeros((B, max_audio_len))
+                for b, audio in enumerate(trimmed_audios):
+                    audio_trimmed_padded[b, :audio.size(-1)] = audio
+
+                trimmed_audio_lens = torch.tensor(trimmed_audio_lens).to(audio_trimmed_padded.device)
+                ans["trimmed_audio"] = audio_trimmed_padded
+                ans["trimmed_audio_len"] = trimmed_audio_lens
+                ans["bos_indices"] = bos_indices
+                ans["eos_indices"] = eos_indices
 
         return ans
 
