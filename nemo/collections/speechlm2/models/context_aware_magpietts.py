@@ -1500,48 +1500,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             results["tf_audio_pred"] = self.get_teacher_force_inference_audio(dataset_batch)
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
-                # if trimmed audio is available use it
+                # if trimmed audio is available use it for ASR and Bleu metrics
                 metric_audio_pred = results["trimmed_audio"] if results["trimmed_audio"] is not None else results["audio"]
                 metric_audio_pred_lens = results["trimmed_audio_len"]if results["trimmed_audio_len"] is not None else results["audio_len"]
                 # resample audio to the asr sampling rate
                 metric_audio_pred = resample(metric_audio_pred, self.target_sample_rate, 16000)
                 metric_audio_pred_lens = (metric_audio_pred_lens / self.target_sample_rate * 16000).to(torch.long)
-
-                metric_audio_target = resample(dataset_batch["target_audio"], self.target_sample_rate, 16000)
-                metric_audio_target_len = (dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long)
-
-                """
-                # if using trimmed audio, trim also target
-                if results["trimmed_audio"] is not None:
-                    bos_indices = results["bos_indices"]
-                    eos_indices = results["eos_indices"]
-
-                    trimmed_audios = []
-                    trimmed_audio_lens = []
-                    for b in range(metric_audio_target.size(0)):
-                        bos_t = bos_indices[b].item()
-                        eos_t = eos_indices[b].item()
-                        if bos_t == -1:
-                            bos_t = 0
-                        if eos_t == -1 or (eos_t < bos_t):
-                            eos_t = metric_audio_target.size(1) / self.audio_codec.samples_per_frame
-
-                        start_sample = int(bos_t * self.audio_codec.samples_per_frame)
-                        end_sample = int((eos_t + 1) * self.audio_codec.samples_per_frame) # include EOS frame
-
-                        audio_trimmed = metric_audio_target[b, start_sample:end_sample]
-                        trimmed_audios.append(audio_trimmed)
-                        trimmed_audio_lens.append(audio_trimmed.size(-1))
-                
-                    # Pad trimmed audio back into tensor
-                    max_audio_len = max(trimmed_audio_lens)
-                    audio_trimmed_padded = metric_audio_target.new_zeros((metric_audio_target.size(0), max_audio_len))
-                    for b, audio in enumerate(trimmed_audios):
-                        audio_trimmed_padded[b, :audio.size(-1)] = audio
-
-                    trimmed_audio_lens = torch.tensor(trimmed_audio_lens).to(metric_audio_target.device)
-                    metric_audio_target = audio_trimmed_padded
-                """
 
                 asr_hyps = self.asr_bleu.update(
                     name=name,
@@ -1560,10 +1524,10 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
                 self.secs.update(
                     name=name,
-                    target_audio=metric_audio_target,
-                    target_audio_lens=metric_audio_target_len,
-                    pred_audio=metric_audio_pred,
-                    pred_audio_lens=metric_audio_pred_lens,
+                    target_audio=resample(dataset_batch["target_audio"], self.target_sample_rate, 16000),
+                    target_audio_lens=(dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long),
+                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
+                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
                 )
 
                 self.results_logger.update(
