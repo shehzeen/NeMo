@@ -464,7 +464,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 is_causal=True,
                 sliding_window_size=int(self.source_fps * 2), # 2 seconds 
             )
+            self.context_encoder_quantizer_levels = self.cfg.get('context_encoder_quantizer_levels', False)
 
+            if self.context_encoder_quantizer_levels is not None:
+                from nemo.collections.tts.modules.audio_codec_modules import FiniteScalarQuantizer
+                bottleneck_dim = len(self.context_encoder_quantizer_levels)
+                self.context_encoder_quantizer_bottleneck = nn.Linear(self.decoder.config.hidden_size, bottleneck_dim)
+                self.context_encoder_vector_quantizer = FiniteScalarQuantizer(self.context_encoder_quantizer_levels)
+                self.context_encoder_quantizer_projection = nn.Linear(bottleneck_dim, self.decoder.config.hidden_size)
         # cached for quicker audio decoding
         self.register_buffer(
             "_control_codes",
@@ -846,7 +853,13 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # source codes to embeddings
         if self.use_context_encoder:
             source_audio_emb, source_audio_emb_lens = self.context_encoder(audio=source_audio.to(target_audio_emb.dtype), audio_len=source_audio_lens)
+            if self.context_encoder_quantizer_levels is not None:
+                source_audio_emb = self.context_encoder_quantizer_bottleneck(source_audio_emb.transpose(1, 2))
+                source_audio_emb, _ = self.context_encoder_vector_quantizer(inputs=source_audio_emb.transpose(1, 2), input_len=None)
+                source_audio_emb = self.context_encoder_quantizer_projection(source_audio_emb.transpose(1, 2)).transpose(1, 2)
+
             source_audio_emb = source_audio_emb.transpose(1, 2)
+
             # clamp to make sure that both has the same shape
             if (tl := target_audio_emb.shape[1]) != (sl := source_audio_emb.shape[1]):
                 if tl < sl:
@@ -1901,9 +1914,12 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         if self.use_context_encoder:
             source_audio_emb, lengths = self.context_encoder(audio=source_audio.to(next(self.context_encoder.parameters()).dtype), audio_len=source_audio_lens)
+            if self.context_encoder_quantizer_levels is not None:
+                source_audio_emb = self.context_encoder_quantizer_bottleneck(source_audio_emb.transpose(1, 2))
+                source_audio_emb, _ = self.context_encoder_vector_quantizer(inputs=source_audio_emb.transpose(1, 2), input_len=None)
+                source_audio_emb = self.context_encoder_quantizer_projection(source_audio_emb.transpose(1, 2)).transpose(1, 2)
             source_audio_emb = source_audio_emb.transpose(1, 2)
         else:
-            # ToDo: Add a transformer encoder to help the model to better extract contextual information, replace the code bellow with it
             # extract embedding for context audios
             with fp32_precision(), torch.no_grad():
                 source_codes, lengths = self.audio_codec.encode(
@@ -2084,9 +2100,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
             if force_silence_after_first_speech_eos:
                 # check for EOS prediction in any codebook
-                eos_pred_mask_old = (gen_audio_codes[:, t] == self.speech_eos_id).any(dim=-1)  # [B]
-                eos_pred_mask = (gen_audio_codes[:, t, :, :] == self.speech_eos_id).any(dim=(1, 2))  # → [B] --> any codebooks
+                
+                # eos_pred_mask = (gen_audio_codes[:, t, :, :] == self.speech_eos_id).all(dim=(1, 2))  # → [B] --> all codebooks
                 # eos_pred_mask = (gen_audio_codes[:, t, 0, :] == self.speech_eos_id).any(dim=-1)  # shape [B] --> first codebook
+
+                # most of the codebooks are speech eos - to avoid issues with earlier stop
+                vals = (gen_audio_codes[:, t, :, :] == self.speech_eos_id)
+                eos_pred_mask = vals.sum(dim=(1, 2)) > (vals.shape[1] * vals.shape[2] / 2)
+
                 # mark end index for batches that just predicted EOS for the first time
                 newly_ended = (eos_indices == -1) & eos_pred_mask
                 if newly_ended.any():
