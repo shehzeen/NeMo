@@ -983,7 +983,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         if (batch["formatter"][0] == 'lhotse_magpietts_data_as_duplex' or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex' or batch["formatter"][0] == "lhotse_magpietts_data_as_continuation"):
             if batch["formatter"][0] == "lhotse_magpietts_data_as_continuation":
                 task_id = self.text_cont_task_id
-                print("HEREEEEEE")
             else:
                 task_id = self.text_zstts_task_id
 
