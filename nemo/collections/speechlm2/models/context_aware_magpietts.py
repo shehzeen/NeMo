@@ -472,6 +472,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 self.context_encoder_quantizer_bottleneck = nn.Linear(self.decoder.config.hidden_size, bottleneck_dim)
                 self.context_encoder_vector_quantizer = FiniteScalarQuantizer(self.context_encoder_quantizer_levels)
                 self.context_encoder_quantizer_projection = nn.Linear(bottleneck_dim, self.decoder.config.hidden_size)
+
         # cached for quicker audio decoding
         self.register_buffer(
             "_control_codes",
@@ -548,6 +549,10 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
     @property
     def text_zstts_task_id(self) -> int:
         return self.tokenizer.text_to_ids("<|box_start|>") # uses <|box_start|> special token as zstts task id token
+
+    @property
+    def text_cont_task_id(self) -> int:
+        return self.tokenizer.text_to_ids("<|object_ref_start|>") # uses <|object_ref_start|> special token as cont task id token
 
     @property
     def text_eos_id(self) -> int:
@@ -949,7 +954,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # For the zstts task we want to retain the speech EOS token (so inference can stop),
         # but we must strip out any text EOS tokens — in duplex S2S those would be interpreted
         # as an instruction to interrupt speaking. Replace text EOS with padding.
-        if self.cfg.get("drop_text_eos_for_zstts_task", False) and (batch["formatter"][0] == "lhotse_magpietts_data_as_duplex" or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex'):
+        if self.cfg.get("drop_text_eos_for_zstts_task", False) and (batch["formatter"][0] == "lhotse_magpietts_data_as_duplex" or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex' or batch["formatter"][0] == "lhotse_magpietts_data_as_continuation"):
             text_labels = torch.where(text_labels == self.text_eos_id, self.text_pad_id, text_labels)
 
         # Add source codes embeddings
@@ -975,10 +980,16 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
 
         speaker_encoder_emb = None
         # if mapieTTS task (zs-tts)
-        if (batch["formatter"][0] == 'lhotse_magpietts_data_as_duplex' or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex'):
+        if (batch["formatter"][0] == 'lhotse_magpietts_data_as_duplex' or batch["formatter"][0] == 'lhotse_old_tts_data_as_duplex' or batch["formatter"][0] == "lhotse_magpietts_data_as_continuation"):
+            if batch["formatter"][0] == "lhotse_magpietts_data_as_continuation":
+                task_id = self.text_cont_task_id
+                print("HEREEEEEE")
+            else:
+                task_id = self.text_zstts_task_id
+
             # replace BOS token with zs-tts token task
             bos_indices = (text_labels == self.text_bos_id).nonzero(as_tuple=False)  # [N, 2]
-            task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
+            task_emb = self.embed_text_tokens(torch.tensor(task_id).to(self.device))
             if bos_indices.numel() > 0:
                 b_idx = bos_indices[:, 0]                          # [N]
                 t_idx = bos_indices[:, 1] * self.downsampling_factor  # [N]
@@ -1942,9 +1953,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # create the task embedding to reuse in the autoregressive loop
         task_emb = None
         force_silence_after_first_speech_eos = False
-        if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex':
+        if formatter == 'lhotse_magpietts_data_as_duplex' or formatter == 'lhotse_old_tts_data_as_duplex' or batch["formatter"][0] == "lhotse_magpietts_data_as_continuation":
             force_silence_after_first_speech_eos = True
-            task_emb = self.embed_text_tokens(torch.tensor(self.text_zstts_task_id).to(self.device))
+            if formatter == "lhotse_magpietts_data_as_continuation":
+                task_id = self.text_cont_task_id
+            else:
+                task_id = self.text_zstts_task_id
+
+            task_emb = self.embed_text_tokens(torch.tensor(task_id).to(self.device))
             # remove eos for zstts task
             if self.cfg.get("drop_text_eos_for_zstts_task", False):
                 text_tokens = torch.where(text_tokens == self.text_eos_id, self.text_pad_id, text_tokens)
