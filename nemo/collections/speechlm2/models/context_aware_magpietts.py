@@ -464,7 +464,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 is_causal=True,
                 sliding_window_size=int(self.source_fps * 2), # 2 seconds 
             )
-            self.context_encoder_quantizer_levels = self.cfg.get('context_encoder_quantizer_levels', False)
+            self.context_encoder_quantizer_levels = self.cfg.get('context_encoder_quantizer_levels', None)
 
             if self.context_encoder_quantizer_levels is not None:
                 from nemo.collections.tts.modules.audio_codec_modules import FiniteScalarQuantizer
