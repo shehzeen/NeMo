@@ -650,6 +650,12 @@ def read_lhotse_magpietts_data_as_duplex(config) -> tuple[CutSet, bool]:
         else:
             return True
 
+    def filter_target_speaker(example):
+        if isinstance(example, Cut) and len(example.supervisions) > 0 and TARGET_SPEAKER is not None:
+            return TARGET_SPEAKER in example.supervisions[0].speaker
+        else:
+            return True
+
     # load lhotse cuts
     cuts, is_tarred = read_cutset_from_config(config)
 
@@ -668,6 +674,9 @@ def read_lhotse_magpietts_data_as_duplex(config) -> tuple[CutSet, bool]:
     # filter based on context speaker similarity
     MIN_SECS = config.get("min_context_speaker_similarity", 0.6)
     cuts = cuts.filter(filter_secs)
+    # filter speaker
+    TARGET_SPEAKER = config.get("target_speaker", None)
+    cuts = cuts.filter(filter_target_speaker)
 
     # convert cuts
     cuts = cuts.map(convert_lhotse_magpietts_data_as_duplex)

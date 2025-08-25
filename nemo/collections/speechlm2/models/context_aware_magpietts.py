@@ -828,35 +828,34 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 target_codes_lens = (target_codes_lens * (target_codes.size(1) / target_codes_lens.max())).to(target_codes_lens.dtype)
 
         target_tokens = batch["target_tokens"]
-        with fp32_precision():
-            if (diff := target_tokens.shape[1] - ((source_codes.shape[1])//self.downsampling_factor)) < 0:
-                target_tokens = torch.cat(
-                    [
-                        target_tokens,
-                        (
-                            torch.ones(source_codes.shape[0], abs(diff), device=source_codes.device) * self.text_pad_id
-                        ).to(torch.long),
-                    ],
-                    dim=-1,
-                )
-            elif diff > 0:
-                target_tokens = target_tokens[:, : source_codes.shape[1]]
+        if (diff := target_tokens.shape[1] - ((source_codes.shape[1])//self.downsampling_factor)) < 0:
+            target_tokens = torch.cat(
+                [
+                    target_tokens,
+                    (
+                        torch.ones(source_codes.shape[0], abs(diff), device=source_codes.device) * self.text_pad_id
+                    ).to(torch.long),
+                ],
+                dim=-1,
+            )
+        elif diff > 0:
+            target_tokens = target_tokens[:, : source_codes.shape[1]]
 
-            if (tl := target_codes.shape[1]) != (sl := source_codes.shape[1]):
-                if tl < sl:
-                    diff = sl - tl
-                    source_codes = source_codes[:, :tl]
-                    target_codes = target_codes[:, :tl]
-                    torch.clamp_(source_codes_lens, max=tl)
-                else:
-                    diff = tl - sl
-                    target_codes = target_codes[:, :sl]
-                    torch.clamp_(target_codes_lens, max=sl)
-                if diff > 2:
-                    logging.warning(
-                        f"A mismatch between source ({sl}) and target ({tl}) sequence length greater than 2 detected. "
-                        f"This may indicate significant desynchronization in longer sessions."
-                    )
+        if (tl := target_codes.shape[1]) != (sl := source_codes.shape[1]):
+            if tl < sl:
+                diff = sl - tl
+                source_codes = source_codes[:, :tl]
+                target_codes = target_codes[:, :tl]
+                torch.clamp_(source_codes_lens, max=tl)
+            else:
+                diff = tl - sl
+                target_codes = target_codes[:, :sl]
+                torch.clamp_(target_codes_lens, max=sl)
+            if diff > 2:
+                logging.warning(
+                    f"A mismatch between source ({sl}) and target ({tl}) sequence length greater than 2 detected. "
+                    f"This may indicate significant desynchronization in longer sessions."
+                )
         B, T = target_tokens.shape
 
         # Add BOS and EOS on speech channel considering self.downsampling_factor
@@ -923,35 +922,16 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     diff = sl - tl
                     source_audio_emb = source_audio_emb[:, :tl]
                     target_audio_emb = target_audio_emb[:, :tl]
-                    target_tokens = target_tokens[:, :tl]
-                    target_codes = target_codes[:, :tl]
                     torch.clamp_(source_audio_emb_lens, max=tl)
                 else:
                     diff = tl - sl
                     target_audio_emb = target_audio_emb[:, :sl]
-                    target_tokens = target_tokens[:, :sl]
-                    target_codes = target_codes[:, :sl]
                     torch.clamp_(target_audio_emb_lens, max=sl)
                 if diff > 2:
                     logging.warning(
                         f"A mismatch between source ({sl}) and target ({tl}) sequence length greater than 2 detected. "
                         f"This may indicate significant desynchronization in longer sessions."
                     )
-
-            if (tl := target_codes.shape[1]) != (sl := source_audio_emb.shape[1]):
-                if tl < sl:
-                    diff = sl - tl
-                    source_audio_emb = source_audio_emb[:, :tl]
-                    target_audio_emb = target_audio_emb[:, :tl]
-                    target_tokens = target_tokens[:, :tl]
-                    target_codes = target_codes[:, :tl]
-                    torch.clamp_(source_audio_emb_lens, max=tl)
-                else:
-                    diff = tl - sl
-                    target_audio_emb = target_audio_emb[:, :sl]
-                    target_tokens = target_tokens[:, :sl]
-                    target_codes = target_codes[:, :sl]
-                    torch.clamp_(target_audio_emb_lens, max=sl)
         else:
             source_audio_emb, source_audio_emb_lens = self.embed_audio_tokens(
                 source_codes, source_codes_lens
@@ -2354,7 +2334,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             else:
                 with fp32_precision(), torch.no_grad():
                     predicted_audio, predicted_audio_lens = self.audio_codec.decode(
-                        inputs=gen_audio_codes.transpose(1, 2), tokens_len=tokens_audio_len
+                        tokens=gen_audio_codes.transpose(1, 2), tokens_len=tokens_audio_len
                     )
             ans["audio"] = predicted_audio
             ans["audio_len"] = predicted_audio_lens
