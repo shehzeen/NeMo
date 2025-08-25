@@ -298,7 +298,16 @@ class GroupedCodec(NeuralModule):
             Decoded output `audio` in the time domain and its length in number of samples `audio_len`.
             Note that `audio_len` will be a multiple of `self.samples_per_frame`.
         """
-        audio, audio_len = self.codec.audio_decoder(inputs=inputs, input_len=input_len)
+        with fp32_precision():
+            if self.frame_stacking_factor > 1:
+                inputs = inputs.transpose(1, 2)
+                B, T, Cg = inputs.shape
+                C = Cg // self.frame_stacking_factor
+                inputs = inputs.reshape(B, T * self.frame_stacking_factor, C)  # → [B, T, C]
+                input_len = torch.ceil(input_len * self.frame_stacking_factor).to(input_len.dtype)
+                inputs = inputs.transpose(1, 2)
+
+            audio, audio_len = self.codec.audio_decoder(inputs=inputs, input_len=input_len)
         return audio, audio_len
 
     def dequantize(self, tokens: torch.Tensor, tokens_len: torch.Tensor) -> torch.Tensor:
@@ -311,7 +320,27 @@ class GroupedCodec(NeuralModule):
         Returns:
             Continuous encoded representation of the discrete input representation.
         """
-        return self.codec.dequantize(tokens=tokens, tokens_len=tokens_len)
+        with fp32_precision():
+            # reshape to dequantize
+            if self.frame_stacking_factor > 1:
+                tokens = tokens.transpose(1, 2)
+                # tokens: B, T', C'
+                B, T, Cg = tokens.shape
+                assert Cg % self.frame_stacking_factor == 0
+                C = Cg // self.frame_stacking_factor
+                tokens = tokens.reshape(B, T * self.frame_stacking_factor, C)  # → [B, T, C]
+                tokens = tokens.transpose(1, 2)      # → [B, C, T] for decode
+                tokens_len = torch.ceil(tokens_len * self.frame_stacking_factor).to(tokens_len.dtype)
+            dequantized = self.codec.dequantize(tokens=tokens, tokens_len=tokens_len)
+            # reshape back to the compress form if needed
+            if self.frame_stacking_factor > 1:
+                dequantized = dequantized.transpose(1, 2)  # → B, T, C
+                B, T, C = dequantized.shape
+                assert T % self.frame_stacking_factor == 0
+                dequantized = dequantized.reshape(B, T // self.frame_stacking_factor, C * self.frame_stacking_factor)
+                dequantized = dequantized.transpose(1, 2)  # → B, C, T
+
+        return dequantized
 
     def forward(self, audio, audio_len):
         tokens, tokens_len = self.encode(audio, audio_len)
@@ -1232,6 +1261,13 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     reconstructed_audio_from_tokens, _ = self.audio_codec.decode(
                         tokens=audio_labels_.transpose(1, 2), tokens_len=lengths
                     )
+                # remove special tokens from labels
+                audio_labels = replace_control_speech_codes(audio_labels, self._control_codes).transpose(1, 2)
+                codec_latent = self.audio_codec.dequantize(audio_labels, target_codes_lens - 1 if self.downsampling_factor <= 1 else target_codes_lens).detach().transpose(1, 2)
+                with fp32_precision(), torch.no_grad():
+                    reconstructed_audio_from_codec_latent, _ = self.audio_codec.decode_audio(
+                        inputs=codec_latent.transpose(1, 2), input_len=target_codes_lens - 1 if self.downsampling_factor <= 1 else target_codes_lens
+                    )
 
             for i in range(audio_labels_.shape[0]):
                 write_wave(
@@ -1263,6 +1299,14 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     os.path.join(
                         self.cfg.get("debug_dataloader_audios_path"),
                         f"target_audio_reconstructed_from_waveform_{i}.wav",
+                    ),
+                    sr=self.target_sample_rate,
+                )
+                
+                write_wave(
+                    reconstructed_audio_from_codec_latent[i],
+                    os.path.join(
+                        self.cfg.get("debug_dataloader_audios_path"), f"target_audio_reconstructed_from_codec_latent_{i}.wav"
                     ),
                     sr=self.target_sample_rate,
                 )
@@ -1532,7 +1576,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 # move time dimention to batch
                 encoded = forward_outputs["backbone_out"].reshape(-1, forward_outputs["backbone_out"].size(-1)).unsqueeze(1)
                 # remove special tokens from labels
-                audio_labels = replace_control_speech_codes(inputs["audio_labels"], self._control_codes).transpose(1, 2).to(encoded.dtype)
+                audio_labels = replace_control_speech_codes(inputs["audio_labels"], self._control_codes).transpose(1, 2)
                 # get codec latent from audio tokens
                 codec_latent = self.audio_codec.dequantize(audio_labels, inputs["output_lens"]).detach().transpose(1, 2)
                 # move time dimention to batch
