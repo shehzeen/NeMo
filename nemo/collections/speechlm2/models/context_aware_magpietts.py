@@ -2267,10 +2267,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 z = self.local_transformer(encoded, encoded_mask, n_timesteps=self.cfg.get('n_timesteps', 10), temperature=self.cfg.get('temperature', 0.7), spks=None)
                 gen_codec_latent[:, t] = z.squeeze(-1)
 
-
-            # inference on flow matching local transformer
-            if self.use_local_transformer and self.local_transformer_type == "cfm":
-                pass
             if self.cfg.get('inference_force_speech_state', None):
                 # state 0 - silence, state 1 - speech
                 speech_state = torch.where(
