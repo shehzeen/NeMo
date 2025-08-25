@@ -1015,8 +1015,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         target_audio_emb = target_audio_emb[:, :-1] # (B, T-1, K)
         seq_mask = seq_mask[:, :-1]
 
-        print(target_audio_emb_lens, source_audio_emb_lens, source_audio_emb.shape, target_audio_emb.shape, seq_mask.shape, text_labels.shape, audio_labels.shape)
-
         # Drop EOS tokens with per-token probability (augmentation)
         drop_eos_prob = self.cfg.get("drop_text_eos_prob", 0.0)
         if drop_eos_prob > 0.0 and self.training:
