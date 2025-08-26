@@ -392,6 +392,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         # tts general configs
         self.num_delay_tokens = self.cfg.get("num_delay_tokens", 1) # delay between text input and speech output
         self.use_bpe_char_tokenizer = self.cfg.get("use_bpe_char_tokenizer", False)
+        self.parallel_codebook_loss_scale = self.cfg.get("parallel_codebook_loss_scale", 1.0)
         self.condition_spk_emb_on_bos_position = self.cfg.get("condition_spk_emb_on_bos_position", False)
         self.cfg_unconditional_prob = self.cfg.get('cfg_unconditional_prob', 0.0)
         self.cfg_scale = self.cfg.get('cfg_scale', None)
@@ -1592,7 +1593,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         else:
             local_transformer_loss = torch.tensor(0.0, device=self.device)
 
-        loss = codebook_loss + local_transformer_loss * self.local_transformer_loss_scale
+        loss = codebook_loss * self.parallel_codebook_loss_scale + local_transformer_loss * self.local_transformer_loss_scale
         num_frames = inputs["input_lens"].sum()
         B, T = inputs["input_embeds"].shape[:2]
         ans = {
