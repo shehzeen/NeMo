@@ -99,7 +99,7 @@ class MLPLayer(nn.Module):
 # ==============================================================================
 # Triton-accelerated and Fallback Functions
 # ==============================================================================
-
+'''
 try:
     # Attempt to import Triton for optimized GPU kernels
     import triton
@@ -196,29 +196,30 @@ try:
     logging.info("Triton is available. Using optimized Triton kernel for batch_matmul.")
 
 except ImportError:
-    # Fallback to PyTorch implementation if Triton is not available
-    def batch_matmul_pytorch(x: Tensor, w: Tensor, y: Tensor, *args, **kwargs) -> Tensor:
-        """
-        Performs a batched matrix multiplication using PyTorch's native functions.
+'''
+# Fallback to PyTorch implementation if Triton is not available
+def batch_matmul_pytorch(x: Tensor, w: Tensor, y: Tensor, *args, **kwargs) -> Tensor:
+    """
+    Performs a batched matrix multiplication using PyTorch's native functions.
 
-        This function serves as a fallback when Triton is not available. It achieves
-        the same result by gathering the appropriate weight matrices and using `torch.bmm`.
+    This function serves as a fallback when Triton is not available. It achieves
+    the same result by gathering the appropriate weight matrices and using `torch.bmm`.
 
-        Args:
-            x (Tensor): The input tensor of shape `[batch_size, d_in]`.
-            w (Tensor): The weight tensor of shape `[num_weights, d_out, d_in]`.
-            y (Tensor): The index tensor of shape `[batch_size]`.
+    Args:
+        x (Tensor): The input tensor of shape `[batch_size, d_in]`.
+        w (Tensor): The weight tensor of shape `[num_weights, d_out, d_in]`.
+        y (Tensor): The index tensor of shape `[batch_size]`.
 
-        Returns:
-            Tensor: The result of the multiplication, shape `[batch_size, d_out]`.
-        """
-        # w[y] gathers the weight matrices for each item in the batch.
-        # x.unsqueeze(2) reshapes x to [batch_size, d_in, 1] for bmm.
-        # The result is squeezed to remove the trailing dimension of size 1.
-        return torch.bmm(w[y], x.unsqueeze(2)).squeeze(2)
+    Returns:
+        Tensor: The result of the multiplication, shape `[batch_size, d_out]`.
+    """
+    # w[y] gathers the weight matrices for each item in the batch.
+    # x.unsqueeze(2) reshapes x to [batch_size, d_in, 1] for bmm.
+    # The result is squeezed to remove the trailing dimension of size 1.
+    return torch.bmm(w[y], x.unsqueeze(2)).squeeze(2)
 
-    batch_matmul = batch_matmul_pytorch
-    logging.info("Triton is not available. Using PyTorch fallback for batch_matmul.")
+batch_matmul = batch_matmul_pytorch
+logging.info("Triton is not available. Using PyTorch fallback for batch_matmul.")
 
 
 # ==============================================================================

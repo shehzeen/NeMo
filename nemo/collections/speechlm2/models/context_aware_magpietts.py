@@ -424,7 +424,6 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             self.source_sample_rate * cfg.data.frame_length
         )  # conver frame rate in fps
         self.source_samples_per_frame = self.source_sample_rate//self.source_fps
-
         # Load tokenizer
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
         if 'Qwen2.5' in self.cfg.pretrained_llm:

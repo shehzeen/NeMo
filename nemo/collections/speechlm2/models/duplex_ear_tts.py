@@ -59,7 +59,6 @@ from nemo.collections.speechlm2.parts.precision import fp32_precision
 from nemo.collections.speechlm2.parts.pretrained import (
     load_pretrained_hf,
     set_model_dict_for_partial_init,
-    setup_rvq_audio_codec,
     setup_speech_encoder,
 )
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, NeuralType
@@ -72,7 +71,7 @@ from nemo.collections.speechlm2.modules.cfm import MatchaTTSCFM
 from types import SimpleNamespace
 
 
-from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel
+from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig
 from nemo.collections.speechlm2.modules.rvq_ear_tts_vae import RVQVAEModel
 
 def get_mask_from_lengths(
@@ -107,7 +106,7 @@ def get_mask_from_lengths(
 
 
 def setup_rvq_audio_codec(model):
-        """
+    """
     Sets up an ``AudioCodecModel``, initializing it from pretrained weights.
     The result is assigned to ``model.audio_codec`` attribute.
 
@@ -143,6 +142,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # tts general configs
         self.num_delay_tokens = self.cfg.get("num_delay_tokens", 1) # delay between text input and speech output
 
+
+        # Load ForCausalLM
+        self.language_model = self._load_language_model(self.cfg)
+        self.embed_tokens = self._load_embed_tokens(self.cfg)
+
         # codec configs
         setup_rvq_audio_codec(self)
 
@@ -158,19 +162,18 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         self.tts_model = self._load_tts_model(self.cfg)
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
-        if 'Qwen2.5' in self.cfg.pretrained_llm:
+        self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True)
+        if 'Qwen2.5' in self.cfg.pretrained_lm_name:
             # For Qwen, '<|im_start|>' is a common choice for a BOS token.
             # You can check your tokenizer's vocabulary for the best candidate.
             logging.warning("Tokenizer does not have a `bos_token`. Setting it to '<|im_start|>'.")
             self.tokenizer.bos_token = '<|im_start|>'
             self.tokenizer.eos_token = '<|im_end|>'
 
-        # Load ForCausalLM
-        self.language_model = self._load_language_model(self.cfg)
-        self.embed_tokens = self._load_embed_tokens(self.cfg)
+        # delete llm because we use it only to get the  embbeding tokens
+        del self.language_model
 
-    def _load_embed_tokens(self, cfg: Config) -> nn.Embedding:
+    def _load_embed_tokens(self, cfg) -> nn.Embedding:
         """Load token embedding layer for RVQ-EAR-TTS."""
         if self.language_model:
             assert callable(self.language_model.get_input_embeddings)
@@ -186,21 +189,18 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             embed_tokens.load_state_dict(embed_tokens_state_dict)
         return embed_tokens
 
-    def _load_tts_model(self, cfg: Config) -> nn.Module:
+    def _load_tts_model(self, cfg) -> nn.Module:
         """Load TTS model for RVQ-EAR-TTS."""
         audio_codec = self.audio_codec
-        tts_model = RVQEARTTSModel.from_pretrained(cfg.pretrained_tts_model, cfg.tts_config)
+        tts_model = RVQEARTTSModel.from_pretrained(cfg.pretrained_tts_model, RVQEARTTSConfig(**cfg.tts_config))
         assert callable(tts_model.set_rvq_embs)
         tts_model.set_rvq_embs(torch.stack([x.detach() for x in audio_codec.prvq.mus_list], 0))
         return tts_model
 
-    def _load_language_model(self, cfg: Config) -> nn.Module | None:
+    def _load_language_model(self, cfg):
         """Load language model for RVQ-EAR-TTS."""
-        if cfg.pretrained_llm:
-            language_model = (
-                AutoModelForCausalLM.from_pretrained(cfg.pretrained_llm, torch_dtype=torch.bfloat16)
-                .eval()
-            )
+        if cfg.pretrained_lm_name:
+            language_model = load_pretrained_hf(self.cfg.pretrained_lm_name, pretrained_weights=True).eval()
         else:
             language_model = None
         return language_model
