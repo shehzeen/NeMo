@@ -198,6 +198,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             cuts.resample(self.target_sample_rate), roles=self.output_roles, recording_field="target_audio"
         )
 
+        # make sure that matches
         # create a mask for audio using target tokens that suppose to have the same size of the tokenized audio
         audio_mask = get_mask_from_lengths(target_token_lens)
         # create a full zero desc mask
@@ -256,21 +257,45 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             desc_mask = ~ audio_mask
 
         # Create segment IDs and attention masks
-        aligned_segment_ids = []
+        """aligned_segment_ids = []
         for i, size in enumerate(target_token_lens):
             aligned_segment_ids.extend([i] * size.item())
         aligned_segment_ids = torch.tensor(aligned_segment_ids, dtype=torch.long).unsqueeze(0)
         aligned_attention_mask = (
             (aligned_segment_ids.unsqueeze(-2) == aligned_segment_ids.unsqueeze(-1)).tril().unsqueeze(1)
+        )"""
+
+        batch_size = len(target_token_lens)
+        max_len = max(target_token_lens)
+
+        # Segment IDs per sequence (padded)
+        aligned_segment_ids = torch.stack([
+            torch.nn.functional.pad(torch.full((l,), i), (0, max_len - l), value=-1)  # -1 for padding
+            for i, l in enumerate(target_token_lens)
+        ], dim=0)  # [B, max_len]
+
+        # Attention mask: same-segment & causal
+        aligned_attention_mask = (
+            (aligned_segment_ids.unsqueeze(-2) == aligned_segment_ids.unsqueeze(-1))  # [B, max_len, max_len]
+            & (torch.arange(max_len).unsqueeze(0).unsqueeze(1) 
+            <= torch.arange(max_len).unsqueeze(0).unsqueeze(-1))  # causal tril
         )
+
+        aligned_attention_mask = aligned_attention_mask.unsqueeze(1)  # [B, 1, max_len, max_len]
+
         # create pos ids from the aligned lenght
-        aligned_position_ids = [torch.arange(l) for l in target_token_lens]
+        # aligned_position_ids = torch.tensor([torch.arange(l) for l in target_token_lens], dtype=torch.long)
+        aligned_position_ids = torch.stack([
+            torch.nn.functional.pad(torch.arange(l), (0, max(target_token_lens) - l), value=0)  # value=0 is safe for padding
+            for l in target_token_lens
+        ], dim=0)
 
         return {
             "sample_id": [str(cut.id) for cut in cuts],
-            "audio_mask": audio_mask,
-            "desc_mask": desc_mask,
-            "aligned_attention_mask": aligned_attention_mask,
+            "audio_mask": audio_mask.bool(),
+            "desc_mask": desc_mask.bool(),
+            "desc_lens": desc_lens,
+            "aligned_attention_mask": aligned_attention_mask.bool(),
             "aligned_position_ids": aligned_position_ids,
             "source_audio": source_audio,
             "source_audio_lens": source_audio_lens,

@@ -104,6 +104,7 @@ class ResultsLogger:
         fps: float = None,
         results=None,
         tokenizer=None,
+        reference_audio: torch.Tensor = None,
     ) -> None:
 
         out_json_path = os.path.join(self.matadata_save_path, f"{name}.json")
@@ -132,6 +133,10 @@ class ResultsLogger:
             if pre_audio_trimmed is not None:
                 out_audio_path_trimmed = os.path.join(self.audio_save_path, f"{name}_{sample_id}_pred_trimmed.wav")
                 torchaudio.save(out_audio_path_trimmed, pre_audio_trimmed[i].squeeze().unsqueeze(0).detach().cpu(), pred_audio_sr)
+
+            if reference_audio is not None:
+                out_audio_path_ref = os.path.join(self.audio_save_path, f"{name}_{sample_id}_spk_reference.wav")
+                torchaudio.save(out_audio_path_ref, reference_audio[i].squeeze().unsqueeze(0).detach().cpu(), pred_audio_sr)
 
             # cache metadata
             out_dict = {

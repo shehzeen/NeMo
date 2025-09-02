@@ -538,7 +538,8 @@ def build_vocabs(
     return subword_id_to_char_ids, char_vocab, subword_padding_idx
 
 
-@torch.compile
+
+"""@torch.compile
 def depthsum_encoding_step(
     embs: Tensor,
     r: Tensor,
@@ -554,9 +555,34 @@ def depthsum_encoding_step(
         ).argmin(-1)
         emb_i = F.embedding(idx_sel, embs[i])
         r = r - emb_i
+        print("code shape:", code.shape)
+        print("idx_sel shape:", idx_sel.shape)
         code[..., i : i + 1] = idx_sel
     return code
+"""
 
+@torch.compile
+def depthsum_encoding_step(
+    embs: Tensor,
+    r: Tensor,
+    code: Tensor,
+    depth_str: int = 0,
+    k: int = 72,
+) -> Tensor:
+    for i in range(depth_str, depth_str + k):
+        idx_sel = (
+            embs[i].pow(2).sum(-1)  # [g?, v]
+            - 2
+            * (r.unsqueeze(-2) @ embs[i].transpose(-1, -2)).squeeze(-2)  # [b, ?, g?, h] , [g?, h, v] -> [b, ?, g?, v]
+        ).argmin(-1)
+
+        emb_i = F.embedding(idx_sel, embs[i])
+        r = r - emb_i
+
+        # FIX: assign correctly without shape mismatch
+        code[..., i] = idx_sel  
+
+    return code
 
 class MoGHead(nn.Module):
     """
@@ -834,7 +860,8 @@ class CharAwareSubwordEncoder(nn.Module):
 
         # 1. Convert subword IDs to character IDs
         char_ids, char_lengths = self.prepare_inputs(subword_ids, subword_mask)
-        char_mask = sequence_mask(char_lengths).float()
+        # char_mask = sequence_mask(char_lengths).float()
+        char_mask = sequence_mask(char_lengths)
 
         # 2. Get character embeddings and pass them through the backbone
         char_embeds = self.embed_tokens(char_ids)
@@ -1075,6 +1102,7 @@ class RVQEARTTSModel(PreTrainedModel):
         training: bool | None = None,
         guidance_enabled: bool = False,
         generation_config: dict[str, Any] | None = None,
+        teacher_forcing_inference: bool = False,
     ) -> RVQEARTTSOutput:
         """
         Performs a forward pass handling training, generation, or single-step inference.
@@ -1171,13 +1199,61 @@ class RVQEARTTSModel(PreTrainedModel):
                     past_key_values=backbone_outputs.past_key_values,
                 )
             else:
-                generated_codes, lm_logits, eos_flag = self.generate_step(hidden_states, **generation_config)
+                if teacher_forcing_inference:
+                    generated_codes, lm_logits, eos_flag = self.generate_teacher_forcing(hidden_states, generation_config)
+                else:
+                    generated_codes, lm_logits, eos_flag = self.generate_step(hidden_states, **generation_config)
                 return RVQEARTTSOutput(
                     past_key_values=backbone_outputs.past_key_values,
                     codes=generated_codes,
                     lm_logits=lm_logits,
                     eos_flag=eos_flag,
                 )
+
+    @torch.no_grad()
+    def generate_teacher_forcing(self, hidden_states: Tensor, generation_config: dict):
+        """
+        Teacher-forcing wrapper for generate_step, processing all frames in parallel
+        using a per-frame loop internally.
+        
+        Args:
+            hidden_states: [B, T, H] hidden states
+            generation_config: kwargs for self.generate_step()
+        
+        Returns:
+            generated_codes: [B, T, ...] generated codes per frame
+            lm_logits: [B, T, vocab_size] language model logits
+            eos_flag: [B, T] boolean tensor indicating EOS
+        """
+        B, T, H = hidden_states.shape
+
+        # Preallocate caches
+        generated_codes_cache = []
+        lm_logits_cache = []
+        eos_flag_cache = []
+
+        # Iterate over time steps (frames)
+        for t in range(T):
+            # extract one frame (as the original generate_step expects)
+            frame_hidden = hidden_states[:, t, :]  # [B, H]
+
+            # call original generate_step
+            generated_codes, lm_logits, eos_flag = self.generate_step(
+                frame_hidden.unsqueeze(1),  # keep batch dim + frame dim
+                **generation_config
+            )
+            if generated_codes is not None:
+                # store in cache
+                generated_codes_cache.append(generated_codes)
+                lm_logits_cache.append(lm_logits)
+                eos_flag_cache.append(eos_flag)
+
+        # Stack results along time dimension
+        generated_codes = torch.stack(generated_codes_cache, dim=1)  # [B, T, ...]
+        lm_logits = torch.stack(lm_logits_cache, dim=1)             # [B, T, vocab_size]
+        eos_flag = torch.stack(eos_flag_cache, dim=1)               # [B, T]
+
+        return generated_codes, lm_logits, eos_flag
 
     @torch.no_grad()
     def generate_step(
@@ -1301,7 +1377,6 @@ class RVQEARTTSModel(PreTrainedModel):
                 top_p_or_k=top_p_or_k_i,
             )
             z = mog_mu + torch.exp(mog_logs) * torch.randn_like(mog_mu) * noise_scale_i
-
             code = depthsum_encoding_step(self.rvq_embs, z, code, cnt, k[0].item())
             cnt += k[0].item()
         return code, lm_logits, eos_flag
