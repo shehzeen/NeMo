@@ -402,75 +402,34 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             )
             source_codes = source_codes.transpose(1, 2)  # (B, K, T) -> (B, T, K)
         """
-        print("a:", target_codes.shape, desc_mask.shape, input_text_tokens.shape, audio_mask.shape, aligned_attention_mask.shape, batch["target_audio_lens"].max(), target_audio.shape)
         with fp32_precision():
-            if (diff := input_text_tokens.shape[1] - ((target_codes.shape[1]))) < 0:
-                # add extra frames on text channels if needed
-                input_text_tokens = torch.cat(
-                    [
-                        input_text_tokens,
-                        (
-                            torch.ones(target_codes.shape[0], abs(diff), device=target_codes.device) * self.text_pad_id
-                        ).to(torch.long),
-                    ],
-                    dim=-1,
-                )
-                audio_mask = torch.cat(
-                    [
-                        audio_mask,
-                        (
-                            torch.zeros(target_codes.shape[0], abs(input_text_tokens.shape[1] - audio_mask.shape[1]), device=target_codes.device, dtype=audio_mask.dtype)
-                        ),
-                    ],
-                    dim=-1,
-                )
-                desc_mask = torch.cat(
-                    [
-                        desc_mask,
-                        (
-                            torch.zeros(target_codes.shape[0], abs(input_text_tokens.shape[1] - desc_mask.shape[1]), device=target_codes.device, dtype=desc_mask.dtype)
-                        ),
-                    ],
-                    dim=-1,
-                )
-                aligned_position_ids = torch.cat(
-                    [
-                        aligned_position_ids,
-                        (
-                            torch.zeros(target_codes.shape[0], abs(input_text_tokens.shape[1] - aligned_position_ids.shape[1]), device=target_codes.device, dtype=aligned_position_ids.dtype)
-                        ),
-                    ],
-                    dim=-1,
-                )
-                # pad both dim of the causal attention mask
-                diff_attn = abs(input_text_tokens.shape[1] - aligned_attention_mask.shape[-1])
-                B, H, L, _ = aligned_attention_mask.shape
-                new_L = L + abs(diff_attn)
+            target_len = target_codes.shape[1]
 
-                # Pad rows (dim=-2) and columns (dim=-1) to keep it square
-                pad_mask_rows = torch.zeros(
-                    B, H, abs(diff_attn), L,
-                    device=aligned_attention_mask.device,
-                    dtype=aligned_attention_mask.dtype,
-                )
-                pad_mask_cols = torch.zeros(
-                    B, H, new_L, abs(diff_attn),
-                    device=aligned_attention_mask.device,
-                    dtype=aligned_attention_mask.dtype,
-                )
+            # Pad or truncate sequence variables
+            def pad_or_truncate(x, pad_value=0):
+                if x.dim() == 2:  # [B, T]
+                    L = x.shape[1]
+                    if L < target_len:
+                        return F.pad(x, (0, target_len - L), value=pad_value)
+                    else:
+                        return x[:, :target_len]
+                return x  # leave others for now
 
-                # First pad rows, then pad columns
-                aligned_attention_mask = torch.cat([aligned_attention_mask, pad_mask_rows], dim=-2)  # pad rows
-                aligned_attention_mask = torch.cat([aligned_attention_mask, pad_mask_cols], dim=-1)  # pad cols
-            elif diff > 0:
-                input_text_tokens = input_text_tokens[:, : target_codes.shape[1]]
-                audio_mask = audio_mask[:, : target_codes.shape[1]]
-                desc_mask = desc_mask[:, : target_codes.shape[1]]
-                aligned_position_ids = aligned_position_ids[:, : target_codes.shape[1]]
-                aligned_attention_mask = aligned_attention_mask[:, :, :target_codes.shape[1], :target_codes.shape[1]]
+            input_text_tokens = pad_or_truncate(input_text_tokens, pad_value=self.text_pad_id)
+            audio_mask = pad_or_truncate(audio_mask, pad_value=0)
+            desc_mask = pad_or_truncate(desc_mask, pad_value=0)
+            aligned_position_ids = pad_or_truncate(aligned_position_ids, pad_value=0)
 
+            # Correct attention mask padding/truncation
+            B, H, L1, L2 = aligned_attention_mask.shape
+            new_len = target_len
+            if L1 < new_len or L2 < new_len:
+                pad_rows = new_len - L1
+                pad_cols = new_len - L2
+                aligned_attention_mask = F.pad(aligned_attention_mask, (0, pad_cols, 0, pad_rows))
+            elif L1 > new_len or L2 > new_len:
+                aligned_attention_mask = aligned_attention_mask[:, :, :new_len, :new_len]
 
-        print("b", target_codes.shape, desc_mask.shape, input_text_tokens.shape, audio_mask.shape, aligned_attention_mask.shape)
         # set the pad token when there is desc as in https://gitlab-master.nvidia.com/jaehyeonk/easy-ar-tts/-/blame/simple-bq/scripts/train_tts_with_rvqvae.py#L69
         target_codes_aligned = torch.where(
             desc_mask.unsqueeze(-1),                    # (B, T, 1) for broadcasting
@@ -657,7 +616,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         for k, m in secs.items():
             self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
 
-    def get_teacher_force_inference_audio(self, batch):
+    def get_teacher_force_inference_audio(self, batch, guidance_enabled=True):
         inputs = self.prepare_inputs(batch)
 
         tts_output = self.tts_model(
@@ -668,12 +627,12 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
             subword_mask=inputs["subword_mask"],
-            generation_config=self._get_generation_config(guidance_enabled=False),
+            generation_config=self._get_generation_config(guidance_enabled=guidance_enabled),
             teacher_forcing_inference=True,
+            guidance_enabled=guidance_enabled,
         )
         tf_audio_codes_pred = tts_output.codes.squeeze(2)
 
-        print("tf_audio_codes_pred", tf_audio_codes_pred.shape, inputs["output_lens"].max())
         # decode audio
         tf_audio_codes_pred = replace_control_speech_codes(tf_audio_codes_pred, self._control_codes, self.codec_silence_tokens)
         with fp32_precision(), torch.no_grad():
@@ -710,7 +669,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             # )
 
             results["audio"], results["audio_len"] = self.get_teacher_force_inference_audio(dataset_batch)
-
             # clean prompt from the audio
             for i, l in enumerate(dataset_batch["desc_lens"]):
                 results["audio"][i, :l*self.target_samples_per_frame] = 0.0

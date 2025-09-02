@@ -198,11 +198,9 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             cuts.resample(self.target_sample_rate), roles=self.output_roles, recording_field="target_audio"
         )
 
-        # make sure that matches
-        # create a mask for audio using target tokens that suppose to have the same size of the tokenized audio
-        audio_mask = get_mask_from_lengths(target_token_lens)
-        # create a full zero desc mask
-        desc_mask = torch.zeros_like(audio_mask)
+        # ensures that input_text_tokens is not longer than its duration
+        input_text_tokens = input_text_tokens[:, :target_token_lens.max()]
+
         if self.add_description:
             text_pad_id = get_pad_id(self.tokenizer)
             source_fps = self.source_sample_rate / (
@@ -255,7 +253,11 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
 
             # desc mask is totally the oposite of audio mask
             desc_mask = ~ audio_mask
-
+        else:
+            # create a mask for audio using target tokens that suppose to have the same size of the tokenized audio
+            audio_mask = get_mask_from_lengths(target_token_lens)
+            # create a full zero desc mask
+            desc_mask = torch.zeros_like(audio_mask)
         # Create segment IDs and attention masks
         """aligned_segment_ids = []
         for i, size in enumerate(target_token_lens):
