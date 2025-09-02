@@ -532,7 +532,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
             self.setup_speaker_encoder()
             # speaker encoder projection
             self.speaker_encoder_emb_projection = nn.Linear(self.cfg.get("speaker_embedding_dim", 192), self.decoder.config.hidden_size)
-        
+
         if self.use_context_encoder:
             self.context_encoder = ReshapeTransformerEncoder(
                 samples_per_frame=int(self.source_samples_per_frame),
@@ -1562,6 +1562,7 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
         return all_preds
 
     def training_step(self, batch: dict, batch_idx: int):
+
         for m in (self.decoder, self.embed_text_tokens, self.audio_embeddings, self.final_proj):
             if is_frozen(m):
                 m.eval()
@@ -2533,6 +2534,31 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                     ),
                 )
 
+            if self.use_local_transformer:
+                for m in (self.local_transformer_in_projection, self.local_transformer):
+                    parallelize_module(
+                        m,
+                        tp_mesh,
+                        ColwiseParallel(
+                            input_layouts=Shard(1),
+                            output_layouts=Shard(-1),
+                            use_local_output=False,
+                        ),
+                    )
+
+            if self.condition_spk_emb_on_bos_position:
+                for m in (self.speaker_encoder_emb_projection):
+                    parallelize_module(
+                        m,
+                        tp_mesh,
+                        ColwiseParallel(
+                            input_layouts=Shard(1),
+                            output_layouts=Shard(-1),
+                            use_local_output=False,
+                        ),
+                    )
+
+
         if (dp_mesh := device_mesh["data_parallel"]).size() > 1:
             assert dp_mesh.ndim == 1
             self._use_fsdp = True
@@ -2543,6 +2569,16 @@ class ContextAwareMagpieTTS(LightningModule, HFHubMixin):
                 llm.layers[idx] = fully_shard(layer, **fsdp_config)
             self.embed_text_tokens = fully_shard(self.embed_text_tokens, **fsdp_config)
             self.decoder = fully_shard(self.decoder, **fsdp_config)
+            self.final_proj = fully_shard(self.final_proj, **fsdp_config)
+            for idx in range(self._num_codebooks):
+                self.audio_embeddings[idx] = fully_shard(self.audio_embeddings[idx], **fsdp_config)
+                
+            if self.use_local_transformer:
+                self.local_transformer = fully_shard(self.local_transformer, **fsdp_config)
+                self.local_transformer_in_projection = fully_shard(self.local_transformer_in_projection, **fsdp_config)
+
+            if self.condition_spk_emb_on_bos_position:
+                self.speaker_encoder_emb_projection = fully_shard(self.speaker_encoder_emb_projection, **fsdp_config)
 
     def load_state_dict(self, state_dict, strict: bool = True):
         try:
