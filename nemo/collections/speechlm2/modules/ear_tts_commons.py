@@ -27,6 +27,7 @@ PYTHON_CONFIG_GETTER_NAME = "get_config"
 CHECKPOINT_FORMAT = "checkpoint_{}/ema.safetensors"
 CONFIG_NAME = "config.json"
 GIT_HASH_NAME = "githash"
+SCRIPT_PLACEHOLDER = "[[[<<<SCRIPT_PLACEHOLDER>>>]]]"
 
 
 

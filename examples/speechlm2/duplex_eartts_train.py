@@ -17,7 +17,8 @@ import torch
 from lightning.pytorch import Trainer
 from omegaconf import OmegaConf
 
-from nemo.collections.speechlm2 import DataModule, DuplexS2SDataset
+from nemo.collections.speechlm2 import DataModule, DuplexEARTTSDataset
+
 from nemo.collections.speechlm2.models.duplex_ear_tts import DuplexEARTTS
 from nemo.core.config import hydra_runner
 from nemo.utils.exp_manager import exp_manager
@@ -39,7 +40,7 @@ def train(cfg):
     with trainer.init_module():
         model = DuplexEARTTS(OmegaConf.to_container(cfg, resolve=True))
 
-    dataset = DuplexS2SDataset(
+    dataset = DuplexEARTTSDataset(
         tokenizer=model.tokenizer,
         frame_length=cfg.data.frame_length,
         source_sample_rate=cfg.data.source_sample_rate,
