@@ -28,6 +28,7 @@ from nemo.collections.speechlm2.data.utils import get_pad_id
 from nemo.utils import logging
 from nemo.collections.speechlm2.modules.ear_tts_commons import SCRIPT_PLACEHOLDER
 
+
 def sample_audio_segments_repeat(prompt_audio: torch.Tensor, 
                                  prompt_audio_lens: torch.Tensor, 
                                  n_sample: int) -> torch.Tensor:
@@ -242,10 +243,25 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             cuts, self.tokenizer, self.frame_length, roles=self.input_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
         )
 
-        # extract target speaker first turn audio to uses for speaker conditioning
-        target_first_turn_audio, target_first_turn_audio_lens = collate_first_turn_audio(
-            cuts.resample(self.target_sample_rate), roles=self.output_roles, recording_field="target_audio"
-        )
+        # if context audio is available use it, otherwise use a random turn
+        if hasattr(cuts[0], "context_audio"):
+            speaker_reference_audio = []
+            speaker_reference_audio_lens = []
+            for cut in cuts:
+                ref_audio = torch.tensor(cut.context_audio.resample(self.target_sample_rate).load_audio()).float()
+                ref_audio_len = torch.tensor(ref_audio.shape[1]).long()
+                speaker_reference_audio.append(ref_audio.squeeze(0))
+                speaker_reference_audio_lens.append(ref_audio_len)
+
+            speaker_reference_audio = collate_vectors(
+                speaker_reference_audio, padding_value=0
+            ).float()
+            speaker_reference_audio_lens = torch.tensor(speaker_reference_audio_lens).long()
+        else:   
+            # extract target speaker reference from a random audio audio
+            speaker_reference_audio, speaker_reference_audio_lens = collate_random_turn_audio(
+                cuts.resample(self.target_sample_rate), roles=self.output_roles, recording_field="target_audio"
+            )
 
         # ensures that input_text_tokens is not longer than its duration
         input_text_tokens = input_text_tokens[:, :target_token_lens.max()]
@@ -271,7 +287,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
                 desc_tokens_ids = self.generate_prompt_description(device=input_text_tokens[i].device).squeeze(0)
                 if self.add_audio_prompt_after_description:
                     prompt_audio_size = int(((self.audio_prompt_duration * self.target_sample_rate) // target_samples_per_frame) * target_samples_per_frame)
-                    prompt_audio = sample_audio_segments_repeat(target_first_turn_audio, target_first_turn_audio_lens, prompt_audio_size)
+                    prompt_audio = sample_audio_segments_repeat(speaker_reference_audio, speaker_reference_audio_lens, prompt_audio_size)
                     # create tensor to pad text channels with the same amount of frames added in audio channel (audio prompt)
                     prompt_audio_text_pad_size = prompt_audio_size // target_samples_per_frame
                     prompt_audio_text_pad = torch.ones(prompt_audio_text_pad_size, device=input_text_tokens.device, dtype=input_text_tokens.dtype) * text_pad_id
@@ -395,26 +411,36 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             "target_texts": [
                 " ".join(s.text for s in cut.supervisions if s.speaker in self.output_roles) for cut in cuts
             ],
-            "target_first_turn_audio": target_first_turn_audio,
-            "target_first_turn_audio_lens": target_first_turn_audio_lens,
+            "speaker_reference_audio": speaker_reference_audio,
+            "speaker_reference_audio_lens": speaker_reference_audio_lens,
             "formatter": [getattr(cut, "formatter", "s2s_duplex") for cut in cuts],
         }
 
 
-def collate_first_turn_audio(
+def collate_random_turn_audio(
     cuts: CutSet,
     roles: set[str],
     recording_field: str = "target_audio",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    first_turn_audios = []
-    first_turn_audios_lens = []
+    selected_turn_audios = []
+    selected_turn_audios_lens = []
     for cut in cuts:
-        first_supervision = [s for s in cut.supervisions if s.speaker in roles][0]
-        truncated_audio = cut.truncate(offset=max(0, first_supervision.start), duration=first_supervision.duration).load_custom(recording_field)
-        first_turn_audios.append(truncated_audio.squeeze(0))
-        first_turn_audios_lens.append(truncated_audio.shape[-1])
+        # Filter supervisions matching roles
+        matching_supervisions = [s for s in cut.supervisions if s.speaker in roles]
 
-    return collate_vectors(first_turn_audios, padding_value=0), torch.tensor(first_turn_audios_lens)
+        # Randomly select one supervision
+        selected_supervision = random.choice(matching_supervisions)
+
+        # Truncate audio according to supervision
+        truncated_audio = cut.truncate(
+            offset=max(0, selected_supervision.start),
+            duration=selected_supervision.duration
+        ).load_custom(recording_field)
+
+        selected_turn_audios.append(truncated_audio.squeeze(0))
+        selected_turn_audios_lens.append(truncated_audio.shape[-1])
+
+    return collate_vectors(selected_turn_audios, padding_value=0), torch.tensor(selected_turn_audios_lens)
 
 
 def collate_token_channel(

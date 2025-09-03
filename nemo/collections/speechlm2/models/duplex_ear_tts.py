@@ -369,7 +369,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         """
         # check if audios has the same batch size
         assert batch["source_audio"].size(0) == batch["target_audio"].size(0)
-        assert batch["target_first_turn_audio"].size(0) == batch["target_audio"].size(0)
+        assert batch["speaker_reference_audio"].size(0) == batch["target_audio"].size(0)
 
         target_audio = batch["target_audio"]
         target_audio_lens = batch["target_audio_lens"]
@@ -520,7 +520,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     sr=self.target_sample_rate,
                 )
                 write_wave(
-                    batch["target_first_turn_audio"][i],
+                    batch["speaker_reference_audio"][i],
                     os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"speaker_ref_{i}.wav"),
                     sr=self.target_sample_rate,
                 )
@@ -666,8 +666,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             # results = self.offline_inference(
             #     dataset_batch["source_audio"],
             #     dataset_batch["source_audio_lens"],
-            #     speaker_audio=dataset_batch["target_first_turn_audio"],
-            #     speaker_audio_lens=dataset_batch["target_first_turn_audio_lens"],
+            #     speaker_audio=dataset_batch["speaker_reference_audio"],
+            #     speaker_audio_lens=dataset_batch["speaker_reference_audio_lens"],
             #     text_tokens=dataset_batch["input_text_tokens"],
             #     formatter=dataset_batch["formatter"][0],
             # )
@@ -716,7 +716,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     pred_audio=results["audio"],
                     pred_audio_tf=None,
                     pre_audio_trimmed=None,
-                    reference_audio=dataset_batch["target_first_turn_audio"],
+                    reference_audio=dataset_batch["speaker_reference_audio"],
                     pred_audio_sr=self.target_sample_rate,
                     user_audio=dataset_batch["source_audio"],
                     user_audio_sr=self.source_sample_rate,

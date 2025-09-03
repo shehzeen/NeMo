@@ -692,6 +692,7 @@ def read_lhotse_magpietts_data_as_continuation(config) -> tuple[CutSet, bool]:
 
         # Resample both to match sample_rate
         cut.target_audio = cut.target_audio.resample(sample_rate)
+        cut.context_audio = cut.context_audio.resample(sample_rate)
 
         # Compute total duration
         total_duration = cut.target_audio.duration
@@ -760,6 +761,7 @@ def read_lhotse_magpietts_data_as_continuation(config) -> tuple[CutSet, bool]:
         cut_source.target_audio = cut_target.recording
         cut_source.duration = cut_target.duration
         cut_source.formatter = "lhotse_magpietts_data_as_continuation"
+        cut_source.context_audio = cut.context_audio
         return cut_source
 
     def filter_cer(example):
