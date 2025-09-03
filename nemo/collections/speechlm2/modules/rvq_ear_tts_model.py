@@ -96,10 +96,10 @@ class MLPLayer(nn.Module):
         return x
 
 
+# ToDo: Enable triton backend
 # ==============================================================================
 # Triton-accelerated and Fallback Functions
 # ==============================================================================
-'''
 try:
     # Attempt to import Triton for optimized GPU kernels
     import triton
@@ -196,30 +196,29 @@ try:
     logging.info("Triton is available. Using optimized Triton kernel for batch_matmul.")
 
 except ImportError:
-'''
-# Fallback to PyTorch implementation if Triton is not available
-def batch_matmul_pytorch(x: Tensor, w: Tensor, y: Tensor, *args, **kwargs) -> Tensor:
-    """
-    Performs a batched matrix multiplication using PyTorch's native functions.
+    # Fallback to PyTorch implementation if Triton is not available
+    def batch_matmul_pytorch(x: Tensor, w: Tensor, y: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Performs a batched matrix multiplication using PyTorch's native functions.
 
-    This function serves as a fallback when Triton is not available. It achieves
-    the same result by gathering the appropriate weight matrices and using `torch.bmm`.
+        This function serves as a fallback when Triton is not available. It achieves
+        the same result by gathering the appropriate weight matrices and using `torch.bmm`.
 
-    Args:
-        x (Tensor): The input tensor of shape `[batch_size, d_in]`.
-        w (Tensor): The weight tensor of shape `[num_weights, d_out, d_in]`.
-        y (Tensor): The index tensor of shape `[batch_size]`.
+        Args:
+            x (Tensor): The input tensor of shape `[batch_size, d_in]`.
+            w (Tensor): The weight tensor of shape `[num_weights, d_out, d_in]`.
+            y (Tensor): The index tensor of shape `[batch_size]`.
 
-    Returns:
-        Tensor: The result of the multiplication, shape `[batch_size, d_out]`.
-    """
-    # w[y] gathers the weight matrices for each item in the batch.
-    # x.unsqueeze(2) reshapes x to [batch_size, d_in, 1] for bmm.
-    # The result is squeezed to remove the trailing dimension of size 1.
-    return torch.bmm(w[y], x.unsqueeze(2)).squeeze(2)
+        Returns:
+            Tensor: The result of the multiplication, shape `[batch_size, d_out]`.
+        """
+        # w[y] gathers the weight matrices for each item in the batch.
+        # x.unsqueeze(2) reshapes x to [batch_size, d_in, 1] for bmm.
+        # The result is squeezed to remove the trailing dimension of size 1.
+        return torch.bmm(w[y], x.unsqueeze(2)).squeeze(2)
 
-batch_matmul = batch_matmul_pytorch
-logging.info("Triton is not available. Using PyTorch fallback for batch_matmul.")
+    batch_matmul = batch_matmul_pytorch
+    logging.info("Triton is not available. Using PyTorch fallback for batch_matmul.")
 
 
 # ==============================================================================
@@ -386,6 +385,7 @@ class RVQEARTTSConfig(Config):
     context_hidden_size: int = 4096
     cas_config: CASConfig | None = field(default_factory=lambda: CASConfig())
     mog_head_config: MoGHeadConfig = field(default_factory=lambda: MoGHeadConfig())
+    use_unshifthed_prompt: bool = False
 
     p_uncond: float = 0.1
     label_smoothing: float = 0.01
@@ -555,8 +555,6 @@ def depthsum_encoding_step(
         ).argmin(-1)
         emb_i = F.embedding(idx_sel, embs[i])
         r = r - emb_i
-        print("code shape:", code.shape)
-        print("idx_sel shape:", idx_sel.shape)
         code[..., i : i + 1] = idx_sel
     return code
 """
@@ -1140,11 +1138,41 @@ class RVQEARTTSModel(PreTrainedModel):
             else:
                 dropped_code = code
                 uncond_dec_flag = torch.zeros(code.size(0), 1, 1, device=code.device, dtype=torch.bool)
+
             # Right shift and add BOS embedding
-            code_embeds = (
-                self.embed_code(self.depthsum_embedding(F.pad(dropped_code[:, :-1], [0, 0, 1, 0])))
-                + (audio_mask & (~F.pad(audio_mask[:, :-1], [1, 0]))).unsqueeze(-1) * self.bos_emb
-            )
+            if self.config.use_unshifthed_prompt:
+                B, T, C = dropped_code.shape
+                device = dropped_code.device
+
+                # 1. Global right shift along time
+                # pad one timestep at the start along T dimension
+                shifted = F.pad(dropped_code[:, :-1, :], (0, 0, 1, 0))  # pad only T dim, keep C intact
+
+                # 2. BOS insertion index
+                bos_idx = audio_mask.float().argmax(dim=1)  # [B]
+
+                # 3. Create mask for positions before BOS
+                pos = torch.arange(T, device=device).unsqueeze(0)  # [1, T]
+                before_bos_mask = pos < bos_idx.unsqueeze(1)       # [B, T]
+
+                # 4. Replace shifted codes with original before BOS
+                # Expand mask to broadcast along C
+                before_bos_mask = before_bos_mask.unsqueeze(-1)    # [B, T, 1]
+                unshifthed_dropped_code = torch.where(before_bos_mask, dropped_code, shifted)
+
+                # 5. Embed
+                code_embeds = self.embed_code(self.depthsum_embedding(unshifthed_dropped_code))
+
+                # 6. Add BOS embedding only at BOS index
+                bos_mask = (pos == bos_idx.unsqueeze(1)).unsqueeze(-1)  # [B, T, 1]
+                code_embeds = code_embeds + bos_mask * self.bos_emb
+            else:
+                code_embeds = (
+                    self.embed_code(self.depthsum_embedding(F.pad(dropped_code[:, :-1], [0, 0, 1, 0])))
+                    + (audio_mask & (~F.pad(audio_mask[:, :-1], [1, 0]))).unsqueeze(-1) * self.bos_emb
+                )
+            
+
         else:  # Inference
             code_embeds = self.embed_code(self.depthsum_embedding(code))
             uncond_dec_flag = torch.zeros(code.size(0), 1, 1, device=code.device, dtype=torch.bool)

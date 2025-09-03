@@ -182,7 +182,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         self.codec_silence_tokens = self.get_codec_silence_frame()
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True)
+        self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True) # Note that we are using fast tokenizer
+
         if 'Qwen2.5' in self.cfg.pretrained_lm_name:
             # For Qwen, '<|im_start|>' is a common choice for a BOS token.
             # You can check your tokenizer's vocabulary for the best candidate.
@@ -375,6 +376,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         input_text_tokens = batch["input_text_tokens"]
         audio_mask = batch["audio_mask"]
         desc_mask = batch["desc_mask"]
+        text_mask = batch["text_mask"]
         aligned_attention_mask = batch["aligned_attention_mask"]
         aligned_position_ids = batch["aligned_position_ids"]
 
@@ -418,6 +420,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             input_text_tokens = pad_or_truncate(input_text_tokens, pad_value=self.text_pad_id)
             audio_mask = pad_or_truncate(audio_mask, pad_value=0)
             desc_mask = pad_or_truncate(desc_mask, pad_value=0)
+            text_mask = pad_or_truncate(text_mask, pad_value=0)
             aligned_position_ids = pad_or_truncate(aligned_position_ids, pad_value=0)
 
             # Correct attention mask padding/truncation
@@ -438,10 +441,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         )
 
         B, T = input_text_tokens.shape
-
-        # ToDo: handle BOS and EOS as duplex
+        # ToDo: consider to handle Speech BOS and EOS as duplex
         """
-
         # Add BOS and EOS on speech channel considering
         bos_indices = (input_text_tokens == self.text_bos_id).nonzero(as_tuple=False)  # [N_bos, 2]
         eos_indices = (input_text_tokens == self.text_eos_id).nonzero(as_tuple=False)  # [N_eos, 2]
@@ -454,9 +455,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             target_codes_aligned[eos_indices[:, 0], eos_indices[:, 1]] = self.speech_eos_id
         """
 
+        # ToDo: remove links before merge the PR
         # shift text tokens as done in https://gitlab-master.nvidia.com/jaehyeonk/easy-ar-tts/-/blob/simple-bq/scripts/train_tts_with_rvqvae.py#L118
         subword_ids = F.pad(input_text_tokens[:, 1:], [0, 1])
-        subword_mask = F.pad(audio_mask[:, 1:], [0, 1]) # use audio_mask as subword_mask to be able to support duplex training
+        # WARNING: note that we are using a text mask where we are ignoring the desc + audio prompt but we are keeping 1 until the audio ends to support duplex
+        subword_mask = F.pad(text_mask[:, 1:], [0, 1])
 
         # ToDo: implement context from the llm
         context_hidden_state = self.embed_tokens(input_text_tokens)
@@ -491,6 +494,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
             # encode and decode the audio
             with fp32_precision(), torch.no_grad():
+                print(batch["target_audio"].shape)
                 lengths = torch.tensor([batch["target_audio"].shape[1]] * batch["target_audio"].shape[0]).to(
                     self.device
                 )
@@ -670,7 +674,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
             results["audio"], results["audio_len"] = self.get_teacher_force_inference_audio(dataset_batch)
             # clean prompt from the audio
-            for i, l in enumerate(dataset_batch["desc_lens"]):
+            for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"]):
                 results["audio"][i, :l*self.target_samples_per_frame] = 0.0
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
