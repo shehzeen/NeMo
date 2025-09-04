@@ -296,7 +296,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
                     # Add padding equivalent to the audio prompt size in number of tokens
                     new_input_text_tokens = torch.cat([desc_tokens_ids.to(input_text_tokens.dtype), prompt_audio_text_pad.to(input_text_tokens.dtype), input_text_tokens[i]])
                     # set eos right after the audio prompt
-                    new_input_text_tokens[len(desc_tokens_ids) + prompt_audio_text_pad_size] = self.tokenizer.eos
+                    # new_input_text_tokens[len(desc_tokens_ids) + prompt_audio_text_pad_size] = self.tokenizer.eos
                     input_text_tokens_.append(new_input_text_tokens)
                     target_token_lens[i] = target_token_lens[i] + len(desc_tokens_ids) + prompt_audio_text_pad_size
 
