@@ -1171,7 +1171,7 @@ class RVQEARTTSModel(PreTrainedModel):
                     self.embed_code(self.depthsum_embedding(F.pad(dropped_code[:, :-1], [0, 0, 1, 0])))
                     + (audio_mask & (~F.pad(audio_mask[:, :-1], [1, 0]))).unsqueeze(-1) * self.bos_emb
                 )
-            
+
 
         else:  # Inference
             code_embeds = self.embed_code(self.depthsum_embedding(code))

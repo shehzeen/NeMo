@@ -458,8 +458,16 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # ToDo: remove links before merge the PR
         # shift text tokens as done in https://gitlab-master.nvidia.com/jaehyeonk/easy-ar-tts/-/blob/simple-bq/scripts/train_tts_with_rvqvae.py#L118
         subword_ids = F.pad(input_text_tokens[:, 1:], [0, 1])
-        # WARNING: note that we are using a text mask where we are ignoring the desc + audio prompt but we are keeping 1 until the audio ends to support duplex
-        subword_mask = F.pad(text_mask[:, 1:], [0, 1])
+        if self.cfg.get("subword_mask_exactly_as_eartts", False):
+            # ignore prompt using text_mask
+            mask_1 = F.pad(text_mask[:, 1:], [0, 1])
+            # ignore extra silences checking subword_ids
+            mask_2 = ~(subword_ids == self.text_pad_id)
+            # subword_mask is only true when both mask_1 and mask_2 are true
+            subword_mask = mask_1.bool() & mask_2.bool()
+        else:
+            # WARNING: note that we are using a text mask where we are ignoring the desc + audio prompt but we are keeping 1 until the audio ends to support duplex
+            subword_mask = F.pad(text_mask[:, 1:], [0, 1])
 
         # ToDo: implement context from the llm
         context_hidden_state = self.embed_tokens(input_text_tokens)
