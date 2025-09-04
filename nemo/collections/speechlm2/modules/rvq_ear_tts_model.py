@@ -1095,6 +1095,7 @@ class RVQEARTTSModel(PreTrainedModel):
         subword_ids: Tensor | None = None,
         subword_mask: Tensor | None = None,
         audio_mask: Tensor | None = None,
+        prompt_mask: Tensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool = False,
         training: bool | None = None,
@@ -1149,7 +1150,10 @@ class RVQEARTTSModel(PreTrainedModel):
                 shifted = F.pad(dropped_code[:, :-1, :], (0, 0, 1, 0))  # pad only T dim, keep C intact
 
                 # 2. BOS insertion index
-                bos_idx = audio_mask.float().argmax(dim=1)  # [B]
+                # bos_idx = audio_mask.float().argmax(dim=1)  # [B]
+                # using prompt_mask because audio_mask does not mask the audio prompt and 
+                # it would added the BOS in the wrong place and also shift the prompt
+                bos_idx = (~prompt_mask.bool()).float().argmax(dim=1)
 
                 # 3. Create mask for positions before BOS
                 pos = torch.arange(T, device=device).unsqueeze(0)  # [1, T]

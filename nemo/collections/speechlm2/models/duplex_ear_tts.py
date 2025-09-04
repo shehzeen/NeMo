@@ -376,7 +376,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         input_text_tokens = batch["input_text_tokens"]
         audio_mask = batch["audio_mask"]
         desc_mask = batch["desc_mask"]
-        text_mask = batch["text_mask"]
+        prompt_mask = batch["prompt_mask"]
         aligned_attention_mask = batch["aligned_attention_mask"]
         aligned_position_ids = batch["aligned_position_ids"]
 
@@ -420,7 +420,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             input_text_tokens = pad_or_truncate(input_text_tokens, pad_value=self.text_pad_id)
             audio_mask = pad_or_truncate(audio_mask, pad_value=0)
             desc_mask = pad_or_truncate(desc_mask, pad_value=0)
-            text_mask = pad_or_truncate(text_mask, pad_value=0)
+            prompt_mask = pad_or_truncate(prompt_mask, pad_value=0)
             aligned_position_ids = pad_or_truncate(aligned_position_ids, pad_value=0)
 
             # Correct attention mask padding/truncation
@@ -459,15 +459,15 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # shift text tokens as done in https://gitlab-master.nvidia.com/jaehyeonk/easy-ar-tts/-/blob/simple-bq/scripts/train_tts_with_rvqvae.py#L118
         subword_ids = F.pad(input_text_tokens[:, 1:], [0, 1])
         if self.cfg.get("subword_mask_exactly_as_eartts", False):
-            # ignore prompt using text_mask
-            mask_1 = F.pad(text_mask[:, 1:], [0, 1])
+            # ignore prompt using prompt_mask
+            mask_1 = F.pad(prompt_mask[:, 1:], [0, 1])
             # ignore extra silences checking subword_ids
             mask_2 = ~(subword_ids == self.text_pad_id)
             # subword_mask is only true when both mask_1 and mask_2 are true
             subword_mask = mask_1.bool() & mask_2.bool()
         else:
             # WARNING: note that we are using a text mask where we are ignoring the desc + audio prompt but we are keeping 1 until the audio ends to support duplex
-            subword_mask = F.pad(text_mask[:, 1:], [0, 1])
+            subword_mask = F.pad(prompt_mask[:, 1:], [0, 1])
 
         # ToDo: implement context from the llm
         context_hidden_state = self.embed_tokens(input_text_tokens)
@@ -569,6 +569,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             "subword_mask": subword_mask,
             "context_hidden_state": context_hidden_state,
             "output_lens": target_codes_lens,
+            "prompt_mask": prompt_mask,
         }
 
     def training_step(self, batch: dict, batch_idx: int):
@@ -586,6 +587,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
             subword_mask=inputs["subword_mask"],
+            prompt_mask=inputs["prompt_mask"],
         )
         loss_dict = {"lm_loss": tts_output.lm_loss, "c_loss": tts_output.c_loss, "k_loss": tts_output.k_loss}
         loss = sum(loss_dict.values())
@@ -639,6 +641,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
             subword_mask=inputs["subword_mask"],
+            prompt_mask=inputs["prompt_mask"],
             generation_config=self._get_generation_config(guidance_enabled=guidance_enabled),
             teacher_forcing_inference=True,
             guidance_enabled=guidance_enabled,
@@ -750,6 +753,57 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         text_bos = torch.full((1,), fill_value=self.text_pad_id, device=self.device)
         input_embeds = self.embed_text_tokens(text_bos)
         return text_bos, input_embeds
+
+    def get_system_prompt(self, system_prompt=None, user_prompt=None):
+        messages = []
+        if random.random() > self.p_drop_description:
+            if system_prompt is None:
+                system_prompt = (
+                    "You engage in conversation with the user. When delivering your response as speech, "
+                    "if the user provides a description such as emotions, scene details, "
+                    "or speaker style, you adjust your speaking style accordingly when delivering the response. "
+                    "However, this description should influence only the delivery of your response, not its content. "
+                    "Your response should remain independent of any stylistic instructions."
+                )
+            messages.append({"role": "system", "content": system_prompt})
+        else:
+            messages.append({"role": "system", "content": ""})
+        
+        # ToDo: implement dataloading support for descriptions
+        """for desc in example["descriptions"]:
+            user_prompt = ""
+            if random.random() > self.p_drop_description and desc:
+                user_prompt += f"```\n{desc}\n```"
+            if random.random() > self.p_drop_description:
+                if user_prompt:
+                    user_prompt += "\n\n"
+                user_prompt += self.rng.choice(self.user_prompts)
+            if user_prompt:
+                messages.append({"role": "user", "content": user_prompt})
+            messages.append({"role": "assistant", "content": SCRIPT_PLACEHOLDER})
+        """
+
+        # given that descriptions are currently not supported, only added the user prompt
+        if user_prompt is None:
+            user_prompt = "Can you tell me something interesting?"
+        messages.append({"role": "user", "content": user_prompt})
+        messages.append({"role": "assistant", "content": SCRIPT_PLACEHOLDER})
+        non_script_list = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        ).split(SCRIPT_PLACEHOLDER + self.tokenizer.eos_token)[:-1]
+
+        input_ids = []
+        for i, non_script in enumerate(non_script_list):
+            desc_ids = self.tokenizer.text_to_ids(non_script)
+            input_ids.extend(desc_ids)
+
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device).view(1, -1)
+        return input_ids
+
+    def warm_up_model_with_prompts(self, system_prompt=None, user_prompt=None):
+        prompt_ids = self.get_system_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
 
     @torch.no_grad()
     def offline_inference(

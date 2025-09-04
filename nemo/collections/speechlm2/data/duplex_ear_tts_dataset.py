@@ -353,18 +353,17 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             # desc mask is totally the oposite of audio mask
             desc_mask = ~ audio_mask
 
-            # create text_mask that should mask desc plus audio prompt if used
-            # ignore desc len in audio mask
-            text_mask = get_mask_from_lengths(target_token_lens)
+            # create prompt_mask that should mask desc plus audio prompt if used
+            prompt_mask = get_mask_from_lengths(target_token_lens)
             for i, frame in enumerate(desc_plus_audio_prompt_lens):
-                text_mask[i, :frame] = 0.0
+                prompt_mask[i, :frame] = 0.0
         else:
             # create a mask for audio using target tokens that suppose to have the same size of the tokenized audio
             audio_mask = get_mask_from_lengths(target_token_lens)
             # create a full zero desc mask
             desc_mask = torch.zeros_like(audio_mask)
             # keep text mask as audio_mask
-            text_mask = audio_mask
+            prompt_mask = audio_mask
 
         batch_size = len(target_token_lens)
         max_len = max(target_token_lens)
@@ -394,7 +393,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         return {
             "sample_id": [str(cut.id) for cut in cuts],
             "audio_mask": audio_mask.bool(),
-            "text_mask": text_mask.bool(),
+            "prompt_mask": prompt_mask.bool(),
             "desc_mask": desc_mask.bool(),
             "desc_lens": desc_lens,
             "desc_plus_audio_prompt_lens": desc_plus_audio_prompt_lens,
