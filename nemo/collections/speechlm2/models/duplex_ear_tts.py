@@ -147,6 +147,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         self.save_hyperparameters()
         # convert dict to config
         cfg = DictConfig(cfg)
+        self.data_cfg = cfg.model
         self.cfg = cfg.model
         self.target_sample_rate = cfg.data.target_sample_rate
         self.source_sample_rate = cfg.data.source_sample_rate
@@ -471,6 +472,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
         # ToDo: implement context from the llm
         context_hidden_state = self.embed_tokens(input_text_tokens)
+        # On EARTTS they use masked_scatter_ and make sure that the where there is the padding tokens it is actually zeros
+        if self.cfg.get("context_hidden_mask_exactly_as_eartts", False):
+            # context_hidden_mask is True when we have valids BPE tokens including the prompt
+            context_hidden_mask = ~(input_text_tokens == self.text_pad_id)
+            context_hidden_state = context_hidden_state * subword_mask.unsqueeze(-1)
 
         if self._use_tp:
             tp_world_size = self.device_mesh["tensor_parallel"].size()
@@ -802,8 +808,40 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=device).view(1, -1)
         return input_ids
 
-    def warm_up_model_with_prompts(self, system_prompt=None, user_prompt=None):
-        prompt_ids = self.get_system_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
+    def warm_up_model_with_prompts(self, speaker_audio, speaker_audio_lens, system_prompt=None, user_prompt=None):
+        desc_tokens_ids = self.get_system_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
+        # compute prompt audio size
+        prompt_audio_size = int(((self.data_cfg.audio_prompt_duration * self.target_sample_rate) // self.target_samples_per_frame) * self.target_samples_per_frame)
+        prompt_audio = speaker_audio[:, :prompt_audio_size]
+        print(prompt_audio.shape, prompt_audio_size)
+        # create a padding tensor
+        prompt_audio_text_pad_size = prompt_audio_size // self.target_samples_per_frame
+        prompt_audio_text_pad = torch.ones(prompt_audio_text_pad_size, device=self.device, dtype=desc_tokens_ids.dtype) * self.text_pad_id
+        # Add eos to simulate the end of a turn as in EAR-TTS inference
+        desc_tokens_ids = torch.cat([desc_tokens_ids, torch.tensor([self.tokenizer.eos], dtype=desc_tokens_ids.dtype, device=desc_tokens_ids.device)])
+        # Add padding equivalent to the audio prompt size in number of tokens
+        subword_ids = torch.cat([desc_tokens_ids.to(desc_tokens_ids.dtype), prompt_audio_text_pad.to(desc_tokens_ids.dtype)])
+
+        # set eos right after the audio prompt
+        subword_ids[len(desc_tokens_ids) + prompt_audio_text_pad_size] = self.tokenizer.eos
+        # repeat to reaches the batch size
+        subword_ids = subword_ids.unsqueeze(0).repeat(prompt_audio.size(0), 1)
+        target_audio = torch.cat([pad_audio.unsqueeze(0).repeat(prompt_audio.size(0), 1), prompt_audio])
+
+        # extract audio codes
+
+        code=inputs["code"],
+        audio_mask=inputs["audio_mask"],
+        attention_mask=inputs["attention_mask"],
+        position_ids=inputs["position_ids"],
+        context_hidden_state=inputs["context_hidden_state"],
+        subword_ids=inputs["subword_ids"],
+        subword_mask=inputs["subword_mask"],
+        prompt_mask=inputs["prompt_mask"],
+
+        # desc duration
+        desc_lens.append(len(desc_tokens_ids))
+        desc_plus_audio_prompt_lens.append(len(desc_tokens_ids) + prompt_audio_text_pad_size)
 
     @torch.no_grad()
     def offline_inference(
