@@ -861,6 +861,7 @@ class CharAwareSubwordEncoder(nn.Module):
         # char_mask = sequence_mask(char_lengths).float()
         char_mask = sequence_mask(char_lengths)
 
+
         # 2. Get character embeddings and pass them through the backbone
         char_embeds = self.embed_tokens(char_ids)
         # The backbone model should be able to accept `inputs_embeds`
@@ -1019,7 +1020,9 @@ class RVQEARTTSModel(PreTrainedModel):
             # Infer subword mask from context if not provided
             if subword_mask is None and context_hidden_state is not None:
                 subword_mask = torch.any(context_hidden_state != 0, dim=-1)
-            cond = cond + self.embed_subword(subword_ids, subword_mask)
+            # at least one value should be true, otherwise we can completly skip it to avoid errors
+            if subword_mask is not None and subword_mask.any():
+                cond = cond + self.embed_subword(subword_ids, subword_mask)
 
         # Replace with null embedding for unconditional generation
         cond = torch.where(uncond_dec_flag, self.null_emb, cond)
@@ -1102,6 +1105,7 @@ class RVQEARTTSModel(PreTrainedModel):
         guidance_enabled: bool = False,
         generation_config: dict[str, Any] | None = None,
         teacher_forcing_inference: bool = False,
+        ignore_eos_flag_stop: bool = False,
     ) -> RVQEARTTSOutput:
         """
         Performs a forward pass handling training, generation, or single-step inference.
@@ -1234,7 +1238,7 @@ class RVQEARTTSModel(PreTrainedModel):
                 if teacher_forcing_inference:
                     generated_codes, lm_logits, eos_flag = self.generate_teacher_forcing(hidden_states, generation_config)
                 else:
-                    generated_codes, lm_logits, eos_flag = self.generate_step(hidden_states, **generation_config)
+                    generated_codes, lm_logits, eos_flag = self.generate_step(hidden_states, ignore_eos_flag_stop=ignore_eos_flag_stop, **generation_config)
                 return RVQEARTTSOutput(
                     past_key_values=backbone_outputs.past_key_values,
                     codes=generated_codes,
@@ -1297,6 +1301,7 @@ class RVQEARTTSModel(PreTrainedModel):
         noise_scale: list[float] | float | None = None,
         exponent: float | None = None,
         eos_threshold: float | None = None,
+        ignore_eos_flag_stop: bool = False,
     ) -> tuple[Tensor | None, Tensor, Tensor]:
         """
         Performs the iterative unmasking process for a single generation step.
@@ -1369,7 +1374,7 @@ class RVQEARTTSModel(PreTrainedModel):
         else:
             eos_flag = lm_logits.argmax(-1) == 1
 
-        if torch.all(eos_flag):
+        if torch.all(eos_flag) and ignore_eos_flag_stop:
             return None, lm_logits, eos_flag
 
         # Initialize the full code tensor
