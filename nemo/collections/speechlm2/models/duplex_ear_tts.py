@@ -377,7 +377,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         input_text_tokens = batch["input_text_tokens"]
         audio_mask = batch["audio_mask"]
         desc_mask = batch["desc_mask"]
-        prompt_mask = batch["prompt_mask"]
+        non_prompt_mask = batch["non_prompt_mask"]
         aligned_attention_mask = batch["aligned_attention_mask"]
         aligned_position_ids = batch["aligned_position_ids"]
 
@@ -421,7 +421,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             input_text_tokens = pad_or_truncate(input_text_tokens, pad_value=self.text_pad_id)
             audio_mask = pad_or_truncate(audio_mask, pad_value=0)
             desc_mask = pad_or_truncate(desc_mask, pad_value=0)
-            prompt_mask = pad_or_truncate(prompt_mask, pad_value=0)
+            non_prompt_mask = pad_or_truncate(non_prompt_mask, pad_value=0)
             aligned_position_ids = pad_or_truncate(aligned_position_ids, pad_value=0)
 
             # Correct attention mask padding/truncation
@@ -460,24 +460,24 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # shift text tokens as done in https://gitlab-master.nvidia.com/jaehyeonk/easy-ar-tts/-/blob/simple-bq/scripts/train_tts_with_rvqvae.py#L118
         subword_ids = F.pad(input_text_tokens[:, 1:], [0, 1])
         if self.cfg.get("subword_mask_exactly_as_eartts", False):
-            # ignore prompt using prompt_mask
-            mask_1 = F.pad(prompt_mask[:, 1:], [0, 1])
+            # ignore prompt using non_prompt_mask
+            mask_1 = F.pad(non_prompt_mask[:, 1:], [0, 1])
             # ignore extra silences checking subword_ids
             mask_2 = ~(subword_ids == self.text_pad_id)
             # subword_mask is only true when both mask_1 and mask_2 are true
-            subword_mask = mask_1.bool() & mask_2.bool()
+            subword_mask = (mask_1.bool() & mask_2.bool()).detach()
         else:
             # WARNING: note that we are using a text mask where we are ignoring the desc + audio prompt but we are keeping 1 until the audio ends to support duplex
-            subword_mask = F.pad(prompt_mask[:, 1:], [0, 1])
+            subword_mask = F.pad(non_prompt_mask[:, 1:], [0, 1])
 
         # ToDo: implement context from the llm
         context_hidden_state = self.embed_tokens(input_text_tokens)
         # On EARTTS they use masked_scatter_ and make sure that the where there is the padding tokens it is actually zeros
         if self.cfg.get("context_hidden_mask_exactly_as_eartts", False):
-            # context_hidden_mask is True when we have valids BPE tokens including the prompt
-            context_hidden_mask = ~(input_text_tokens == self.text_pad_id)
-            context_hidden_state = context_hidden_state * subword_mask.unsqueeze(-1)
-
+            # context_hidden_mask is True when we have valids BPE tokens 
+            context_hidden_mask = ~(subword_ids == self.text_pad_id).detach()
+            context_hidden_state = context_hidden_state * context_hidden_mask.unsqueeze(-1)
+    
         if self._use_tp:
             tp_world_size = self.device_mesh["tensor_parallel"].size()
             if (remainder := (input_text_tokens.shape[1] - 1) % tp_world_size) != 0:
@@ -575,7 +575,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             "subword_mask": subword_mask,
             "context_hidden_state": context_hidden_state,
             "output_lens": target_codes_lens,
-            "prompt_mask": prompt_mask,
+            "non_prompt_mask": non_prompt_mask,
         }
 
     def training_step(self, batch: dict, batch_idx: int):
@@ -593,7 +593,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
             subword_mask=inputs["subword_mask"],
-            prompt_mask=inputs["prompt_mask"],
+            non_prompt_mask=inputs["non_prompt_mask"],
         )
         loss_dict = {"lm_loss": tts_output.lm_loss, "c_loss": tts_output.c_loss, "k_loss": tts_output.k_loss}
         loss = sum(loss_dict.values())
@@ -647,7 +647,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
             subword_mask=inputs["subword_mask"],
-            prompt_mask=inputs["prompt_mask"],
+            non_prompt_mask=inputs["non_prompt_mask"],
             generation_config=self._get_generation_config(guidance_enabled=guidance_enabled),
             teacher_forcing_inference=True,
             guidance_enabled=guidance_enabled,
@@ -837,7 +837,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         context_hidden_state=inputs["context_hidden_state"],
         subword_ids=inputs["subword_ids"],
         subword_mask=inputs["subword_mask"],
-        prompt_mask=inputs["prompt_mask"],
+        non_prompt_mask=inputs["non_prompt_mask"],
 
         # desc duration
         desc_lens.append(len(desc_tokens_ids))
