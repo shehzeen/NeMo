@@ -66,6 +66,7 @@ from nemo.utils import logging
 
 from nemo.collections.tts.modules import transformer_2501
 from nemo.collections.tts.modules.mimi_codec_modules import ReshapeTransformerEncoder
+from nemo.collections.speechlm2.modules.ear_tts_commons import SCRIPT_PLACEHOLDER
 
 from nemo.collections.speechlm2.modules.cfm import MatchaTTSCFM
 from types import SimpleNamespace
@@ -136,6 +137,47 @@ def setup_rvq_audio_codec(model):
     for p in model.audio_codec.parameters():
         p.requires_grad = False
 
+
+def compare_init_dicts(dict1, dict2, atol=1e-5, rtol=1e-3):
+    """
+    Compare two init_input dictionaries key by key.
+    Prints shape, dtype, and whether values match (for tensors).
+    """
+    keys1 = set(dict1.keys())
+    keys2 = set(dict2.keys())
+    print("Keys only in dict1:", keys1 - keys2)
+    print("Keys only in dict2:", keys2 - keys1)
+    print("Common keys:", keys1 & keys2)
+    print("=" * 60)
+
+    for key in keys1 & keys2:
+        v1, v2 = dict1[key], dict2[key]
+
+        print(f"\n🔑 {key}")
+        if isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
+            same_shape = v1.shape == v2.shape
+            same_dtype = v1.dtype == v2.dtype
+            try:
+                close = torch.allclose(v1, v2, atol=atol, rtol=rtol)
+            except Exception:
+                close = False
+
+            print(f"  shape1={tuple(v1.shape)}, shape2={tuple(v2.shape)}, same_shape={same_shape}")
+            print(f"  dtype1={v1.dtype}, dtype2={v2.dtype}, same_dtype={same_dtype}")
+            print(f"  allclose={close}")
+
+            # If shapes differ, show min shape content preview
+            if not same_shape:
+                print("  ⚠️ Shapes differ, showing first few elements:")
+                print(f"    dict1[{key}][:5] -> {v1.view(-1)[:5]}")
+                print(f"    dict2[{key}][:5] -> {v2.view(-1)[:5]}")
+        else:
+            same_type = type(v1) == type(v2)
+            same_val = v1 == v2 if same_type else False
+            print(f"  type1={type(v1)}, type2={type(v2)}, same_type={same_type}")
+            print(f"  value equal? {same_val}")
+            print(f"  val1={str(v1)[:100]}")
+            print(f"  val2={str(v2)[:100]}")
 
 class DuplexEARTTS(LightningModule, HFHubMixin):
     def __init__(self, cfg: dict) -> None:
@@ -686,7 +728,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 continue  # some dataset is exhausted
 
             results = {}
-
+            """
             inputs = self.prepare_inputs(dataset_batch)
             # cut it on prompt
             init_inputs = {
@@ -700,17 +742,18 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             # cut init_inputs to consider only the prompt
             for key in init_inputs:
                 init_inputs[key] = torch.stack([
-                    init_inputs[key][i, :l]
+                    init_inputs[key][i, :l-1]
                     for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
                 ])
+            """
 
             # remove the prompt from the input_text_tokens to emulate S2S connected inference
             next_subword_ids = torch.stack([
-                inputs["subword_ids"][i, l:]  # slice each element
+                inputs["subword_ids"][i, l-1:]  # slice each element
                 for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
             ])
             next_input_text_tokens = torch.stack([
-                inputs["input_text_tokens"][i, l:]  # slice each element
+                inputs["input_text_tokens"][i, l-1:]  # slice each element
                 for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
             ])
 
@@ -720,7 +763,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 next_subword_ids=next_subword_ids,
                 next_input_text_tokens=next_input_text_tokens,
                 formatter=dataset_batch["formatter"][0],
-                init_inputs=init_inputs,
+                # init_inputs=init_inputs,
             )
 
             results["audio_tf"], results["audio_tf_len"] = self.get_teacher_force_inference_audio(dataset_batch)
@@ -852,7 +895,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # create a padding tensor
         prompt_audio_text_pad = torch.ones(prompt_audio_text_pad_size, device=self.device, dtype=desc_tokens_ids.dtype) * self.text_pad_id
         # Add eos to simulate the end of a turn as in EAR-TTS inference
-        desc_tokens_ids = torch.cat([desc_tokens_ids, torch.tensor([self.tokenizer.eos], dtype=desc_tokens_ids.dtype, device=desc_tokens_ids.device)])
+        desc_tokens_ids = torch.cat([desc_tokens_ids.squeeze(), torch.tensor([self.tokenizer.eos], dtype=desc_tokens_ids.dtype, device=desc_tokens_ids.device)])
         # Add padding equivalent to the audio prompt size in number of tokens
         input_text_tokens = torch.cat([desc_tokens_ids.to(desc_tokens_ids.dtype), prompt_audio_text_pad.to(desc_tokens_ids.dtype)])
 
@@ -864,14 +907,13 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # input_text_tokens[len(desc_tokens_ids) + prompt_audio_text_pad_size] = self.tokenizer.eos
         # repeat to reaches the batch size
         input_text_tokens = input_text_tokens.unsqueeze(0).repeat(prompt_audio.size(0), 1)
-        target_audio = torch.cat([pad_audio, prompt_audio])
+        target_audio = torch.cat([pad_audio, prompt_audio], dim=1)
 
         # extract code codes
         target_audio_len = torch.tensor([target_audio.size(-1)] * target_audio.size(0), dtype=torch.long, device=self.device)
-        code, _ = self.audio_codec.encode(target_audio, target_audio_len)
+        with fp32_precision(), torch.no_grad():
+            code, _ = self.audio_codec.encode(target_audio.unsqueeze(1), target_audio_len)
 
-
-        
         # get context hidden 
         context_hidden_state = self.embed_tokens(input_text_tokens)
 
@@ -888,7 +930,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
         # add special tokens on audio codes
         code = torch.where(
-            desc_mask.unsqueeze(-1),                    # (B, T, 1) for broadcasting
+            desc_mask.unsqueeze(-1).bool(),                    # (B, T, 1) for broadcasting
             torch.full_like(code, self.speech_pad_id),  # fill with pad id
             code
         )
@@ -899,12 +941,12 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
 
         init_inputs = {
-            "code": code,
-            "audio_mask": audio_mask,
-            "context_hidden_state": context_hidden_state,
-            "subword_ids": subword_ids,
-            "subword_mask": subword_mask,
-            "non_prompt_mask": non_prompt_mask,
+            "code": code[:, :-1],
+            "audio_mask": audio_mask.bool()[:, :-1],
+            "context_hidden_state": context_hidden_state[:, :-1],
+            "subword_ids": subword_ids[:, :-1],
+            "subword_mask": subword_mask.bool()[:, :-1],
+            "non_prompt_mask": non_prompt_mask.bool()[:, :-1],
         }
 
         return init_inputs
@@ -943,8 +985,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         B = speaker_audio.size(0)
 
         # init model
-        if init_inputs is None:
-            init_inputs = self.get_init_inputs(speaker_audio, speaker_audio_lens, system_prompt=system_prompt, user_prompt=user_prompt)
+        init_inputs = self.get_init_inputs(speaker_audio, speaker_audio_lens, system_prompt=system_prompt, user_prompt=user_prompt)
 
         if generation_config is None:
             generation_config = self._get_generation_config(guidance_enabled)
