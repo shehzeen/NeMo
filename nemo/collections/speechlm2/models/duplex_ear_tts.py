@@ -748,6 +748,32 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 ])
             """
 
+            print(dataset_batch["desc_plus_audio_prompt_lens"])
+            # drop items without description to avoid issues 
+            
+            lens = dataset_batch["desc_plus_audio_prompt_lens"]  # list of lengths
+
+            # Example condition: keep only those with the maximum length
+            max_len = max(lens)
+            keep_indices = [i for i, l in enumerate(lens) if l == max_len]
+
+            # Convert indices to tensor for indexing torch tensors
+            keep_indices  = torch.tensor(keep_indices, dtype=torch.long)
+
+            # Now filter every key in dataset_batch
+            for k, v in dataset_batch.items():
+                if isinstance(v, torch.Tensor):
+                    dataset_batch[k] = v[keep_indices]
+                elif isinstance(v, list):
+                    dataset_batch[k] = [v[i] for i in keep_indices]
+
+            # Do the same for inputs
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor):
+                    inputs[k] = v[keep_indices]
+                elif isinstance(v, list):
+                    inputs[k] = [v[i] for i in keep_indices]
+
             # remove the prompt from the input_text_tokens to emulate S2S connected inference
             next_subword_ids = torch.stack([
                 inputs["subword_ids"][i, l-1:]  # slice each element
