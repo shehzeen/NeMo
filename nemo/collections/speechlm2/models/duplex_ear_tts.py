@@ -1214,8 +1214,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
 
         gen_audio_codes_lens = torch.tensor([gen_audio_codes.shape[1]] * gen_audio_codes.shape[0]).to(self.device)
-        # decode audio
-        # gen_audio_codes = replace_control_speech_codes(gen_audio_codes, self._control_codes, self.codec_silence_tokens)
+        # decode audio. Note that it is not necessary because the prompt is removed, so no special token should be on the output, but lets do it for safety
+        gen_audio_codes = replace_control_speech_codes(gen_audio_codes, self._control_codes, self.codec_silence_tokens)
         with fp32_precision(), torch.no_grad():
             audio_pred, audio_len = self.audio_codec.decode(
                 gen_audio_codes, gen_audio_codes_lens
