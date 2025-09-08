@@ -288,6 +288,9 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
                 if self.add_audio_prompt_after_description:
                     prompt_audio_size = int(((self.audio_prompt_duration * self.target_sample_rate) // target_samples_per_frame) * target_samples_per_frame)
                     prompt_audio = sample_audio_segments_repeat(speaker_reference_audio, speaker_reference_audio_lens, prompt_audio_size)
+                    # add a silence in the end to smooth the transition between prompt and audio tokens
+                    prompt_audio[:, -target_samples_per_frame:] = 0
+
                     # create tensor to pad text channels with the same amount of frames added in audio channel (audio prompt)
                     prompt_audio_text_pad_size = prompt_audio_size // target_samples_per_frame
                     prompt_audio_text_pad = torch.ones(prompt_audio_text_pad_size, device=input_text_tokens.device, dtype=input_text_tokens.dtype) * text_pad_id
@@ -295,6 +298,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
                     desc_tokens_ids = torch.cat([desc_tokens_ids, torch.tensor([self.tokenizer.eos], dtype=desc_tokens_ids.dtype, device=desc_tokens_ids.device)])
                     # Add padding equivalent to the audio prompt size in number of tokens
                     new_input_text_tokens = torch.cat([desc_tokens_ids.to(input_text_tokens.dtype), prompt_audio_text_pad.to(input_text_tokens.dtype), input_text_tokens[i]])
+
                     # set eos right after the audio prompt
                     # new_input_text_tokens[len(desc_tokens_ids) + prompt_audio_text_pad_size] = self.tokenizer.eos
                     input_text_tokens_.append(new_input_text_tokens)

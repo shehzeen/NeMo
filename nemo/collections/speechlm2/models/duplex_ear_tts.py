@@ -911,6 +911,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # compute prompt audio size and slice it
         prompt_audio_size = int(((self.data_cfg.audio_prompt_duration * self.target_sample_rate) // self.target_samples_per_frame) * self.target_samples_per_frame)
         prompt_audio = speaker_audio[:, :prompt_audio_size]
+        # add a silence in the end to smooth the transition between prompt and audio tokens
+        prompt_audio[:, -self.target_samples_per_frame:] = 0
+
         # get prompt audio size
         prompt_audio_text_pad_size = prompt_audio_size // self.target_samples_per_frame
         
@@ -1185,7 +1188,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             # get context_hidden_state it is always one step behind
             context_subword_id = next_input_text_tokens[:, i].unsqueeze(-1)
             context_hidden_state = self.embed_tokens(context_subword_id)
-            
+
             # create subword_mask if needed
             if self.cfg.subword_mask_exactly_as_eartts:
                 current_subword_mask = (current_subword_id != self.text_pad_id).bool()
