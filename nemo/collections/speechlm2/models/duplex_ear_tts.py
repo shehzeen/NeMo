@@ -562,7 +562,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 )
                 # reconstruct wav
                 print("target_codes_aligned:", target_codes_aligned.shape)
-                target_codes_aligned_ = replace_control_speech_codes(target_codes, self._control_codes, self.codec_silence_tokens)
+                target_codes_aligned_ = replace_control_speech_codes(target_codes_aligned, self._control_codes, self.codec_silence_tokens)
                 print(self._control_codes, target_codes_aligned_.shape)
                 with fp32_precision(), torch.no_grad():
                     lengths = torch.tensor([target_codes_aligned_.shape[1]] * target_codes_aligned_.shape[0]).to(
@@ -574,6 +574,10 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     )
                     reconstructed_audio_from_tokens = reconstructed_audio_from_tokens.squeeze(1)
                     print(reconstructed_audio_from_tokens.shape, batch["target_audio"].shape)
+
+                # delete text prompt
+                for i, l in enumerate(batch["desc_lens"]):
+                    reconstructed_audio_from_tokens[i, :l*self.target_samples_per_frame] = 0.0
 
             for i in range(target_codes_aligned_.shape[0]):
                 write_wave(
@@ -782,6 +786,10 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
             ])
 
+            # remove prompt padding from the user audio as autoregressive inference does not return the prompt
+            dataset_batch["source_audio"] = dataset_batch["source_audio"][:, -int(next_subword_ids.size(-1)*self.source_samples_per_frame):]
+
+            # ToDo: remove next_input_text_tokens and use the previous next_subword_ids as it
             results["audio"], results["audio_len"] = self.offline_inference(
                 speaker_audio=dataset_batch["speaker_reference_audio"],
                 speaker_audio_lens=dataset_batch["speaker_reference_audio_lens"],
