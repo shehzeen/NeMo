@@ -1391,7 +1391,7 @@ class RVQEARTTSModel(PreTrainedModel):
             else:
                 eos_flag = lm_logits.argmax(-1) == 1
 
-            if torch.all(eos_flag) and ignore_eos_flag_stop:
+            if torch.all(eos_flag) and not ignore_eos_flag_stop:
                 return None, lm_logits, eos_flag
         else:
             lm_logits = None

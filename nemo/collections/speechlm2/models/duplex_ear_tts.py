@@ -15,6 +15,7 @@ import os
 import random
 import tempfile
 import numpy as np
+import time
 
 import torch
 import torch.distributed as dist
@@ -1191,6 +1192,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # init subwork as all ones
         subword_mask = torch.ones(B, max_steps, device=self.device, dtype=torch.bool)
         for i in range(max_steps-1):
+            step_start = time.time()
             # current subword id is always seem
             current_subword_id = next_subword_ids[:, i].unsqueeze(-1)
             # get context_hidden_state it is always one step behind
@@ -1222,6 +1224,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             code = outputs.codes
             past_key_values = outputs.past_key_values
             gen_audio_codes[:, i-1] = code.squeeze(1)
+            step_time = time.time()-step_start
+            logging.info(f"Autoregressive inference step: {i} of {max_steps} take around {step_time}s")
 
 
         gen_audio_codes_lens = torch.tensor([gen_audio_codes.shape[1]] * gen_audio_codes.shape[0]).to(self.device)
