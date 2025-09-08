@@ -747,8 +747,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
                 ])
             """
-
-            print(dataset_batch["desc_plus_audio_prompt_lens"])
             # drop items without description to avoid issues 
             
             lens = dataset_batch["desc_plus_audio_prompt_lens"]  # list of lengths
@@ -1179,22 +1177,28 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # create variable to store the audios
         gen_audio_codes = torch.zeros(B, max_steps, self.tts_model.config.num_quantizers, device=self.device, dtype=torch.long)
 
+        # init subwork as all ones
+        subword_mask = torch.ones(B, max_steps, device=self.device, dtype=torch.bool)
         for i in range(max_steps-1):
             # current subword id is always seem
             current_subword_id = next_subword_ids[:, i].unsqueeze(-1)
             # get context_hidden_state it is always one step behind
             context_subword_id = next_input_text_tokens[:, i].unsqueeze(-1)
             context_hidden_state = self.embed_tokens(context_subword_id)
+            
+            # create subword_mask if needed
+            if self.cfg.subword_mask_exactly_as_eartts:
+                current_subword_mask = (current_subword_id != self.text_pad_id).bool()
+            else:
+                current_subword_mask = subword_mask[:, i].unsqueeze(-1)
 
-            # create subword_mask
-            current_subword_mask = (current_subword_id != self.text_pad_id).bool()
             # print(i, current_subword_mask.shape, current_subword_mask.shape)
             # get subword_ids
             inputs = {
                 "code": code,
                 "context_hidden_state": context_hidden_state,
                 "subword_ids": current_subword_id,
-                # "subword_mask": current_subword_mask, # ToDo: implement subword_mask it will be required here for S2S
+                "subword_mask": current_subword_mask,
                 "past_key_values": past_key_values,
                 "use_cache": True,
                 "guidance_enabled": guidance_enabled,
@@ -1211,7 +1215,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
         gen_audio_codes_lens = torch.tensor([gen_audio_codes.shape[1]] * gen_audio_codes.shape[0]).to(self.device)
         # decode audio
-        gen_audio_codes = replace_control_speech_codes(gen_audio_codes, self._control_codes, self.codec_silence_tokens)
+        # gen_audio_codes = replace_control_speech_codes(gen_audio_codes, self._control_codes, self.codec_silence_tokens)
         with fp32_precision(), torch.no_grad():
             audio_pred, audio_len = self.audio_codec.decode(
                 gen_audio_codes, gen_audio_codes_lens

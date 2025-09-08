@@ -385,7 +385,10 @@ class RVQEARTTSConfig(Config):
     context_hidden_size: int = 4096
     cas_config: CASConfig | None = field(default_factory=lambda: CASConfig())
     mog_head_config: MoGHeadConfig = field(default_factory=lambda: MoGHeadConfig())
+
+    # extra parameters used for compatibility with S2S
     use_unshifthed_prompt: bool = False
+    disable_eos_prediction: bool = False
 
     p_uncond: float = 0.1
     label_smoothing: float = 0.01
@@ -937,7 +940,9 @@ class RVQEARTTSModel(PreTrainedModel):
         )
 
         # Prediction Heads
-        self.lm_head = nn.Linear(self.hidden_size, 2, bias=False)
+        if not self.config.disable_eos_prediction:
+            self.lm_head = nn.Linear(self.hidden_size, 2, bias=False)
+
         self.mog_head = MoGHead(
             hidden_size=self.hidden_size,
             out_size=self.config.latent_size,
@@ -1043,12 +1048,15 @@ class RVQEARTTSModel(PreTrainedModel):
         """Helper to compute all losses for the training step."""
         with torch.autocast(code.device.type, enabled=False):
             # 1. LM Loss (predicting discrete tokens)
-            eos_mask = (~audio_mask) & F.pad(audio_mask[:, :-1], [1, 0])
-            lm_mask = eos_mask | audio_mask
-            lm_target = torch.where(eos_mask, 1, 0)
-            lm_loss = (
-                F.cross_entropy(lm_logits.transpose(1, 2), lm_target, reduction="none") * lm_mask
-            ).sum() / lm_mask.sum().clamp_min(1)
+            if not self.config.disable_eos_prediction:
+                eos_mask = (~audio_mask) & F.pad(audio_mask[:, :-1], [1, 0])
+                lm_mask = eos_mask | audio_mask
+                lm_target = torch.where(eos_mask, 1, 0)
+                lm_loss = (
+                    F.cross_entropy(lm_logits.transpose(1, 2), lm_target, reduction="none") * lm_mask
+                ).sum() / lm_mask.sum().clamp_min(1)
+            else:
+                lm_loss = 0.0
 
             # 2. Continuous & KL Losses (for the MoG head)
             target_mask = (~src_code_mask & tgt_code_mask) & audio_mask.unsqueeze(-1)
@@ -1215,7 +1223,11 @@ class RVQEARTTSModel(PreTrainedModel):
 
         if audio_mask is not None and training:
             # --- Training-specific loss computation ---
-            lm_logits = self.lm_head(hidden_states)
+            if not self.config.disable_eos_prediction:
+                lm_logits = self.lm_head(hidden_states)
+            else:
+                lm_logits = None
+
             mog_input_embeds = self.embed_code(self.depthsum_embedding(src_masked_code))
             if self.config.random_target_masking:
                 mog_input_embeds = mog_input_embeds + self.embed_target_mask((tgt_code_mask.sum(-1) - 1).clamp_min(0))
@@ -1286,8 +1298,12 @@ class RVQEARTTSModel(PreTrainedModel):
 
         # Stack results along time dimension
         generated_codes = torch.stack(generated_codes_cache, dim=1)  # [B, T, ...]
-        lm_logits = torch.stack(lm_logits_cache, dim=1)             # [B, T, vocab_size]
-        eos_flag = torch.stack(eos_flag_cache, dim=1)               # [B, T]
+        if not self.config.disable_eos_prediction:
+            lm_logits = torch.stack(lm_logits_cache, dim=1)             # [B, T, vocab_size]
+            eos_flag = torch.stack(eos_flag_cache, dim=1)               # [B, T]
+        else:
+            lm_logits = None
+            eos_flag = None
 
         return generated_codes, lm_logits, eos_flag
 
@@ -1352,30 +1368,34 @@ class RVQEARTTSModel(PreTrainedModel):
         device = hidden_states.device
 
         # 2. Predict the discrete part of the code
-        if guidance_scale is not None:
-            lm_logits = self.lm_head(hidden_states + guidance_scale[0] * (hidden_states - uncond_hidden_states))
-        else:
-            lm_logits = self.lm_head(hidden_states)
-        if top_p_or_k is not None:
-            lm_logits = (
-                TopPLogitsWarper(top_p_or_k[0])(
-                    None,
-                    lm_logits.view(-1, lm_logits.size(-1)),
-                ).view_as(lm_logits)
-                if isinstance(top_p_or_k[0], float)
-                else TopKLogitsWarper(top_p_or_k[0])(
-                    None,
-                    lm_logits.view(-1, lm_logits.size(-1)),
-                ).view_as(lm_logits)
-            )
-        lm_logits = F.log_softmax(lm_logits, -1)
-        if eos_threshold is not None:
-            eos_flag = lm_logits[..., -1] > eos_threshold
-        else:
-            eos_flag = lm_logits.argmax(-1) == 1
+        if not self.config.disable_eos_prediction:
+            if guidance_scale is not None:
+                lm_logits = self.lm_head(hidden_states + guidance_scale[0] * (hidden_states - uncond_hidden_states))
+            else:
+                lm_logits = self.lm_head(hidden_states)
+            if top_p_or_k is not None:
+                lm_logits = (
+                    TopPLogitsWarper(top_p_or_k[0])(
+                        None,
+                        lm_logits.view(-1, lm_logits.size(-1)),
+                    ).view_as(lm_logits)
+                    if isinstance(top_p_or_k[0], float)
+                    else TopKLogitsWarper(top_p_or_k[0])(
+                        None,
+                        lm_logits.view(-1, lm_logits.size(-1)),
+                    ).view_as(lm_logits)
+                )
+            lm_logits = F.log_softmax(lm_logits, -1)
+            if eos_threshold is not None:
+                eos_flag = lm_logits[..., -1] > eos_threshold
+            else:
+                eos_flag = lm_logits.argmax(-1) == 1
 
-        if torch.all(eos_flag) and ignore_eos_flag_stop:
-            return None, lm_logits, eos_flag
+            if torch.all(eos_flag) and ignore_eos_flag_stop:
+                return None, lm_logits, eos_flag
+        else:
+            lm_logits = None
+            eos_flag = None
 
         # Initialize the full code tensor
         code = torch.zeros((b, t, d), dtype=torch.long, device=device) + self.config.codebook_size
