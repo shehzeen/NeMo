@@ -221,6 +221,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         )  # conver frame rate in fps
         self.source_samples_per_frame = int(self.source_sample_rate//self.source_fps)
         self.target_samples_per_frame = self.audio_codec.config.wav_to_token_ratio
+
         # instanciate eartts model
         self.tts_model = self._load_tts_model(self.cfg)
         self._codebook_size = self.tts_model.config.codebook_size
@@ -918,13 +919,15 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
     def get_init_inputs(self, speaker_audio, speaker_audio_lens, system_prompt=None, user_prompt=None):
         # compute prompt audio size and slice it
-        prompt_audio_size = int(((self.data_cfg.audio_prompt_duration * self.target_sample_rate) // self.target_samples_per_frame) * self.target_samples_per_frame)
+        with fp32_precision():
+            prompt_audio_size = int(((self.data_cfg.audio_prompt_duration * self.target_sample_rate) // self.target_samples_per_frame) * self.target_samples_per_frame)
         prompt_audio = speaker_audio[:, :prompt_audio_size]
         # add a silence in the end to smooth the transition between prompt and audio tokens
         prompt_audio[:, -self.target_samples_per_frame:] = 0
 
         # get prompt audio size
-        prompt_audio_text_pad_size = prompt_audio_size // self.target_samples_per_frame
+        with fp32_precision():
+            prompt_audio_text_pad_size = prompt_audio_size // self.target_samples_per_frame
         
         # get description tokens
         desc_tokens_ids = self.get_system_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
