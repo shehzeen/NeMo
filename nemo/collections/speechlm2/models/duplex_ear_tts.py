@@ -135,7 +135,7 @@ def setup_rvq_audio_codec(model):
     if hasattr(model, "audio_codec") and next(model.audio_codec.parameters()).dtype == torch.float:
         return  # skip if already set up and has the right dtype
     with fp32_precision():
-        model.audio_codec = RVQVAEModel.from_pretrained(model.cfg.pretrained_ae_dir).eval().to(model.device)
+        model.audio_codec = RVQVAEModel.from_pretrained(model.cfg.pretrained_ae_dir, strict=False).eval().to(model.device)
     for p in model.audio_codec.parameters():
         p.requires_grad = False
 
@@ -281,7 +281,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
     def _load_tts_model(self, cfg) -> nn.Module:
         """Load TTS model for RVQ-EAR-TTS."""
         audio_codec = self.audio_codec
-        tts_model = RVQEARTTSModel.from_pretrained(cfg.pretrained_tts_model, RVQEARTTSConfig(**cfg.tts_config))
+        tts_model = RVQEARTTSModel.from_pretrained(cfg.pretrained_tts_model, RVQEARTTSConfig(**cfg.tts_config), strict=False)
         assert callable(tts_model.set_rvq_embs)
         tts_model.set_rvq_embs(torch.stack([x.detach() for x in audio_codec.prvq.mus_list], 0))
         return tts_model
@@ -921,13 +921,22 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # compute prompt audio size and slice it
         with fp32_precision():
             prompt_audio_size = int(((self.data_cfg.audio_prompt_duration * self.target_sample_rate) // self.target_samples_per_frame) * self.target_samples_per_frame)
-        prompt_audio = speaker_audio[:, :prompt_audio_size]
+            B, T = speaker_audio.shape  # [batch, time]
+            if T >= prompt_audio_size:
+                # Just crop if longer
+                prompt_audio = speaker_audio[:, :prompt_audio_size]
+            else:
+                # Repeat along time until we have enough, then crop
+                repeat_factor = (prompt_audio_size + T - 1) // T # ceil division
+                expanded = speaker_audio.repeat(1, repeat_factor)
+                prompt_audio = expanded[:, :prompt_audio_size]
+
         # add a silence in the end to smooth the transition between prompt and audio tokens
         prompt_audio[:, -self.target_samples_per_frame:] = 0
 
         # get prompt audio size
         with fp32_precision():
-            prompt_audio_text_pad_size = prompt_audio_size // self.target_samples_per_frame
+            prompt_audio_text_pad_size = int(prompt_audio_size // self.target_samples_per_frame)
         
         # get description tokens
         desc_tokens_ids = self.get_system_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
