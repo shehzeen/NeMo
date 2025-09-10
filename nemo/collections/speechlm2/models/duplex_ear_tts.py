@@ -783,20 +783,14 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 inputs["subword_ids"][i, l-1:]  # slice each element
                 for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
             ])
-            next_input_text_tokens = torch.stack([
-                inputs["input_text_tokens"][i, l-1:]  # slice each element
-                for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
-            ])
 
             # remove prompt padding from the user audio as autoregressive inference does not return the prompt
             dataset_batch["source_audio"] = dataset_batch["source_audio"][:, -int(next_subword_ids.size(-1)*self.source_samples_per_frame):]
 
-            # ToDo: remove next_input_text_tokens and use the previous next_subword_ids as it
             results["audio"], results["audio_len"] = self.offline_inference(
                 speaker_audio=dataset_batch["speaker_reference_audio"],
                 speaker_audio_lens=dataset_batch["speaker_reference_audio_lens"],
                 next_subword_ids=next_subword_ids,
-                next_input_text_tokens=next_input_text_tokens,
                 formatter=dataset_batch["formatter"][0],
                 # init_inputs=init_inputs,
             )
@@ -1154,7 +1148,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
     def offline_inference(
         self,
         next_subword_ids: torch.Tensor,
-        next_input_text_tokens: torch.Tensor,
         speaker_audio: torch.Tensor,
         speaker_audio_lens: torch.Tensor,
         formatter: str = "",
@@ -1203,12 +1196,20 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
         # init subwork as all ones
         subword_mask = torch.ones(B, max_steps, device=self.device, dtype=torch.bool)
+        # get first context subword_id, that is the last subword_ids from the warmup
+        first_context_subword_id = init_inputs["subword_ids"][:, -1].unsqueeze(-1)
         for i in range(max_steps-1):
             step_start = time.time()
             # current subword id is always seem
             current_subword_id = next_subword_ids[:, i].unsqueeze(-1)
-            # get context_hidden_state it is always one step behind
-            context_subword_id = next_input_text_tokens[:, i].unsqueeze(-1)
+
+            # get context_hidden_state it is always one step behind current_subword_id
+            # for the first step uses the last step from warmup
+            if i == 0:
+                context_subword_id = first_context_subword_id
+            else:
+                context_subword_id = next_subword_ids[:, i-1].unsqueeze(-1)
+
             context_hidden_state = self.embed_tokens(context_subword_id)
 
             # create subword_mask if needed
@@ -1217,7 +1218,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             else:
                 current_subword_mask = subword_mask[:, i].unsqueeze(-1)
 
-            # print(i, current_subword_mask.shape, current_subword_mask.shape)
             # get subword_ids
             inputs = {
                 "code": code,
