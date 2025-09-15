@@ -551,7 +551,13 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
         lang_key = lang_key if lang_key else "en"
         if lang_key not in self._normalizer_cache:
             logging.info(f"Creating normalizer for language: {lang_key}")
-            self._normalizer_cache[lang_key] = Normalizer(input_case="cased", lang=lang_key)
+            try:
+                self._normalizer_cache[lang_key] = Normalizer(input_case="cased", lang=lang_key)
+            except NotImplementedError:
+                logging.warning(
+                    f"Text normalization for language {lang_key} is not implemented. Will not normalize this language."
+                )
+                self._normalizer_cache[lang_key] = None
         return self._normalizer_cache[lang_key]
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
