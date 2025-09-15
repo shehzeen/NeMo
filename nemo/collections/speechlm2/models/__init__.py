@@ -13,12 +13,14 @@
 # limitations under the License.
 from .duplex_s2s_model import DuplexS2SModel
 from .duplex_s2s_speech_decoder_model import DuplexS2SSpeechDecoderModel
+from .duplex_s2s_external_speech_decoder_model import DuplexS2SExternalSpeechDecoderModel
 from .duplex_ear_tts import DuplexEARTTS
 from .salm import SALM
 
 __all__ = [
     'DuplexS2SModel',
     'DuplexS2SSpeechDecoderModel',
+    'DuplexS2SExternalSpeechDecoderModel',
     'SALM',
     'DuplexEARTTS',
 ]

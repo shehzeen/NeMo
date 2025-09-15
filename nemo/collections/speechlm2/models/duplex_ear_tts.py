@@ -208,7 +208,7 @@ def compare_init_dicts(dict1, dict2, atol=1e-5, rtol=1e-3):
 class DuplexEARTTS(LightningModule, HFHubMixin):
     def __init__(self, cfg: dict) -> None:
         assert isinstance(cfg, dict), (
-            "You must pass the config to ContextAwareMagpieTTS as a Python dict to support hyperparameter serialization "
+            "You must pass the config to DuplexEARTTS as a Python dict to support hyperparameter serialization "
             f"in PTL checkpoints (we got: '{type(cfg)=}')."
         )
         super().__init__()
@@ -275,7 +275,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         self._use_tp = False
         if self.cfg.get("pretrained_model", None):
             self.init_model_from_another_checkpoint(self.cfg.pretrained_model)
-
 
     def get_codec_silence_frame_last_one(self):
         audio = torch.zeros(1, 10*self.target_sample_rate).float().to(self.device)
@@ -1065,7 +1064,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # subword_ids = F.pad(input_text_tokens[:, 1:], [0, 1], value=current_subword_id)
         subword_ids = F.pad(input_text_tokens[:, 1:], [0, 1], value=0.0)
 
-
         init_inputs = {
             "code": code[:, :-1],
             "audio_mask": audio_mask.bool()[:, :-1],
@@ -1078,154 +1076,26 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         return init_inputs
 
 
-    def get_init_inputs_as_eartts(
+    def init_model_for_ar_inference(
         self,
-        speaker_audio: torch.Tensor,        # [B, L]
-        speaker_audio_lens: torch.Tensor,   # [B]
-        system_prompt: str | None = None,
-        user_prompt: str | None = None,
-        description: str | None = None,
-    ):
-        """
-        Create batch init_inputs for warmup, fully compatible with prepare_stream_inputs().
-        Truncates the last frame so current_subword_id can be injected during autoregressive inference.
-        """
-        prompt_audio_size = int(((self.data_cfg.audio_prompt_duration * self.target_sample_rate) // self.target_samples_per_frame) * self.target_samples_per_frame)
-        speaker_audio = speaker_audio[:, :prompt_audio_size]
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            B = speaker_audio.size(0)
+        speaker_audio: torch.Tensor,
+        speaker_audio_lens: torch.Tensor,
+        system_prompt: str = None,
+        user_prompt: str = None,
+        guidance_enabled: bool = True,
+        generation_config: dict = None
+    )-> dict[dict, torch.Tensor]:
+        init_inputs = self.get_init_inputs(speaker_audio, speaker_audio_lens, system_prompt=system_prompt, user_prompt=user_prompt)
 
-            # ------------------------------
-            # 1. Encode audio prompt for each batch
-            # ------------------------------
-            token_len_list = []
-            audio_code_list = []
+        if generation_config is None:
+            generation_config = self._get_generation_config(guidance_enabled)
 
-            for b_idx in range(B):
-                wav = speaker_audio[b_idx : b_idx + 1]  # [1, L]
-                if wav.ndim > 1:
-                    wav = wav.mean(0, keepdim=True)
-
-                token_len = math.ceil(wav.size(-1) / self.audio_codec.config.wav_to_token_ratio)
-                pad_len = token_len * self.audio_codec.config.wav_to_token_ratio - wav.size(-1)
-                padded_wav = F.pad(wav, (pad_len, 0)).to(self.device)
-                wav_len = torch.tensor([padded_wav.size(-1)], dtype=torch.long, device=self.device)
-                audio_code, _ = self.audio_codec.encode(padded_wav.unsqueeze(0), wav_len)
-
-                token_len_list.append(token_len)
-                audio_code_list.append(audio_code)
-            max_audio_len = max(token_len_list)
-
-            # ------------------------------
-            # 2. Build prompts
-            # ------------------------------
-            # if self.tokenizer.chat_template is None:
-            #    self.tokenizer.chat_template = default_chat_template
-
-            if system_prompt is None:
-                system_prompt = (
-                    "You engage in conversation with the user. When delivering your response as speech, "
-                    "if the user provides a description such as emotions, scene details, "
-                    "or speaker style, you adjust your speaking style accordingly when delivering the response. "
-                    "However, this description should influence only the delivery of your response, not its content. "
-                    "Your response should remain independent of any stylistic instructions."
-                )
-            if user_prompt is None:
-                user_prompt = "Can you tell me something interesting?"
-
-            messages = [{"role": "system", "content": system_prompt}]
-            full_user_prompt = f"```\n{description}\n```\n\n{user_prompt}" if description else user_prompt
-            messages.append({"role": "user", "content": full_user_prompt})
-            messages.append({"role": "assistant", "content": SCRIPT_PLACEHOLDER})
-
-            non_script_list = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            ).split(SCRIPT_PLACEHOLDER + self.tokenizer.eos_token)[:-1]
-
-            # ------------------------------
-            # 3. Process text tokens + masks
-            # ------------------------------
-            input_ids, aligned_text_mask, aligned_audio_mask = [], [], []
-            for i, non_script in enumerate(non_script_list):
-                desc_ids = self.tokenizer.text_to_ids(non_script) # self.tokenizer.encode(non_script, add_special_tokens=False)
-                if i == 0:
-                    # include EOS after desc
-                    # script_ids = [self.tokenizer.eos_token_id]
-                    script_ids = [self.tokenizer.eos]
-                    desc_len, text_len = len(desc_ids), len(desc_ids) + len(script_ids)
-                    audio_len = desc_len + max_audio_len
-                    input_ids.extend(desc_ids + script_ids)
-                    aligned_text_mask.extend([1] * text_len + [0] * (audio_len - text_len))
-                    aligned_audio_mask.extend([0] * (desc_len - 1) + [1] * (audio_len - desc_len) + [0])
-                else:
-                    desc_len = len(desc_ids)
-                    input_ids.extend(desc_ids)
-                    aligned_text_mask.extend([1] * desc_len)
-                    aligned_audio_mask.extend([0] * (desc_len - 1) + [1])
-
-            input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device).view(1, -1).repeat(B, 1)
-            aligned_text_mask = torch.tensor(aligned_text_mask, dtype=torch.bool, device=self.device).view(1, -1).repeat(B, 1)
-            aligned_audio_mask = torch.tensor(aligned_audio_mask, dtype=torch.bool, device=self.device).view(1, -1).repeat(B, 1)
-
-            b, t = aligned_text_mask.size()
-
-            # ------------------------------
-            # 4. Align audio codes per batch
-            # ------------------------------
-            aligned_code = torch.full(
-                (B, t, self.tts_model.config.num_quantizers),
-                self.tts_model.config.codebook_size,
-                dtype=torch.long,
-                device=self.device,
-            )
-
-            for i in range(B):
-                print(aligned_code.shape, aligned_audio_mask.shape)
-                aligned_code[i].masked_scatter_(
-                    F.pad(aligned_audio_mask[i][:-1], [0, 1]).unsqueeze(-1),
-                    audio_code_list[i]
-                )
-
-            # ------------------------------
-            # 5. Align LM hidden states
-            # ------------------------------
-            inputs_embeds = self.embed_tokens(input_ids)
-            lm_hidden_state = inputs_embeds
-
-            aligned_lm_hidden_state = torch.zeros(
-                (B, t, lm_hidden_state.size(2)),
-                dtype=lm_hidden_state.dtype,
-                device=self.device
-            )
-            aligned_input_ids = torch.zeros((B, t), dtype=input_ids.dtype, device=self.device)
-            for i in range(B):
-                aligned_lm_hidden_state[i].masked_scatter_(aligned_text_mask[i].unsqueeze(-1), lm_hidden_state[i])
-                aligned_input_ids[i].masked_scatter_(aligned_text_mask[i], input_ids[i])
-
-            # ------------------------------
-            # 6. Subword ids + masks
-            # ------------------------------
-            subword_ids = F.pad(aligned_input_ids[:, 1:], [0, 1], value=self.text_pad_id)
-            subword_mask = torch.logical_and(
-                F.pad(aligned_text_mask[:, 1:], [0, 1], value=True),
-                aligned_audio_mask,
-            )
-
-            # ------------------------------
-            # 7. Truncate last frame
-            # ------------------------------
-            init_inputs = {
-                "code": aligned_code[:, :-1],
-                "audio_mask": aligned_audio_mask[:, :-1],
-                "context_hidden_state": aligned_lm_hidden_state[:, :-1],
-                "subword_ids": subword_ids[:, :-1],
-                "subword_mask": subword_mask[:, :-1],
-                "non_prompt_mask": torch.zeros_like(aligned_text_mask[:, :-1]),  # warmup = all prompt
-            }
-            return init_inputs
-
+        init_inputs.update({"use_cache": True, "past_key_values": None, "guidance_enabled": guidance_enabled})
+        # warmup the model and generate the very first audio token
+        outputs = self.tts_model(**init_inputs)
+        code, _, _ = self.tts_model.generate_step(outputs.hidden_states[:, -1:], **generation_config)
+        past_key_values = outputs.past_key_values
+        return init_inputs, code, past_key_values
 
     @torch.no_grad()
     def offline_inference(
@@ -1257,11 +1127,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 * "audio": generated waveform of shape (B, T3) (`decode_audio=True`).
                 * "audio_len" output lengths as number of waveform samples of shape (B,) (when `decode_audio=True`).
         """
-        B = speaker_audio.size(0)
+        B = next_subword_ids.size(0)
 
-        # init model
+        # init_inputs, code, past_key_values = self.init_model_for_ar_inference(speaker_audio=speaker_audio, speaker_audio_lens=speaker_audio_lens, system_prompt=system_prompt, user_prompt=user_prompt, guidance_enabled=guidance_enabled, generation_config=generation_config)
+
         init_inputs = self.get_init_inputs(speaker_audio, speaker_audio_lens, system_prompt=system_prompt, user_prompt=user_prompt)
-        # init_inputs = self.get_init_inputs_as_eartts(speaker_audio, speaker_audio_lens, system_prompt=system_prompt, user_prompt=user_prompt)
 
         if generation_config is None:
             generation_config = self._get_generation_config(guidance_enabled)
@@ -1271,7 +1141,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         outputs = self.tts_model(**init_inputs)
         code, _, _ = self.tts_model.generate_step(outputs.hidden_states[:, -1:], **generation_config)
         past_key_values = outputs.past_key_values
-        # print(code.shape, code)
+
         # use the text tokens to stop generation
         max_steps = next_subword_ids.size(-1)
         # create variable to store the audios
