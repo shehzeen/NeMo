@@ -98,6 +98,7 @@ class ResultsLogger:
         pred_audio_sr: int,
         user_audio: torch.Tensor,
         user_audio_sr: int,
+        target_audio: torch.Tensor = None,
         pred_audio_tf: torch.Tensor = None,
         pre_audio_trimmed: torch.Tensor = None,
         eou_pred: torch.Tensor = None,
@@ -118,6 +119,10 @@ class ResultsLogger:
             if pred_audio_tf is not None:
                 out_audio_path_tf = out_audio_path.replace(".wav", "_tf.wav")
                 self.merge_and_save_audio(out_audio_path_tf, pred_audio_tf[i], pred_audio_sr, user_audio[i], user_audio_sr)
+
+            if target_audio is not None:
+                out_audio_path_gt = out_audio_path.replace(".wav", "_GT.wav")
+                self.merge_and_save_audio(out_audio_path_gt, target_audio[i], pred_audio_sr, user_audio[i], user_audio_sr)
 
             # create a wav with eou prediction for debug purposes
             if eou_pred is not None:

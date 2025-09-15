@@ -77,6 +77,30 @@ from types import SimpleNamespace
 from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig
 from nemo.collections.speechlm2.modules.rvq_ear_tts_vae import RVQVAEModel
 
+def generate_multiturn_speaking_mask(input_ids: torch.Tensor, bos_token_id: int = 0, eos_token_id: int = 1):
+    """
+    Efficient, batched speaking mask generator that marks 1 between <bos> and <eos> pairs.
+    If <eos> is missing after a <bos>, mask continues to end. Handles multiple turns.
+
+    Args:
+        input_ids (torch.Tensor): LongTensor of shape (B, T)
+        bos_token_id (int): Token ID for <bos>
+        eos_token_id (int): Token ID for <eos>
+
+    Returns:
+        torch.Tensor: FloatTensor of shape (B, T), with 1.0 for speaking, 0.0 for silence.
+
+    Note BOS is considered as speaking (1) and EOS as non speaking 0
+    """
+    B, T = input_ids.shape
+    device = input_ids.device
+    bos_mask = (input_ids == bos_token_id).to(torch.int32).to(device)
+    eos_mask = (input_ids == eos_token_id).to(torch.int32).to(device)
+    bos_cumsum = torch.cumsum(bos_mask, dim=1)
+    eos_cumsum = torch.cumsum(eos_mask, dim=1)
+    speaking_mask = (bos_cumsum > eos_cumsum).to(torch.float32)
+    return speaking_mask.long()
+
 
 def replace_control_speech_codes(speech_codes: torch.Tensor, control_codes: torch.Tensor, silence_tokens: torch.Tensor = None) -> torch.Tensor:
     """
@@ -225,6 +249,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # instanciate eartts model
         self.tts_model = self._load_tts_model(self.cfg)
         self._codebook_size = self.tts_model.config.codebook_size
+
+        # get codec silence tokens
         self.codec_silence_tokens = self.get_codec_silence_frame()
 
         # Load tokenizer
@@ -251,7 +277,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             self.init_model_from_another_checkpoint(self.cfg.pretrained_model)
 
 
-    def get_codec_silence_frame(self):
+    def get_codec_silence_frame_last_one(self):
         audio = torch.zeros(1, 10*self.target_sample_rate).float().to(self.device)
         audio_len = torch.tensor([audio.size(-1)]).long()
         audio, audio_len = self.pad_audio_to_factor(audio, audio_len, self.target_samples_per_frame)
@@ -261,6 +287,30 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     audio.unsqueeze(1), audio_len
                 )
             return sil_codes[0, -1]
+
+    def get_codec_silence_frame(self):
+        from collections import Counter
+
+        # Generate long zero waveform (silence)
+        audio = torch.zeros(1, 10 * self.target_sample_rate).float().to(self.device)
+        audio_len = torch.tensor([audio.size(-1)]).long()
+        audio, audio_len = self.pad_audio_to_factor(audio, audio_len, self.target_samples_per_frame)
+
+        with fp32_precision(), torch.no_grad():
+            sil_codes, _ = self.audio_codec.encode(audio.unsqueeze(1), audio_len)  # [1, T, C]
+            sil_codes = sil_codes[0]  # [T, C]
+
+        # Convert each frame (C tokens) into a tuple
+        combos = [tuple(row.tolist()) for row in sil_codes]
+
+        # Count frequencies
+        counter = Counter(combos)
+
+        # Pick the most common combination
+        most_common_combo, freq = counter.most_common(1)[0]
+
+        # Return as tensor [C]
+        return torch.tensor(most_common_combo, device=self.device, dtype=torch.long)
 
     def _load_embed_tokens(self, cfg) -> nn.Embedding:
         """Load token embedding layer for RVQ-EAR-TTS."""
@@ -581,6 +631,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 for i, l in enumerate(batch["desc_lens"]):
                     reconstructed_audio_from_tokens[i, :l*self.target_samples_per_frame] = 0.0
 
+            # Uses batch["input_text_tokens"] instead of subword_ids, because in subword_ids the first prompt BOS is replace, so it will breaks the generate_multiturn_speaking_mask
+            eou_labels = generate_multiturn_speaking_mask(
+                batch["input_text_tokens"], bos_token_id=self.text_bos_id, eos_token_id=self.text_eos_id
+            )
+
             for i in range(target_codes_aligned_.shape[0]):
                 write_wave(
                     batch["target_audio"][i],
@@ -606,6 +661,17 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     sr=self.target_sample_rate,
                 )
 
+                repeat_factor = int(self.target_sample_rate / self.target_fps)
+                eou_wav = (
+                    eou_labels[i].unsqueeze(0).unsqueeze(-1).repeat(1, 1, repeat_factor)
+                )  # (B, T, repeat_factor)
+                eou_wav = eou_wav.view(1, -1)  # (B, T * repeat_factor)
+                eou_wav = eou_wav.float() * 0.8  #  make 1 audible and keep 0 as total silence
+                write_wave(
+                    eou_wav.squeeze(),
+                    os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"eou_{i}.wav"),
+                    sr=self.target_sample_rate,
+                )
 
             print(
                 "target labels from dataloader decoded:",
@@ -616,6 +682,13 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     pad_id=self.text_pad_id,
                 ),
             )
+            text_labels = batch["input_text_tokens"]
+            num_bos_tokens = (text_labels.unsqueeze(-1) == self.text_bos_id).flatten(1, 2).sum(-1)
+            # Count how many EOS tokens are present per sequence
+            # Shape: [B]
+            num_eos_tokens = (text_labels.unsqueeze(-1) == self.text_eos_id).flatten(1, 2).sum(-1)
+            print("Num eos:", num_eos_tokens, "num bos:", num_bos_tokens)
+
             print(batch["formatter"])
             if target_codes_aligned_.shape[0] > 1:
                 exit()
@@ -797,8 +870,12 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
             results["audio_tf"], results["audio_tf_len"] = self.get_teacher_force_inference_audio(dataset_batch)
             # clean prompt from the audio
-            for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"]):
-                results["audio_tf"][i, :l*self.target_samples_per_frame] = 0.0
+            results["audio_tf"] = results["audio_tf"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
+            # remove prompt from target audio
+            target_audio_no_prompt = dataset_batch["target_audio"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
+
+            # for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"]):
+            #    results["audio_tf"][i, :l*self.target_samples_per_frame] = 0.0
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
                 metric_audio_pred = results["audio"]
@@ -830,6 +907,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
                     pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
                 )
+
+                eou_labels = generate_multiturn_speaking_mask(
+                    next_subword_ids, bos_token_id=self.text_bos_id, eos_token_id=self.text_eos_id
+                )
+
                 self.results_logger.update(
                     name=name,
                     refs=dataset_batch["target_texts"],
@@ -840,10 +922,11 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     pred_audio_tf=results["audio_tf"],
                     pre_audio_trimmed=None,
                     reference_audio=dataset_batch["speaker_reference_audio"],
+                    target_audio=target_audio_no_prompt,
                     pred_audio_sr=self.target_sample_rate,
                     user_audio=dataset_batch["source_audio"],
                     user_audio_sr=self.source_sample_rate,
-                    eou_pred=None,
+                    eou_pred=eou_labels,
                     fps=self.target_fps,
                     results=results if self.cfg.get("dump_tokens_text", False) else None,
                     tokenizer=self.tokenizer,
@@ -1202,7 +1285,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             step_start = time.time()
             # current subword id is always seem
             current_subword_id = next_subword_ids[:, i].unsqueeze(-1)
-
             # get context_hidden_state it is always one step behind current_subword_id
             # for the first step uses the last step from warmup
             if i == 0:
@@ -1235,7 +1317,18 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
             code = outputs.codes
             past_key_values = outputs.past_key_values
+            # ToDo: check why it is -1
             gen_audio_codes[:, i-1] = code.squeeze(1)
+
+            # force silence as next token 
+            if self.cfg.get('inference_force_speech_silence_on_eos', None):
+                silence_codes = self.codec_silence_tokens.view(1, 1, -1).expand(code.shape)
+                code = torch.where(
+                    current_subword_id.unsqueeze(-1) == self.text_eos_id,
+                    silence_codes,  # silence
+                    code,  # keep original
+                )
+
             step_time = time.time()-step_start
             logging.info(f"Autoregressive inference step: {i} of {max_steps} take around {step_time}s")
 
