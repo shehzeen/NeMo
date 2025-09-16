@@ -59,6 +59,8 @@ from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, NeuralT
 from nemo.utils import logging
 
 
+from nemo.collections.speechlm2.models.duplex_ear_tts import DuplexEARTTS
+
 def delay_eos(tokens, eos_token_id, pad_token_id, shift=10):
     """
     Delays each EOS token by `shift` steps forward. Replaces original EOS with PAD.
@@ -197,7 +199,6 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
         # move back text channel by x, in inference it advance the text channel prediction by x frames
         self.advance_text_channel_by = self.cfg.get("advance_text_channel_by", None)
 
-        from nemo.collections.speechlm2.models.duplex_ear_tts import DuplexEARTTS
         self.tts_model = DuplexEARTTS(OmegaConf.to_container(self.cfg.speech_generation, resolve=True))
 
         self.target_fps = self.tts_model.target_fps
@@ -813,12 +814,11 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
 
 
         # Init external Duplex TTS model
-        from nemo.collections.audio.parts.utils.resampling import resample
         generation_config = None
         guidance_enabled = True
 
         # create speaker audio for init
-        speaker_audio, sr = torchaudio.load(self.cfg.speech_decoder.inference_speaker_reference)
+        speaker_audio, sr = torchaudio.load(self.cfg.inference_speaker_reference)
         speaker_audio = resample(speaker_audio, sr, self.tts_model.target_sample_rate)
         speaker_audio = speaker_audio.repeat(B, 1).to(self.device) 
         # lengths -> [B]
@@ -897,7 +897,7 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
                     silence_codes,  # silence
                     code,  # keep original
                 )
-            
+
             logging.info(f"Autoregressive inference step: {t} of {T} !")
 
         # Trim back to local length if padded
