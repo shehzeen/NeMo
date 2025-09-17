@@ -14,6 +14,7 @@
 import re
 
 import torch
+import torch.nn.functional as F
 import torch.utils.data
 import torchaudio
 import random
@@ -166,6 +167,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         add_text_bos_and_eos_in_each_turn: bool = False,
         add_audio_prompt_after_description: bool = False,
         audio_prompt_duration: float = 3.0,
+        num_delay_speech_tokens: int = 1,
     ):
         self.tokenizer = tokenizer
         self.frame_length = frame_length
@@ -178,6 +180,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         self.add_text_bos_and_eos_in_each_turn = add_text_bos_and_eos_in_each_turn
         self.add_audio_prompt_after_description = add_audio_prompt_after_description
         self.audio_prompt_duration = audio_prompt_duration
+        self.num_delay_speech_tokens = num_delay_speech_tokens
         
         assert tokenizer.bos is not None, "BOS support in the tokenizer is required for S2S models."
         assert tokenizer.eos is not None, "EOS support in the tokenizer is required for S2S models."
@@ -266,16 +269,30 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         # ensures that input_text_tokens is not longer than its duration
         input_text_tokens = input_text_tokens[:, :target_token_lens.max()]
 
+        source_fps = self.source_sample_rate / (
+            self.source_sample_rate * self.frame_length
+        )
+        source_samples_per_frame = int(self.source_sample_rate//source_fps)
+        target_fps = self.target_sample_rate / (
+            self.target_sample_rate * self.frame_length
+        )
+        target_samples_per_frame = int(self.target_sample_rate//target_fps)
+
+        # one is default and we add BOS on speech channel to ensures it, inside of the model class, so if we want bigger than that we can add padding in the audio here
+        if self.num_delay_speech_tokens > 1:
+            # compute the padding need in target audio for the number of delay tokens
+            extra_frames = int((self.num_delay_speech_tokens - 1) * target_samples_per_frame)
+            # left pad target audio to create the delay and make the model to predict silence while consuming self.num_delay_speech_tokens text tokens
+            target_audio = F.pad(target_audio, (extra_frames, 0))
+            target_audio_lens = target_audio_lens + extra_frames
+
+            # right pad the source audio to avoid size mismatch
+            extra_frames = int((self.num_delay_speech_tokens - 1) * source_samples_per_frame)
+            source_audio = F.pad(source_audio, (0, extra_frames))
+            source_audio_lens = source_audio_lens + extra_frames
+
         if self.add_description:
             text_pad_id = get_pad_id(self.tokenizer)
-            source_fps = self.source_sample_rate / (
-                self.source_sample_rate * self.frame_length
-            )
-            source_samples_per_frame = int(self.source_sample_rate//source_fps)
-            target_fps = self.target_sample_rate / (
-                self.target_sample_rate * self.frame_length
-            )
-            target_samples_per_frame = int(self.target_sample_rate//target_fps)
             input_text_tokens_ = []
             source_tokens_ = []
             source_audio_ = []

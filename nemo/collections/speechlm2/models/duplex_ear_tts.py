@@ -225,10 +225,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # move back text channel by x, in inference it advance the text channel prediction by x frames
         self.advance_text_channel_by = self.cfg.get("advance_text_channel_by", None)
 
-        # tts general configs
-        self.num_delay_tokens = self.cfg.get("num_delay_tokens", 1) # delay between text input and speech output
-
-
         # Load ForCausalLM
         self.language_model = self._load_language_model(self.cfg)
         self.embed_tokens = self._load_embed_tokens(self.cfg)
@@ -329,10 +325,14 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
     def _load_tts_model(self, cfg) -> nn.Module:
         """Load TTS model for RVQ-EAR-TTS."""
-        audio_codec = self.audio_codec
-        tts_model = RVQEARTTSModel.from_pretrained(cfg.pretrained_tts_model, RVQEARTTSConfig(**cfg.tts_config), strict=False)
+        if self.cfg.get("pretrained_tts_model", None):
+            tts_model = RVQEARTTSModel.from_pretrained(cfg.pretrained_tts_model, RVQEARTTSConfig(**cfg.tts_config), strict=False)
+        else:
+            # start the model from scratch
+            tts_model = RVQEARTTSModel(RVQEARTTSConfig(**cfg.tts_config))
+
         assert callable(tts_model.set_rvq_embs)
-        tts_model.set_rvq_embs(torch.stack([x.detach() for x in audio_codec.prvq.mus_list], 0))
+        tts_model.set_rvq_embs(torch.stack([x.detach() for x in self.audio_codec.prvq.mus_list], 0))
         return tts_model
 
     def _load_language_model(self, cfg):
@@ -484,7 +484,6 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             target_codes, target_codes_lens = self.audio_codec.encode(
                 target_audio.unsqueeze(1), target_audio_lens
             )
-
 
         # ToDo: consider use the source audio
         """
