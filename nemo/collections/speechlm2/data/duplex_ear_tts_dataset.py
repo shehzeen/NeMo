@@ -167,7 +167,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         add_text_bos_and_eos_in_each_turn: bool = False,
         add_audio_prompt_after_description: bool = False,
         audio_prompt_duration: float = 3.0,
-        num_delay_speech_tokens: int = 1,
+        num_delay_speech_tokens: int = 0,
     ):
         self.tokenizer = tokenizer
         self.frame_length = frame_length
@@ -279,15 +279,15 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         target_samples_per_frame = int(self.target_sample_rate//target_fps)
 
         # one is default and we add BOS on speech channel to ensures it, inside of the model class, so if we want bigger than that we can add padding in the audio here
-        if self.num_delay_speech_tokens > 1:
+        if self.num_delay_speech_tokens:
             # compute the padding need in target audio for the number of delay tokens
-            extra_frames = int((self.num_delay_speech_tokens - 1) * target_samples_per_frame)
+            extra_frames = int(self.num_delay_speech_tokens * target_samples_per_frame)
             # left pad target audio to create the delay and make the model to predict silence while consuming self.num_delay_speech_tokens text tokens
             target_audio = F.pad(target_audio, (extra_frames, 0))
             target_audio_lens = target_audio_lens + extra_frames
 
             # right pad the source audio to avoid size mismatch
-            extra_frames = int((self.num_delay_speech_tokens - 1) * source_samples_per_frame)
+            extra_frames = int(self.num_delay_speech_tokens * source_samples_per_frame)
             source_audio = F.pad(source_audio, (0, extra_frames))
             source_audio_lens = source_audio_lens + extra_frames
 

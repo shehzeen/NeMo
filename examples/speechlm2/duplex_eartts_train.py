@@ -50,7 +50,7 @@ def train(cfg):
         add_text_bos_and_eos_in_each_turn=cfg.data.add_text_bos_and_eos_in_each_turn,
         add_audio_prompt_after_description=cfg.data.add_audio_prompt_after_description,
         audio_prompt_duration=cfg.data.audio_prompt_duration,
-        num_delay_speech_tokens=cfg.model.get("num_delay_speech_tokens", 1),
+        num_delay_speech_tokens=cfg.model.get("num_delay_speech_tokens", 0),
     )
     datamodule = DataModule(cfg.data, tokenizer=model.tokenizer, dataset=dataset)
 
