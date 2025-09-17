@@ -238,9 +238,6 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
         if self.cfg.get("pretrained_s2s_model", None):
             if os.path.isdir(self.cfg.pretrained_s2s_model):
                 # Hugging Face format
-                # if this does not work try https://gist.github.com/Narsil/3edeec2669a5e94e4707aa0f901d2282
-                # model = DuplexS2SExternalSpeechDecoderModel.from_pretrained(self.cfg.pretrained_s2s_model, strict=False)
-                # self.load_state_dict(model.state_dict(), strict=True)
                 state_dict = load_file(os.path.join(self.cfg.pretrained_s2s_model, "model.safetensors"))
                 self.load_state_dict(state_dict, strict=False)
             else:
