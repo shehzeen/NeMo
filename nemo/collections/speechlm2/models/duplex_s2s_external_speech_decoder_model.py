@@ -49,6 +49,7 @@ from nemo.collections.speechlm2.parts.metrics.results_logger import ResultsLogge
 from nemo.collections.speechlm2.parts.metrics.token_accuracy import TokenAccuracy
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
 from nemo.collections.speechlm2.parts.precision import fp32_precision
+from safetensors.torch import load_file
 from nemo.collections.speechlm2.parts.pretrained import (
     load_pretrained_hf,
     set_model_dict_for_partial_init,
@@ -198,9 +199,9 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
 
         # move back text channel by x, in inference it advance the text channel prediction by x frames
         self.advance_text_channel_by = self.cfg.get("advance_text_channel_by", None)
-
+        
+        # if self.cfg.get("speech_generation", None):
         self.tts_model = DuplexEARTTS(OmegaConf.to_container(self.cfg.speech_generation, resolve=True))
-
         self.target_fps = self.tts_model.target_fps
 
         # compute source fps
@@ -235,7 +236,15 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
         setup_speech_encoder(self)
 
         if self.cfg.get("pretrained_s2s_model", None):
-            self.init_from_model_from_ckpt(self.cfg.pretrained_s2s_model)
+            if os.path.isdir(self.cfg.pretrained_s2s_model):
+                # Hugging Face format
+                # if this does not work try https://gist.github.com/Narsil/3edeec2669a5e94e4707aa0f901d2282
+                # model = DuplexS2SExternalSpeechDecoderModel.from_pretrained(self.cfg.pretrained_s2s_model, strict=False)
+                # self.load_state_dict(model.state_dict(), strict=True)
+                state_dict = load_file(os.path.join(self.cfg.pretrained_s2s_model, "model.safetensors"))
+                self.load_state_dict(state_dict, strict=False)
+            else:
+                self.init_from_model_from_ckpt(self.cfg.pretrained_s2s_model)
 
         self._use_fsdp = False
         self._use_tp = False
@@ -852,14 +861,13 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
             
             # do inference on external TTS model
             # current subword id is always seem
-            i = t
-            current_subword_id = gen_text[:, i].unsqueeze(-1)
+            current_subword_id = gen_text[:, t].unsqueeze(-1)
             # get context_hidden_state it is always one step behind current_subword_id
             # for the first step uses the last step from warmup
-            if i == 0:
+            if t == 0:
                 context_subword_id = first_context_subword_id
             else:
-                context_subword_id = gen_text[:, i-1].unsqueeze(-1)
+                context_subword_id = gen_text[:, t-1].unsqueeze(-1)
 
             context_hidden_state = self.tts_model.embed_tokens(context_subword_id)
 
@@ -867,7 +875,7 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
             if self.tts_model.cfg.subword_mask_exactly_as_eartts:
                 current_subword_mask = (current_subword_id != self.tts_model.text_pad_id).bool()
             else:
-                current_subword_mask = subword_mask[:, i].unsqueeze(-1)
+                current_subword_mask = subword_mask[:, t].unsqueeze(-1)
 
             # get subword_ids
             inputs = {
