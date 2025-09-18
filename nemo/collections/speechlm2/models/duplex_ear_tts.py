@@ -250,7 +250,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         self.codec_silence_tokens = self.get_codec_silence_frame()
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True) # Note that we are using fast tokenizer
+        self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True) # Note that we are using fast tokenizer
 
         if 'Qwen2.5' in self.cfg.pretrained_lm_name:
             # For Qwen, '<|im_start|>' is a common choice for a BOS token.
@@ -338,7 +338,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
     def _load_language_model(self, cfg):
         """Load language model for RVQ-EAR-TTS."""
         if cfg.pretrained_lm_name:
-            language_model = load_pretrained_hf(self.cfg.pretrained_lm_name, pretrained_weights=True).eval()
+            language_model = load_pretrained_hf(self.cfg.pretrained_lm_name, pretrained_weights=True, trust_remote_code=True).eval()
         else:
             language_model = None
         return language_model

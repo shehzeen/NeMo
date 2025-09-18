@@ -494,7 +494,7 @@ def build_vocabs(
             - The character-to-ID vocabulary dictionary.
             - The ID for the subword padding token.
     """
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_tokenizer_name, trust_remote_code=True)
 
     def _build_char_vocab() -> dict[str, int]:
         # Find all single-character tokens in the original tokenizer's vocabulary

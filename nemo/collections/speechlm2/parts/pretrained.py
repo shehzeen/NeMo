@@ -39,7 +39,7 @@ def load_pretrained_nemo(cls, model_path_or_name: str):
         return cls.from_pretrained(model_path_or_name)
 
 
-def load_pretrained_hf(model_path_or_name: str, pretrained_weights: bool = True, dtype=torch.float32):
+def load_pretrained_hf(model_path_or_name: str, pretrained_weights: bool = True, dtype=torch.float32, trust_remote_code: bool = False):
     """
     Load pretrained HuggingFace AutoModelForCausalLM.
 
@@ -47,7 +47,7 @@ def load_pretrained_hf(model_path_or_name: str, pretrained_weights: bool = True,
     but is randomly initialized.
     """
     if pretrained_weights:
-        return AutoModelForCausalLM.from_pretrained(model_path_or_name, torch_dtype=dtype)
+        return AutoModelForCausalLM.from_pretrained(model_path_or_name, torch_dtype=dtype, trust_remote_code=trust_remote_code)
     else:
         config = AutoConfig.from_pretrained(model_path_or_name)
         return AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
