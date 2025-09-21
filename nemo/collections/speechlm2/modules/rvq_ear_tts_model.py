@@ -393,6 +393,7 @@ class RVQEARTTSConfig(Config):
     use_unshifthed_prompt: bool = False
     disable_eos_prediction: bool = False
     use_phonemes: bool = False
+    use_char_tokenizer: bool = False
 
     p_uncond: float = 0.1
     label_smoothing: float = 0.01
@@ -900,6 +901,7 @@ class CharAwareSubwordEncoder(nn.Module):
         backbone_config_class: str | None = None,
         backbone_config: Config | None = None,
         use_phonemes: bool = False,
+        use_char_tokenizer: bool = False,
     ):
         super().__init__()
 
@@ -915,6 +917,7 @@ class CharAwareSubwordEncoder(nn.Module):
 
         self.char_padding_idx = len(self.char_vocab)
 
+        self.use_char_tokenizer = use_char_tokenizer
         # 2. Initialize the backbone model
         if backbone_type:
             config = AutoConfig.for_model(backbone_type, **(backbone_config.to_dict() if backbone_config else {}))
@@ -963,6 +966,14 @@ class CharAwareSubwordEncoder(nn.Module):
 
         return char_ids, char_lengths
 
+    def forward_char_tokenizer(self, char_ids: Tensor, char_mask: Tensor | None = None) -> Tensor:
+        # 2. Get character embeddings and pass them through the backbone
+        char_embeds = self.embed_tokens(char_ids)
+        # The backbone model should be able to accept `inputs_embeds`
+        char_hidden_states = self.backbone(inputs_embeds=char_embeds, attention_mask=char_mask).last_hidden_state
+        out_emb = self.proj_embedding(char_hidden_states)
+        return out_emb
+
     def forward(self, subword_ids: Tensor, subword_mask: Tensor | None = None) -> Tensor:
         """
         Performs the forward pass to get character-aware subword embeddings.
@@ -977,11 +988,14 @@ class CharAwareSubwordEncoder(nn.Module):
         if subword_mask is None:
             subword_mask = torch.ones_like(subword_ids, dtype=torch.bool)
 
+        if self.use_char_tokenizer:
+            return self.forward_char_tokenizer(subword_ids, subword_mask)
+
         # 1. Convert subword IDs to character IDs
         char_ids, char_lengths = self.prepare_inputs(subword_ids, subword_mask)
+
         # char_mask = sequence_mask(char_lengths).float()
         char_mask = sequence_mask(char_lengths)
-
 
         # 2. Get character embeddings and pass them through the backbone
         char_embeds = self.embed_tokens(char_ids)
@@ -1052,7 +1066,7 @@ class RVQEARTTSModel(PreTrainedModel):
             else None
         )
         self.embed_subword = (
-            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, **self.config.cas_config)
+            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, **self.config.cas_config)
             if self.config.cas_config
             else None
         )
@@ -1357,7 +1371,7 @@ class RVQEARTTSModel(PreTrainedModel):
             )
             total_loss = lm_loss + c_loss + k_loss
 
-            return RVQEARTTSOutput(loss=total_loss, lm_loss=lm_loss, c_loss=c_loss, k_loss=k_loss)
+            return RVQEARTTSOutput(loss=total_loss, lm_loss=lm_loss, c_loss=c_loss, k_loss=k_loss, hidden_states=hidden_states)
         else:  # Inference
             if not generation_config:
                 return RVQEARTTSOutput(
