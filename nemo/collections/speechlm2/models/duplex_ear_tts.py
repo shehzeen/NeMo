@@ -77,6 +77,8 @@ from types import SimpleNamespace
 from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig, build_vocabs
 from nemo.collections.speechlm2.modules.rvq_ear_tts_vae import RVQVAEModel
 
+torch.backends.cudnn.allow_tf32 = False
+
 def generate_multiturn_speaking_mask(input_ids: torch.Tensor, bos_token_id: int = 0, eos_token_id: int = 1):
     """
     Efficient, batched speaking mask generator that marks 1 between <bos> and <eos> pairs.
@@ -426,7 +428,6 @@ def subwords_to_chars(subword_ids: torch.Tensor,
     return output
 
 
-
 def subwords_to_chars_batched(subword_ids: torch.Tensor,
                               subword_id_to_char_ids: dict[int, tuple[int, ...]],
                               bos_id: int,
@@ -526,7 +527,6 @@ def subwords_to_chars_batched(subword_ids: torch.Tensor,
     output[target_batches, target_positions] = kept_values
 
     return output
-
 
 
 def build_char_expansion_lut(subword_id_to_char_ids: dict[int, tuple[int, ...]],
@@ -640,6 +640,115 @@ def subwords_to_chars_batched_fast(subword_ids: torch.Tensor,
     return output
 
 
+class WordSepTokenizer(AutoTokenizer):
+    """
+    Tokenizer wrapper that inserts a special word-separator token before each token 
+    that starts a new word. This is useful for Speech-LLM and TTS pipelines 
+    that require explicit word boundaries in the token sequence.
+
+    Supported models:
+        - LLaMA-3.1-family
+        - NVIDIA Nemotron Nano-9B-v2
+
+    Attributes:
+        word_sep_token (str): The special token used to mark word boundaries.
+        word_boundary_prefix (str): The token prefix indicating a word boundary.
+        word_sep_id (int): The token ID corresponding to `word_sep_token`.
+    """
+
+    def __init__(self, model_name: str, *args, **kwargs):
+        """
+        Initializes the WordSepTokenizer.
+
+        Args:
+            model_name (str): Name of the model to load. Determines the special 
+                              word-separator token and word boundary prefix.
+            *args: Additional positional arguments passed to the base `AutoTokenizer`.
+            **kwargs: Additional keyword arguments passed to the base `AutoTokenizer`.
+
+        Raises:
+            ValueError: If `model_name` is not supported.
+        """
+        super().__init__(model_name, *args, **kwargs)
+
+        model_name_lower = model_name.lower()
+        if "llama-3.1" in model_name_lower:
+            self.word_sep_token = "<|reserved_special_token_0|>"
+            self.word_boundary_prefix = "Ġ"
+        elif "qwen2.5" in model_name_lower:
+            self.word_sep_token = "<|box_start|>"
+            self.word_boundary_prefix = "Ġ"
+        elif "nvidia-nemotron-nano-9b-v2" in model_name_lower:
+            self.word_sep_token = "<SPECIAL_10>"
+            self.word_boundary_prefix = "Ġ"
+        else:
+            raise ValueError(
+                f"WordSepTokenizer does not support model '{model_name}'. "
+                "Supported: LLaMA-3.1-family, NVIDIA Nemotron Nano-9B-v2."
+            )
+
+        self.word_sep_id = self.tokenizer.convert_tokens_to_ids(self.word_sep_token)
+
+    def text_to_ids(self, text: str):
+        """
+        Converts input text into token IDs, inserting the word-separator ID 
+        before tokens that start a new word.
+
+        Args:
+            text (str): Input string to tokenize.
+
+        Returns:
+            List[int]: Token IDs with word-separator IDs inserted.
+
+        Notes:
+            - If `text` is empty or tokenization returns no tokens, returns an empty list.
+            - The first token separator (if any) is removed to avoid leading separators.
+        """
+        if not text:
+            return []
+
+        # ensures that first word has a space to avoid different tokens for the first word
+        if text[0] != " ":
+            text = " " + text
+
+        # Original token IDs
+        ids = super().text_to_ids(text)
+        if not ids:
+            return []
+
+        # Convert IDs to tokens safely (must be CPU Python list, no separator IDs yet)
+        tokens = self.tokenizer.convert_ids_to_tokens(list(ids))
+
+        # Mask for tokens starting with word boundary
+        mask = [t.startswith(self.word_boundary_prefix) for t in tokens]
+
+        # Prepare result
+        result = []
+        for tid, m in zip(ids, mask):
+            if m:
+                result.append(self.word_sep_id)
+            result.append(tid)
+
+        # Remove leading separator if present
+        if result and result[0] == self.word_sep_id:
+            result = result[1:]
+
+        return result
+
+    def ids_to_text(self, ids):
+        """
+        Converts token IDs back to text, replacing word-separator tokens with spaces.
+
+        Args:
+            ids (List[int]): List of token IDs.
+
+        Returns:
+            str: Decoded text with word separators converted to spaces.
+        """
+        text = super().ids_to_text(ids)
+        return text.replace(self.word_sep_token, " ")
+
+
 class DuplexEARTTS(LightningModule, HFHubMixin):
     def __init__(self, cfg: dict) -> None:
         assert isinstance(cfg, dict), (
@@ -684,7 +793,10 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         self.codec_silence_tokens = self.get_codec_silence_frame()
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True) # Note that we are using fast tokenizer
+        if self.cfg.get("use_word_sep_tokenizer", False):
+            self.tokenizer = WordSepTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True)
+        else:
+            self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True) # Note that we are using fast tokenizer
 
         if 'Qwen2.5' in self.cfg.pretrained_lm_name:
             # For Qwen, '<|im_start|>' is a common choice for a BOS token.
@@ -699,7 +811,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             torch.tensor([self.speech_bos_id, self.speech_eos_id, self.speech_pad_id], device=self.device),
         )
 
-        if self.cfg.get("use_char_ids_loss", None) or self.cfg.tts_config.use_char_tokenizer:
+        if self.cfg.get("use_char_ids_loss", None) or self.cfg.tts_config.get("use_char_tokenizer", False):
             self.subword_id_to_char_ids, self.char_vocab, _ = build_vocabs(self.cfg.pretrained_lm_name)
             self.subword_padding_idx = len(self.char_vocab)
             self.char_expansion, self.expansion_len = build_char_expansion_lut(self.subword_id_to_char_ids, self.text_pad_id, device='cuda')
@@ -1157,7 +1269,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
         inputs = self.prepare_inputs(batch)
 
-        if self.cfg.tts_config.use_char_tokenizer:
+        if self.cfg.tts_config.get("use_char_tokenizer", False):
             # ignore prompt
             with torch.no_grad():
                 subword_ids_no_prompt = torch.where(~inputs["subword_mask"], self.text_pad_id, inputs["subword_ids"])
@@ -1250,7 +1362,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
     def get_teacher_force_inference_audio(self, batch, guidance_enabled=True):
         inputs = self.prepare_inputs(batch)
 
-        if self.cfg.tts_config.use_char_tokenizer:
+        if self.cfg.tts_config.get("use_char_tokenizer", False):
             # ignore prompt
             with torch.no_grad():
                 subword_ids_no_prompt = torch.where(~inputs["subword_mask"], self.text_pad_id, inputs["subword_ids"])
@@ -1641,7 +1753,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
 
         init_inputs.update({"use_cache": True, "past_key_values": None, "guidance_enabled": guidance_enabled})
 
-        if self.cfg.tts_config.use_char_tokenizer:
+        if self.cfg.tts_config.get("use_char_tokenizer", False):
             # if char embedings the prompt is subword_padding_idx
             new_init_inputs = init_inputs.copy()
             new_init_inputs["subword_ids"][:, :] = self.subword_padding_idx
@@ -1663,7 +1775,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # get first context subword_id, that is the last subword_ids from the warmup
         first_context_subword_id = init_inputs["subword_ids"][:, -1].unsqueeze(-1)
 
-        if self.cfg.tts_config.use_char_tokenizer:
+        if self.cfg.tts_config.get("use_char_tokenizer", False):
             # inference is already without the prompt
             with torch.no_grad():
                 chars_target = subwords_to_chars_batched_fast(
@@ -1700,7 +1812,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             else:
                 current_subword_mask = subword_mask[:, i].unsqueeze(-1)
 
-            if self.cfg.tts_config.use_char_tokenizer:
+            if self.cfg.tts_config.get("use_char_tokenizer", False):
                 current_subword_id = char_ids[:, i].unsqueeze(-1)
 
             # get subword_ids
