@@ -17,6 +17,17 @@ from nemo.collections.speechlm2.modules.ear_tts_commons import (
     PreTrainedModel
 )
 
+from contextlib import contextmanager
+
+@contextmanager
+def disable_tf32():
+    prev = torch.backends.cudnn.allow_tf32
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.allow_tf32 = prev
+
 @dataclass
 class RVQVAEConfig(Config):
     model_type: str = "rvqvae"
@@ -882,7 +893,6 @@ class Latent2Wav(nn.Module):
 
         return x
 
-
 class RVQVAEModel(PreTrainedModel):
     """
     Residual Vector-Quantized Variational Autoencoder (RVQ-VAE) model.
@@ -992,9 +1002,10 @@ class RVQVAEModel(PreTrainedModel):
                 - The discrete codes. Shape: `[batch, time', n_quantizers]`.
                 - The lengths of the code sequences.
         """
-        z_e = self.ae_encode(x)
-        code_len = x_len // self.config.wav_to_token_ratio
-        return self.quantize(z_e), code_len
+        with disable_tf32():
+            z_e = self.ae_encode(x)
+            code_len = x_len // self.config.wav_to_token_ratio
+            return self.quantize(z_e), code_len
 
     def decode(
         self,
@@ -1019,10 +1030,11 @@ class RVQVAEModel(PreTrainedModel):
                 - The reconstructed waveform. Shape: `[batch, 1, time]`.
                 - The lengths of the reconstructed waveforms.
         """
-        z_q = self.dequantize(code)
-        x_hat = self.ae_decode(z_q, constrain_value_range=constrain_value_range, cache=cache, flush=flush)
-        wav_len = code_len * self.config.wav_to_token_ratio if code_len is not None else None
-        return x_hat, wav_len
+        with disable_tf32():
+            z_q = self.dequantize(code)
+            x_hat = self.ae_decode(z_q, constrain_value_range=constrain_value_range, cache=cache, flush=flush)
+            wav_len = code_len * self.config.wav_to_token_ratio if code_len is not None else None
+            return x_hat, wav_len
 
     def quantize(self, z: Tensor) -> Tensor:
         """
@@ -1035,8 +1047,9 @@ class RVQVAEModel(PreTrainedModel):
         Returns:
             Tensor: The quantized codes. Shape: `[batch, time, n_quantizers]`.
         """
-        ids_sel = self.prvq.encode(z, return_z_q=False)
-        return torch.stack(ids_sel, -1)
+        with disable_tf32():
+            ids_sel = self.prvq.encode(z, return_z_q=False)
+            return torch.stack(ids_sel, -1)
 
     def dequantize(self, code: Tensor) -> Tensor:
         """
@@ -1063,6 +1076,7 @@ class RVQVAEModel(PreTrainedModel):
         Returns:
             Tensor: The reconstructed waveform. Shape: `[batch, 1, time]`.
         """
+        
         with torch.no_grad():
             z_e = self.ae_encode(x)
             code = self.quantize(z_e)

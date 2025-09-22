@@ -77,8 +77,6 @@ from types import SimpleNamespace
 from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig, build_vocabs
 from nemo.collections.speechlm2.modules.rvq_ear_tts_vae import RVQVAEModel
 
-torch.backends.cudnn.allow_tf32 = False
-
 def generate_multiturn_speaking_mask(input_ids: torch.Tensor, bos_token_id: int = 0, eos_token_id: int = 1):
     """
     Efficient, batched speaking mask generator that marks 1 between <bos> and <eos> pairs.
