@@ -859,14 +859,17 @@ class DuplexS2SExternalSpeechDecoderModel(LightningModule, HFHubMixin):
             # do inference on external TTS model
             # current subword id is always seem
             current_subword_id = gen_text[:, t].unsqueeze(-1)
-            # get context_hidden_state it is always one step behind current_subword_id
-            # for the first step uses the last step from warmup
-            if t == 0:
-                context_subword_id = first_context_subword_id
-            else:
-                context_subword_id = gen_text[:, t-1].unsqueeze(-1)
+            if self.tts_model.cfg.tts_config.context_hidden_size is not None:
+                # get context_hidden_state it is always one step behind current_subword_id
+                # for the first step uses the last step from warmup
+                if t == 0:
+                    context_subword_id = first_context_subword_id
+                else:
+                    context_subword_id = gen_text[:, t-1].unsqueeze(-1)
 
-            context_hidden_state = self.tts_model.embed_tokens(context_subword_id)
+                context_hidden_state = self.tts_model.embed_tokens(context_subword_id)
+            else:
+                context_hidden_state = None
 
             # create subword_mask if needed
             if self.tts_model.cfg.subword_mask_exactly_as_eartts:
