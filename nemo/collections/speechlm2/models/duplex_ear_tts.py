@@ -74,7 +74,7 @@ from nemo.collections.speechlm2.modules.cfm import MatchaTTSCFM
 from types import SimpleNamespace
 
 
-from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig, build_vocabs
+from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig, build_vocabs, SubwordFlagEmbedding
 from nemo.collections.speechlm2.modules.rvq_ear_tts_vae import RVQVAEModel
 
 def generate_multiturn_speaking_mask(input_ids: torch.Tensor, bos_token_id: int = 0, eos_token_id: int = 1):
@@ -773,6 +773,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             self.embed_tokens = self._load_embed_tokens(self.cfg)
             # delete llm because we use it only to get the  embbeding tokens
             del self.language_model
+            if self.cfg.tts_config.get("use_subword_flag_emb", False):
+                self.subword_flag_emb = SubwordFlagEmbedding(self.cfg.pretrained_lm_name, self.cfg.tts_config.context_hidden_size)
 
         # instanciate eartts model and codec
         self._load_tts_model(self.cfg)
@@ -1129,6 +1131,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 # ToDo: masking as eartts is producing Nans for some reason, investigate it.
                 context_hidden_mask = (input_text_tokens.long() != self.text_pad_id).bool()
                 context_hidden_state = context_hidden_state * context_hidden_mask.unsqueeze(-1).to(context_hidden_state.dtype)
+            
+            if self.cfg.tts_config.get("use_subword_flag_emb", False):
+                context_hidden_state = self.subword_flag_emb(context_hidden_state, input_text_tokens)
         else:
             context_hidden_state = None
 
@@ -1652,6 +1657,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         # get context hidden
         if self.cfg.tts_config.context_hidden_size is not None:
             context_hidden_state = self.embed_tokens(input_text_tokens)
+            if self.cfg.tts_config.get("use_subword_flag_emb", False):
+                context_hidden_state = self.subword_flag_emb(context_hidden_state, input_text_tokens)
         else:
             context_hidden_state = None
 
@@ -1801,6 +1808,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 else:
                     context_subword_id = next_subword_ids[:, i-1].unsqueeze(-1)
                 context_hidden_state = self.embed_tokens(context_subword_id)
+                if self.cfg.tts_config.get("use_subword_flag_emb", False):
+                    context_hidden_state = self.subword_flag_emb(context_hidden_state, context_subword_id)
             else:
                 context_hidden_state = None
 

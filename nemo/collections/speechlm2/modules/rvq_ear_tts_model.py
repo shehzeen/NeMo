@@ -392,6 +392,7 @@ class RVQEARTTSConfig(Config):
     # extra parameters used for compatibility with S2S
     use_unshifthed_prompt: bool = False
     disable_eos_prediction: bool = False
+    use_subword_flag_emb: bool = False
     use_phonemes: bool = False
     use_char_tokenizer: bool = False
 
@@ -871,6 +872,90 @@ class MoGHead(nn.Module):
             return torch.abs(dist)
 
 
+class NeMoSubwordFlagEmbedding(nn.Module):
+    """
+    Adds a tiny embedding table for continuation tokens
+    (subwords that do NOT start with Ġ or the word-boundary marker).
+    Compatible with NeMo AutoTokenizer.
+    """
+    def __init__(self, model_name: str, d_model: int):
+        super().__init__()
+        # Load tokenizer from NeMo
+        # self.tokenizer_hf = AutoTokenizer.from_pretrained(model_name)
+        from nemo.collections.common.tokenizers import AutoTokenizer as NeMoAutoTokenizer
+        self.tokenizer = NeMoAutoTokenizer(model_name, use_fast=True, trust_remote_code=True)
+        self.vocab_size = self.tokenizer.vocab_size
+        self.d_model = d_model
+
+        # Precompute continuation flags
+        tokens = [self.tokenizer.ids_to_tokens(i) for i in range(self.vocab_size)]
+        self.register_buffer(
+            'is_continuation',
+            torch.tensor([1 if not (tok.startswith("Ġ") or tok.startswith("▁")) else 0 for tok in tokens],
+                         dtype=torch.long)
+        )
+
+        # Tiny embedding table: 0 = word-start, 1 = continuation
+        init_std = self.d_model ** -0.5
+        self.cont_emb = nn.Embedding(2, self.d_model)
+        nn.init.normal_(self.cont_emb.weight, mean=0.0, std=init_std)
+
+        # Force word-start embedding to zero so only continuation tokens get shifted
+        self.cont_emb.weight.data[0].zero_()
+
+    def forward(self, subword_embeds: torch.Tensor, token_ids: torch.LongTensor):
+        # Continuation flags
+        cont_flags = self.is_continuation[token_ids]
+
+        # Add continuation embedding
+        cont_emb = self.cont_emb(cont_flags)
+        return subword_embeds + cont_emb
+
+
+class SubwordFlagEmbedding(nn.Module):
+    """
+    Adds a small continuation embedding for subwords (tokens without word-boundary marker).
+    Automatically adds a custom padding token at index vocab_size.
+    Ignores special tokens (starting with '<') when computing continuation flags.
+    """
+    def __init__(self, model_name: str, d_model: int):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.vocab_size = self.tokenizer.vocab_size
+        self.d_model = d_model
+
+        # Custom pad token at vocab_size
+        self.pad_id = self.vocab_size
+        # register pad_id as a tensor buffer to avoid device issues
+        self.register_buffer("pad_tensor", torch.tensor(self.pad_id, dtype=torch.long))
+
+        # Precompute continuation flags
+        tokens = [self.tokenizer.convert_ids_to_tokens(i) for i in range(self.vocab_size)]
+        cont_flags = [
+            1 if not (tok.startswith("Ġ") or tok.startswith("▁") or tok.startswith("<")) else 0
+            for tok in tokens
+        ]
+        cont_flags.append(0)  # for the custom pad token
+        self.register_buffer("is_continuation", torch.tensor(cont_flags, dtype=torch.long))
+
+        # Continuation embedding
+        init_std = self.d_model ** -0.5
+        self.cont_emb = nn.Embedding(2, self.d_model)
+        nn.init.normal_(self.cont_emb.weight, mean=0.0, std=init_std)
+        self.cont_emb.weight.data[0].zero_()
+
+    def forward(self, subword_embeds: torch.Tensor, token_ids: torch.LongTensor):
+        # Replace OOV token IDs with pad_id safely
+        token_ids_clamped = torch.where(token_ids >= self.vocab_size,
+                                        self.pad_tensor,
+                                        token_ids)
+        # Continuation flags
+        cont_flags = self.is_continuation[token_ids_clamped]
+        # Add continuation embedding
+        cont_emb = self.cont_emb(cont_flags)
+        return subword_embeds + cont_emb
+
+
 class CharAwareSubwordEncoder(nn.Module):
     """
     An encoder that creates subword embeddings from character-level embeddings.
@@ -902,6 +987,7 @@ class CharAwareSubwordEncoder(nn.Module):
         backbone_config: Config | None = None,
         use_phonemes: bool = False,
         use_char_tokenizer: bool = False,
+        use_subword_flag_emb: bool = False
     ):
         super().__init__()
 
@@ -918,6 +1004,7 @@ class CharAwareSubwordEncoder(nn.Module):
         self.char_padding_idx = len(self.char_vocab)
 
         self.use_char_tokenizer = use_char_tokenizer
+        self.use_subword_flag_emb = use_subword_flag_emb
         # 2. Initialize the backbone model
         if backbone_type:
             config = AutoConfig.for_model(backbone_type, **(backbone_config.to_dict() if backbone_config else {}))
@@ -935,6 +1022,9 @@ class CharAwareSubwordEncoder(nn.Module):
         find_and_delete_module(self.backbone, self.backbone.get_input_embeddings(), "backbone")
         self.embed_tokens = nn.Embedding(len(self.char_vocab) + 1, self.hidden_size, padding_idx=self.char_padding_idx)
         self.proj_embedding = nn.Linear(self.hidden_size, out_size, bias=False)
+
+        if self.use_subword_flag_emb:
+            self.subword_flag_emb = SubwordFlagEmbedding(pretrained_tokenizer_name, self.hidden_size)
 
     def prepare_inputs(self, subword_ids: Tensor, padding_mask: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -1014,6 +1104,10 @@ class CharAwareSubwordEncoder(nn.Module):
             subword_ids.shape + (out_emb.size(-1),), device=subword_ids.device, dtype=out_emb.dtype
         )
         subword_embeds[subword_mask] = out_emb
+
+        if self.use_subword_flag_emb:
+            subword_embeds = self.subword_flag_emb(subword_embeds, subword_ids)
+
         return subword_embeds
 
 
@@ -1066,7 +1160,7 @@ class RVQEARTTSModel(PreTrainedModel):
             else None
         )
         self.embed_subword = (
-            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, **self.config.cas_config)
+            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, use_subword_flag_emb=self.config.use_subword_flag_emb, **self.config.cas_config)
             if self.config.cas_config
             else None
         )
@@ -1577,4 +1671,3 @@ class RVQEARTTSModel(PreTrainedModel):
             logging.info(f"Error loading model state_dict !! Retrying with partial initialization!")
             model_dict = set_model_dict_for_partial_init(state_dict, self.state_dict())
             super().load_state_dict(model_dict, strict=False)
-
