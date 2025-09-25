@@ -805,6 +805,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             self.tokenizer.bos_token = '<|im_start|>'
             self.tokenizer.eos_token = '<|im_end|>'
 
+
         # cached for quicker audio decoding
         self.register_buffer(
             "_control_codes",

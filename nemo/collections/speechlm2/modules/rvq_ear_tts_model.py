@@ -393,6 +393,7 @@ class RVQEARTTSConfig(Config):
     use_unshifthed_prompt: bool = False
     disable_eos_prediction: bool = False
     use_subword_flag_emb: bool = False
+    use_bos_eos_emb: bool = False
     use_phonemes: bool = False
     use_char_tokenizer: bool = False
 
@@ -955,6 +956,62 @@ class SubwordFlagEmbedding(nn.Module):
         cont_emb = self.cont_emb(cont_flags)
         return subword_embeds + cont_emb
 
+class BOSEOSEmbedding(nn.Module):
+    """
+    Adds independent embeddings for BOS and EOS tokens using a single embedding table.
+    Index 0 = regular token (ignored), 1 = BOS, 2 = EOS.
+    Compatible with Hugging Face tokenizers that may or may not have BOS/EOS.
+    """
+    def __init__(self, model_name: str, d_model: int):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # vocab that includes special tokens
+        vocab_dict = self.tokenizer.get_vocab()
+        self.vocab_size = max(vocab_dict.values())
+        self.d_model = d_model
+
+        # Custom pad token for OOVs
+        self.pad_id = self.vocab_size
+        self.register_buffer("pad_tensor", torch.tensor(self.pad_id, dtype=torch.long))
+
+        # Identify BOS and EOS tokens (may be None)
+        tokens = [self.tokenizer.convert_ids_to_tokens(i) for i in range(self.vocab_size)]
+
+        if 'Qwen2.5' in model_name:
+            # For Qwen, '<|im_start|>' is a common choice for a BOS token.
+            # You can check your tokenizer's vocabulary for the best candidate.
+            logging.warning("Tokenizer does not have a `bos_token`. Setting it to '<|im_start|>'.")
+            self.tokenizer.bos_token = '<|im_start|>'
+            self.tokenizer.eos_token = '<|im_end|>'
+
+        special_flags = []
+        for tok in tokens:
+            if self.tokenizer.bos_token is not None and tok == self.tokenizer.bos_token:
+                special_flags.append(1)
+            elif self.tokenizer.eos_token is not None and tok == self.tokenizer.eos_token:
+                special_flags.append(2)
+            else:
+                special_flags.append(0)
+        special_flags.append(0)  # for custom pad token
+        self.register_buffer("special_flags", torch.tensor(special_flags, dtype=torch.long))
+        # Embedding table: 0 = regular, 1 = BOS, 2 = EOS
+        init_std = self.d_model ** -0.5
+        self.special_emb = nn.Embedding(3, d_model)
+        nn.init.normal_(self.special_emb.weight, mean=0.0, std=init_std)
+        self.special_emb.weight.data[0].zero_()  # regular tokens ignored
+
+    def forward(self, token_embeds: torch.Tensor, token_ids: torch.LongTensor):
+        """
+        token_embeds: (B, T, d_model)
+        token_ids:    (B, T)
+        """
+        # Clamp OOVs to custom pad token
+        safe_ids = torch.where(token_ids >= self.vocab_size, self.pad_tensor, token_ids)
+
+        # Lookup flags (0=regular, 1=BOS, 2=EOS)
+        flags = self.special_flags[safe_ids]
+        return token_embeds + self.special_emb(flags)
+
 
 class CharAwareSubwordEncoder(nn.Module):
     """
@@ -987,7 +1044,8 @@ class CharAwareSubwordEncoder(nn.Module):
         backbone_config: Config | None = None,
         use_phonemes: bool = False,
         use_char_tokenizer: bool = False,
-        use_subword_flag_emb: bool = False
+        use_subword_flag_emb: bool = False,
+        use_bos_eos_emb: bool = False,
     ):
         super().__init__()
 
@@ -1005,6 +1063,8 @@ class CharAwareSubwordEncoder(nn.Module):
 
         self.use_char_tokenizer = use_char_tokenizer
         self.use_subword_flag_emb = use_subword_flag_emb
+        self.use_bos_eos_emb = use_bos_eos_emb
+
         # 2. Initialize the backbone model
         if backbone_type:
             config = AutoConfig.for_model(backbone_type, **(backbone_config.to_dict() if backbone_config else {}))
@@ -1025,6 +1085,10 @@ class CharAwareSubwordEncoder(nn.Module):
 
         if self.use_subword_flag_emb:
             self.subword_flag_emb = SubwordFlagEmbedding(pretrained_tokenizer_name, self.hidden_size)
+
+        if self.use_bos_eos_emb:
+            self.bos_eos_emb = BOSEOSEmbedding(pretrained_tokenizer_name, self.hidden_size)
+
 
     def prepare_inputs(self, subword_ids: Tensor, padding_mask: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -1108,6 +1172,9 @@ class CharAwareSubwordEncoder(nn.Module):
         if self.use_subword_flag_emb:
             subword_embeds = self.subword_flag_emb(subword_embeds, subword_ids)
 
+        if self.use_bos_eos_emb:
+            subword_embeds = self.bos_eos_emb(subword_embeds, subword_ids)
+
         return subword_embeds
 
 
@@ -1160,7 +1227,7 @@ class RVQEARTTSModel(PreTrainedModel):
             else None
         )
         self.embed_subword = (
-            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, use_subword_flag_emb=self.config.use_subword_flag_emb, **self.config.cas_config)
+            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, use_subword_flag_emb=self.config.use_subword_flag_emb, use_bos_eos_emb=self.config.use_bos_eos_emb, **self.config.cas_config)
             if self.config.cas_config
             else None
         )
