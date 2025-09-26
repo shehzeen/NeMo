@@ -1796,6 +1796,10 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 chars_target[(chars_target == self.text_bos_id) | (chars_target == self.text_eos_id)| (chars_target == self.text_pad_id)] = self.subword_padding_idx
                 char_ids = chars_target
 
+        # reset cache of cumulative_word_emb
+        if self.cfg.tts_config.get("use_cumulative_word_emb", False):
+            self.tts_model.embed_subword.cumulative_word_emb.reset(B)
+
         for i in range(max_steps-1):
             step_start = time.time()
             # current subword id is always seem

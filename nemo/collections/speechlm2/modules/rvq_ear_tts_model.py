@@ -11,6 +11,7 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 import unicodedata
+from nemo.collections.speechlm2.parts.precision import fp32_precision
 
 from nemo.collections.speechlm2.parts.pretrained import set_model_dict_for_partial_init
 
@@ -394,6 +395,7 @@ class RVQEARTTSConfig(Config):
     disable_eos_prediction: bool = False
     use_subword_flag_emb: bool = False
     use_bos_eos_emb: bool = False
+    use_cumulative_word_emb: bool = False
     use_phonemes: bool = False
     use_char_tokenizer: bool = False
 
@@ -965,7 +967,7 @@ class BOSEOSEmbedding(nn.Module):
     def __init__(self, model_name: str, d_model: int):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # vocab that includes special tokens
+        # vocab size that includes special tokens
         vocab_dict = self.tokenizer.get_vocab()
         self.vocab_size = max(vocab_dict.values())
         self.d_model = d_model
@@ -1012,6 +1014,85 @@ class BOSEOSEmbedding(nn.Module):
         flags = self.special_flags[safe_ids]
         return token_embeds + self.special_emb(flags)
 
+class CumulativeWordEmbedding(nn.Module):
+    def __init__(self, model_name: str, d_model: int):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.d_model = d_model
+
+        self.vocab_size = max(self.tokenizer.get_vocab().values()) + 1
+        self.pad_id = self.vocab_size
+        self.register_buffer("pad_tensor", torch.tensor(self.pad_id, dtype=torch.long))
+
+        tokens = [self.tokenizer.convert_ids_to_tokens(i) for i in range(self.vocab_size)]
+        flags = [1 if t.startswith("Ġ") or t.startswith("▁") else 0 for t in tokens]
+        flags.append(0)
+        self.register_buffer("is_word_start", torch.tensor(flags, dtype=torch.long))
+
+        self.register_buffer("last_emb", torch.zeros(1, d_model, dtype=torch.float32))
+
+    def reset(self, batch_size: int = 1):
+        self.last_emb = torch.zeros(batch_size, self.d_model, device=self.last_emb.device, dtype=torch.float32)
+
+    def forward(self, subword_embeds: torch.Tensor, token_ids: torch.LongTensor):
+        # original input dtype
+        input_dtype = subword_embeds.dtype
+        with fp32_precision():
+            # Force fp32 internally
+            subword_embeds = subword_embeds.float()
+            B, T, D = subword_embeds.shape
+            device = subword_embeds.device
+
+            if self.last_emb.shape[0] != B:
+                self.reset(batch_size=B)
+
+            safe_ids = torch.where(token_ids >= self.vocab_size, self.pad_tensor, token_ids)
+            word_start_flags = self.is_word_start[safe_ids].to(device)
+
+            if self.training or T > 1:
+                # -----------------------------
+                # Vectorized per-word accumulation (fp32)
+                # -----------------------------
+                cumsum_embeds = torch.cumsum(subword_embeds, dim=1)  # [B, T, D]
+
+                idxs = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
+                start_pos = idxs * word_start_flags + (-1) * (1 - word_start_flags)
+                last_start_idx, _ = torch.cummax(start_pos, dim=1)
+                last_start_idx = torch.clamp(last_start_idx, min=0)
+
+                offset_idx = last_start_idx - 1
+                offset_idx = torch.clamp(offset_idx, min=-1)
+
+                zero_pad = torch.zeros(B, 1, D, device=device, dtype=torch.float32)
+                cumsum_padded = torch.cat([zero_pad, cumsum_embeds], dim=1)  # [B, T+1, D]
+
+                gather_idx = (offset_idx + 1).to(torch.long)
+                offset_cumsum = torch.gather(
+                    cumsum_padded,
+                    dim=1,
+                    index=gather_idx.unsqueeze(-1).expand(-1, -1, D)
+                )
+
+                cum_embeds = cumsum_embeds - offset_cumsum
+            else:
+                # -----------------------------
+                # Streaming path (fp32)
+                # -----------------------------
+                cum_embeds = []
+                last_emb = self.last_emb.clone().float()
+                word_start_flags = word_start_flags.to(torch.float32)
+
+                for t in range(T):
+                    word_start_flags_f = word_start_flags[:, t:t+1].to(subword_embeds.dtype)
+                    last_emb = last_emb * (1.0 - word_start_flags_f) + subword_embeds[:, t]
+                    # last_emb = last_emb * (1.0 - word_start_flags[:, t:t+1]) + subword_embeds[:, t]
+                    cum_embeds.append(last_emb.unsqueeze(1))
+                cum_embeds = torch.cat(cum_embeds, dim=1)
+                self.last_emb = last_emb
+
+        # Convert back to input dtype
+        return cum_embeds.to(input_dtype)
+
 
 class CharAwareSubwordEncoder(nn.Module):
     """
@@ -1046,6 +1127,7 @@ class CharAwareSubwordEncoder(nn.Module):
         use_char_tokenizer: bool = False,
         use_subword_flag_emb: bool = False,
         use_bos_eos_emb: bool = False,
+        use_cumulative_word_emb: bool = False,
     ):
         super().__init__()
 
@@ -1064,6 +1146,7 @@ class CharAwareSubwordEncoder(nn.Module):
         self.use_char_tokenizer = use_char_tokenizer
         self.use_subword_flag_emb = use_subword_flag_emb
         self.use_bos_eos_emb = use_bos_eos_emb
+        self.use_cumulative_word_emb = use_cumulative_word_emb
 
         # 2. Initialize the backbone model
         if backbone_type:
@@ -1089,6 +1172,9 @@ class CharAwareSubwordEncoder(nn.Module):
         if self.use_bos_eos_emb:
             self.bos_eos_emb = BOSEOSEmbedding(pretrained_tokenizer_name, self.hidden_size)
 
+        if self.use_cumulative_word_emb:
+            with fp32_precision():
+                self.cumulative_word_emb = CumulativeWordEmbedding(pretrained_tokenizer_name, self.hidden_size)
 
     def prepare_inputs(self, subword_ids: Tensor, padding_mask: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -1175,6 +1261,9 @@ class CharAwareSubwordEncoder(nn.Module):
         if self.use_bos_eos_emb:
             subword_embeds = self.bos_eos_emb(subword_embeds, subword_ids)
 
+        if self.use_cumulative_word_emb:
+            subword_embeds = self.cumulative_word_emb(subword_embeds, subword_ids)
+
         return subword_embeds
 
 
@@ -1227,7 +1316,7 @@ class RVQEARTTSModel(PreTrainedModel):
             else None
         )
         self.embed_subword = (
-            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, use_subword_flag_emb=self.config.use_subword_flag_emb, use_bos_eos_emb=self.config.use_bos_eos_emb, **self.config.cas_config)
+            CharAwareSubwordEncoder(out_size=self.hidden_size, use_phonemes=self.config.use_phonemes, use_char_tokenizer=self.config.use_char_tokenizer, use_subword_flag_emb=self.config.use_subword_flag_emb, use_bos_eos_emb=self.config.use_bos_eos_emb, use_cumulative_word_emb=self.config.use_cumulative_word_emb, **self.config.cas_config)
             if self.config.cas_config
             else None
         )
