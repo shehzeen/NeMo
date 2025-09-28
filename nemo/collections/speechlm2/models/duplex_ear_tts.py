@@ -1416,7 +1416,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             "eos_threshold": -3.0,
         }
 
-    def offline_inference_with_custom_sentences(self, test_sentences: torch.Tensor, inference_speaker_reference: torch.Tensor, speech_text_ratio: int = 2.5):
+    def offline_inference_with_custom_sentences(self, test_sentences: torch.Tensor, inference_speaker_reference: torch.Tensor, speech_text_ratio: float = 2.5):
         B = len(test_sentences)
         # load and get speaker reference
         speaker_audio, sr = torchaudio.load(inference_speaker_reference)
