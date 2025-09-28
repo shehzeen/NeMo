@@ -1416,136 +1416,228 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             "eos_threshold": -3.0,
         }
 
+    def offline_inference_with_custom_sentences(self, test_sentences: torch.Tensor, inference_speaker_reference: torch.Tensor, speech_text_ratio: int = 2.5):
+        B = len(test_sentences)
+        # load and get speaker reference
+        speaker_audio, sr = torchaudio.load(inference_speaker_reference)
+        speaker_audio = resample(speaker_audio, sr, self.target_sample_rate)
+        speaker_audio = speaker_audio.repeat(B, 1).to(self.device) 
+        # lengths -> [B]
+        speaker_audio_lens = torch.tensor([speaker_audio.size(1)], device=self.device).long().repeat(B)
+
+        # Tokenize sentences
+        tokenized = [
+            torch.as_tensor([self.tokenizer.bos] + self.tokenizer.text_to_ids(text), dtype=torch.long, device=self.device)
+            for text in test_sentences
+        ]
+
+        # Get max length and target length
+        max_len = max(len(t) for t in tokenized)
+        # Pad each to double length
+        target_len = int(speech_text_ratio * max_len) # make text longer to ensures that we have enough steps for speech gen
+        next_subword_ids = torch.stack([
+            torch.cat([
+                torch.tensor([self.text_pad_id], dtype=torch.long, device=self.device),  # shift right adding one padding token
+                t,
+                torch.full((target_len - len(t) - 1,), self.text_pad_id, dtype=torch.long, device=self.device)  # remaining padding
+            ])
+            for t in tokenized
+        ])
+
+        audio, audio_len = self.offline_inference(
+            speaker_audio=speaker_audio,
+            speaker_audio_lens=speaker_audio_lens,
+            next_subword_ids=next_subword_ids,
+        )
+        return audio, audio_len, speaker_audio, speaker_audio_lens
+
     def validation_step(self, batch: dict, batch_idx: int):
+        if self.cfg.get("test_sentences", None) and self.cfg.get("inference_speaker_reference", None):
+            for name in self.cfg.test_sentences.keys():
+                logging.info(f"Generating {name} custom sentences.")
+                test_sentences = self.cfg.test_sentences[name]
+                results = {}
+                results["audio"], results["audio_len"], speaker_audio, speaker_audio_lens = self.offline_inference_with_custom_sentences(test_sentences, self.cfg.inference_speaker_reference)
+                with fp32_precision():  # resample is fragile to bfloat16 default dtype
+                    metric_audio_pred = results["audio"]
+                    metric_audio_pred_lens = results["audio_len"]
 
-        for name, dataset_batch in batch.items():
-            if dataset_batch is None:
-                continue  # some dataset is exhausted
+                    # resample audio to the asr sampling rate
+                    metric_audio_pred = resample(metric_audio_pred, self.target_sample_rate, 16000)
+                    metric_audio_pred_lens = (metric_audio_pred_lens / self.target_sample_rate * 16000).to(torch.long)
 
-            results = {}
-            inputs = self.prepare_inputs(dataset_batch)
-            """
-            # cut it on prompt
-            init_inputs = {
-                "code": inputs["code"],
-                "audio_mask": inputs["audio_mask"],
-                "non_prompt_mask": inputs["non_prompt_mask"],
-                "context_hidden_state": inputs["context_hidden_state"],
-                "subword_ids": inputs["subword_ids"],
-                "subword_mask": inputs["subword_mask"],
-            }
-            # cut init_inputs to consider only the prompt
-            for key in init_inputs:
-                init_inputs[key] = torch.stack([
-                    init_inputs[key][i, :l-1]
+                    asr_hyps = self.asr_bleu.update(
+                        name=name,
+                        refs=test_sentences,
+                        pred_audio=metric_audio_pred,
+                        pred_audio_lens=metric_audio_pred_lens,
+                    )
+
+                    self.intelligibility.update(
+                        name=name,
+                        refs=test_sentences,
+                        pred_audio=metric_audio_pred,
+                        pred_audio_lens=metric_audio_pred_lens,
+                        asr_hyps=asr_hyps,
+                    )
+
+                    self.secs.update(
+                        name=name,
+                        target_audio=resample(speaker_audio, self.target_sample_rate, 16000),
+                        target_audio_lens=(speaker_audio_lens / self.target_sample_rate * 16000).to(torch.long),
+                        pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
+                        pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
+                    )
+
+                    self.results_logger.update(
+                        name=name,
+                        refs=test_sentences,
+                        hyps=test_sentences,
+                        asr_hyps=asr_hyps,
+                        samples_id=[str(i) for i in range(len(test_sentences))],
+                        pred_audio=results["audio"],
+                        pred_audio_tf=None,
+                        pre_audio_trimmed=None,
+                        reference_audio=speaker_audio,
+                        target_audio=None,
+                        pred_audio_sr=self.target_sample_rate,
+                        user_audio=None,
+                        user_audio_sr=None,
+                        eou_pred=None,
+                        fps=self.target_fps,
+                        results=None,
+                        tokenizer=self.tokenizer,
+                    )
+        else:
+
+            for name, dataset_batch in batch.items():
+                if dataset_batch is None:
+                    continue  # some dataset is exhausted
+
+                results = {}
+                inputs = self.prepare_inputs(dataset_batch)
+                """
+                # cut it on prompt
+                init_inputs = {
+                    "code": inputs["code"],
+                    "audio_mask": inputs["audio_mask"],
+                    "non_prompt_mask": inputs["non_prompt_mask"],
+                    "context_hidden_state": inputs["context_hidden_state"],
+                    "subword_ids": inputs["subword_ids"],
+                    "subword_mask": inputs["subword_mask"],
+                }
+                # cut init_inputs to consider only the prompt
+                for key in init_inputs:
+                    init_inputs[key] = torch.stack([
+                        init_inputs[key][i, :l-1]
+                        for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
+                    ])
+                """
+                # drop items without description to avoid issues 
+                
+                lens = dataset_batch["desc_plus_audio_prompt_lens"]  # list of lengths
+
+                # Example condition: keep only those with the maximum length
+                max_len = max(lens)
+                keep_indices = [i for i, l in enumerate(lens) if l == max_len]
+
+                # Convert indices to tensor for indexing torch tensors
+                keep_indices  = torch.tensor(keep_indices, dtype=torch.long)
+
+                # Now filter every key in dataset_batch
+                for k, v in dataset_batch.items():
+                    if isinstance(v, torch.Tensor):
+                        dataset_batch[k] = v[keep_indices]
+                    elif isinstance(v, list):
+                        dataset_batch[k] = [v[i] for i in keep_indices]
+
+                # Do the same for inputs
+                for k, v in inputs.items():
+                    if isinstance(v, torch.Tensor):
+                        inputs[k] = v[keep_indices]
+                    elif isinstance(v, list):
+                        inputs[k] = [v[i] for i in keep_indices]
+
+                # remove the prompt from the input_text_tokens to emulate S2S connected inference
+                next_subword_ids = torch.stack([
+                    inputs["subword_ids"][i, l-1:]  # slice each element
                     for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
                 ])
-            """
-            # drop items without description to avoid issues 
-            
-            lens = dataset_batch["desc_plus_audio_prompt_lens"]  # list of lengths
 
-            # Example condition: keep only those with the maximum length
-            max_len = max(lens)
-            keep_indices = [i for i, l in enumerate(lens) if l == max_len]
+                # remove prompt padding from the user audio as autoregressive inference does not return the prompt
+                dataset_batch["source_audio"] = dataset_batch["source_audio"][:, -int(next_subword_ids.size(-1)*self.source_samples_per_frame):]
 
-            # Convert indices to tensor for indexing torch tensors
-            keep_indices  = torch.tensor(keep_indices, dtype=torch.long)
-
-            # Now filter every key in dataset_batch
-            for k, v in dataset_batch.items():
-                if isinstance(v, torch.Tensor):
-                    dataset_batch[k] = v[keep_indices]
-                elif isinstance(v, list):
-                    dataset_batch[k] = [v[i] for i in keep_indices]
-
-            # Do the same for inputs
-            for k, v in inputs.items():
-                if isinstance(v, torch.Tensor):
-                    inputs[k] = v[keep_indices]
-                elif isinstance(v, list):
-                    inputs[k] = [v[i] for i in keep_indices]
-
-            # remove the prompt from the input_text_tokens to emulate S2S connected inference
-            next_subword_ids = torch.stack([
-                inputs["subword_ids"][i, l-1:]  # slice each element
-                for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"])
-            ])
-
-            # remove prompt padding from the user audio as autoregressive inference does not return the prompt
-            dataset_batch["source_audio"] = dataset_batch["source_audio"][:, -int(next_subword_ids.size(-1)*self.source_samples_per_frame):]
-
-            results["audio"], results["audio_len"] = self.offline_inference(
-                speaker_audio=dataset_batch["speaker_reference_audio"],
-                speaker_audio_lens=dataset_batch["speaker_reference_audio_lens"],
-                next_subword_ids=next_subword_ids,
-                formatter=dataset_batch["formatter"][0],
-                # init_inputs=init_inputs,
-            )
-
-            results["audio_tf"], results["audio_tf_len"] = self.get_teacher_force_inference_audio(dataset_batch)
-            # clean prompt from the audio
-            results["audio_tf"] = results["audio_tf"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
-            # remove prompt from target audio
-            target_audio_no_prompt = dataset_batch["target_audio"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
-
-            # for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"]):
-            #    results["audio_tf"][i, :l*self.target_samples_per_frame] = 0.0
-
-            with fp32_precision():  # resample is fragile to bfloat16 default dtype
-                metric_audio_pred = results["audio"]
-                metric_audio_pred_lens = results["audio_len"]
-
-                # resample audio to the asr sampling rate
-                metric_audio_pred = resample(metric_audio_pred, self.target_sample_rate, 16000)
-                metric_audio_pred_lens = (metric_audio_pred_lens / self.target_sample_rate * 16000).to(torch.long)
-
-                asr_hyps = self.asr_bleu.update(
-                    name=name,
-                    refs=dataset_batch["target_texts"],
-                    pred_audio=metric_audio_pred,
-                    pred_audio_lens=metric_audio_pred_lens,
+                results["audio"], results["audio_len"] = self.offline_inference(
+                    speaker_audio=dataset_batch["speaker_reference_audio"],
+                    speaker_audio_lens=dataset_batch["speaker_reference_audio_lens"],
+                    next_subword_ids=next_subword_ids,
+                    formatter=dataset_batch["formatter"][0],
+                    # init_inputs=init_inputs,
                 )
 
-                self.intelligibility.update(
-                    name=name,
-                    refs=dataset_batch["target_texts"],
-                    pred_audio=metric_audio_pred,
-                    pred_audio_lens=metric_audio_pred_lens,
-                    asr_hyps=asr_hyps,
-                )
+                results["audio_tf"], results["audio_tf_len"] = self.get_teacher_force_inference_audio(dataset_batch)
+                # clean prompt from the audio
+                results["audio_tf"] = results["audio_tf"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
+                # remove prompt from target audio
+                target_audio_no_prompt = dataset_batch["target_audio"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
 
-                self.secs.update(
-                    name=name,
-                    target_audio=resample(dataset_batch["target_audio"], self.target_sample_rate, 16000),
-                    target_audio_lens=(dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long),
-                    pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
-                    pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
-                )
+                # for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"]):
+                #    results["audio_tf"][i, :l*self.target_samples_per_frame] = 0.0
 
-                eou_labels = generate_multiturn_speaking_mask(
-                    next_subword_ids, bos_token_id=self.text_bos_id, eos_token_id=self.text_eos_id
-                )
+                with fp32_precision():  # resample is fragile to bfloat16 default dtype
+                    metric_audio_pred = results["audio"]
+                    metric_audio_pred_lens = results["audio_len"]
 
-                self.results_logger.update(
-                    name=name,
-                    refs=dataset_batch["target_texts"],
-                    hyps=dataset_batch["target_texts"],
-                    asr_hyps=asr_hyps,
-                    samples_id=dataset_batch['sample_id'],
-                    pred_audio=results["audio"],
-                    pred_audio_tf=results["audio_tf"],
-                    pre_audio_trimmed=None,
-                    reference_audio=dataset_batch["speaker_reference_audio"],
-                    target_audio=target_audio_no_prompt,
-                    pred_audio_sr=self.target_sample_rate,
-                    user_audio=dataset_batch["source_audio"],
-                    user_audio_sr=self.source_sample_rate,
-                    eou_pred=eou_labels,
-                    fps=self.target_fps,
-                    results=results if self.cfg.get("dump_tokens_text", False) else None,
-                    tokenizer=self.tokenizer,
-                )
+                    # resample audio to the asr sampling rate
+                    metric_audio_pred = resample(metric_audio_pred, self.target_sample_rate, 16000)
+                    metric_audio_pred_lens = (metric_audio_pred_lens / self.target_sample_rate * 16000).to(torch.long)
+
+                    asr_hyps = self.asr_bleu.update(
+                        name=name,
+                        refs=dataset_batch["target_texts"],
+                        pred_audio=metric_audio_pred,
+                        pred_audio_lens=metric_audio_pred_lens,
+                    )
+
+                    self.intelligibility.update(
+                        name=name,
+                        refs=dataset_batch["target_texts"],
+                        pred_audio=metric_audio_pred,
+                        pred_audio_lens=metric_audio_pred_lens,
+                        asr_hyps=asr_hyps,
+                    )
+
+                    self.secs.update(
+                        name=name,
+                        target_audio=resample(dataset_batch["target_audio"], self.target_sample_rate, 16000),
+                        target_audio_lens=(dataset_batch["target_audio_lens"] / self.target_sample_rate * 16000).to(torch.long),
+                        pred_audio=resample(results["audio"], self.target_sample_rate, 16000),
+                        pred_audio_lens=(results["audio_len"] / self.target_sample_rate * 16000).to(torch.long),
+                    )
+
+                    eou_labels = generate_multiturn_speaking_mask(
+                        next_subword_ids, bos_token_id=self.text_bos_id, eos_token_id=self.text_eos_id
+                    )
+
+                    self.results_logger.update(
+                        name=name,
+                        refs=dataset_batch["target_texts"],
+                        hyps=dataset_batch["target_texts"],
+                        asr_hyps=asr_hyps,
+                        samples_id=dataset_batch['sample_id'],
+                        pred_audio=results["audio"],
+                        pred_audio_tf=results["audio_tf"],
+                        pre_audio_trimmed=None,
+                        reference_audio=dataset_batch["speaker_reference_audio"],
+                        target_audio=target_audio_no_prompt,
+                        pred_audio_sr=self.target_sample_rate,
+                        user_audio=dataset_batch["source_audio"],
+                        user_audio_sr=self.source_sample_rate,
+                        eou_pred=eou_labels,
+                        fps=self.target_fps,
+                        results=results if self.cfg.get("dump_tokens_text", False) else None,
+                        tokenizer=self.tokenizer,
+                    )
 
     def on_test_epoch_start(self) -> None:
         return self.on_validation_epoch_start()

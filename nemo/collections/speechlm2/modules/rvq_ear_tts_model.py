@@ -1036,62 +1036,58 @@ class CumulativeWordEmbedding(nn.Module):
 
     def forward(self, subword_embeds: torch.Tensor, token_ids: torch.LongTensor):
         # original input dtype
-        input_dtype = subword_embeds.dtype
+        out_dtype = subword_embeds.dtype
         with fp32_precision():
-            # Force fp32 internally
+            # Force float32 internally for stable accumulations
             subword_embeds = subword_embeds.float()
             B, T, D = subword_embeds.shape
             device = subword_embeds.device
 
-            if self.last_emb.shape[0] != B:
+            # ensure last_emb has matching batch size and dtype on correct device
+            if self.last_emb.shape[0] != B or self.last_emb.device != device:
                 self.reset(batch_size=B)
+                self.last_emb = self.last_emb.to(device)
 
-            safe_ids = torch.where(token_ids >= self.vocab_size, self.pad_tensor, token_ids)
-            word_start_flags = self.is_word_start[safe_ids].to(device)
+            # clamp out of range ids (all on GPU)
+            safe_ids = torch.where(token_ids >= self.vocab_size, self.pad_tensor.to(device), token_ids)
+            word_start_flags = self.is_word_start[safe_ids].to(device)  # long on GPU
 
             if self.training or T > 1:
-                # -----------------------------
-                # Vectorized per-word accumulation (fp32)
-                # -----------------------------
-                cumsum_embeds = torch.cumsum(subword_embeds, dim=1)  # [B, T, D]
+                # --- index computation (detached, no grad) ---
+                with torch.no_grad():
+                    idxs = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)  # small, on GPU
+                    # start_pos is long*long -> long
+                    start_pos = idxs * word_start_flags + (-1) * (1 - word_start_flags)
+                    last_start_idx, _ = torch.cummax(start_pos, dim=1)   # long
+                    offset_idx = torch.clamp(last_start_idx - 1, min=-1)
+                    gather_idx = (offset_idx + 1).to(torch.long)  # shape [B, T], on GPU, detached
 
-                idxs = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
-                start_pos = idxs * word_start_flags + (-1) * (1 - word_start_flags)
-                last_start_idx, _ = torch.cummax(start_pos, dim=1)
-                last_start_idx = torch.clamp(last_start_idx, min=0)
-
-                offset_idx = last_start_idx - 1
-                offset_idx = torch.clamp(offset_idx, min=-1)
-
-                zero_pad = torch.zeros(B, 1, D, device=device, dtype=torch.float32)
+                # --- differentiable cumsum & gather ---
+                cumsum_embeds = torch.cumsum(subword_embeds, dim=1)  # [B,T,D], differentiable
+                zero_pad = subword_embeds.new_zeros(B, 1, D)
                 cumsum_padded = torch.cat([zero_pad, cumsum_embeds], dim=1)  # [B, T+1, D]
-
-                gather_idx = (offset_idx + 1).to(torch.long)
-                offset_cumsum = torch.gather(
-                    cumsum_padded,
-                    dim=1,
-                    index=gather_idx.unsqueeze(-1).expand(-1, -1, D)
-                )
-
+                # gather_idx is long, on GPU, detached -> safe and cheap in autograd
+                idx_expand = gather_idx.unsqueeze(-1).expand(-1, -1, D)
+                offset_cumsum = torch.gather(cumsum_padded, dim=1, index=idx_expand)
                 cum_embeds = cumsum_embeds - offset_cumsum
+
+                return cum_embeds.to(out_dtype)
+
             else:
-                # -----------------------------
-                # Streaming path (fp32)
-                # -----------------------------
+                # streaming eval: loop is ok, but ensure last_emb updates don't create grad history
                 cum_embeds = []
-                last_emb = self.last_emb.clone().float()
-                word_start_flags = word_start_flags.to(torch.float32)
+                last_emb = self.last_emb.clone().to(device).float()
+                word_start_flags_f = word_start_flags.to(last_emb.dtype)  # float32
 
                 for t in range(T):
-                    word_start_flags_f = word_start_flags[:, t:t+1].to(subword_embeds.dtype)
-                    last_emb = last_emb * (1.0 - word_start_flags_f) + subword_embeds[:, t]
-                    # last_emb = last_emb * (1.0 - word_start_flags[:, t:t+1]) + subword_embeds[:, t]
+                    last_emb = last_emb * (1.0 - word_start_flags_f[:, t:t+1]) + subword_embeds[:, t]
                     cum_embeds.append(last_emb.unsqueeze(1))
                 cum_embeds = torch.cat(cum_embeds, dim=1)
-                self.last_emb = last_emb
 
-        # Convert back to input dtype
-        return cum_embeds.to(input_dtype)
+                with torch.no_grad():
+                    self.last_emb.copy_(last_emb.detach().to(self.last_emb.dtype))
+
+                return cum_embeds.to(out_dtype)
 
 
 class CharAwareSubwordEncoder(nn.Module):
@@ -1256,14 +1252,13 @@ class CharAwareSubwordEncoder(nn.Module):
         subword_embeds[subword_mask] = out_emb
 
         if self.use_subword_flag_emb:
-            subword_embeds = self.subword_flag_emb(subword_embeds, subword_ids)
+            subword_embeds = self.subword_flag_emb(subword_embeds, subword_ids) 
 
         if self.use_bos_eos_emb:
             subword_embeds = self.bos_eos_emb(subword_embeds, subword_ids)
 
         if self.use_cumulative_word_emb:
             subword_embeds = self.cumulative_word_emb(subword_embeds, subword_ids)
-
         return subword_embeds
 
 

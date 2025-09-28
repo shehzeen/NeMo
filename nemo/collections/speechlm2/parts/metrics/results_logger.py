@@ -68,23 +68,28 @@ class ResultsLogger:
     def merge_and_save_audio(
         out_audio_path: str, pred_audio: torch.Tensor, pred_audio_sr: int, user_audio: torch.Tensor, user_audio_sr: int
     ) -> None:
-        user_audio = torchaudio.functional.resample(user_audio.float(), user_audio_sr, pred_audio_sr)
-        T1, T2 = pred_audio.shape[0], user_audio.shape[0]
-        max_len = max(T1, T2)
-        pred_audio_padded = torch.nn.functional.pad(pred_audio, (0, max_len - T1), mode='constant', value=0)
-        user_audio_padded = torch.nn.functional.pad(user_audio, (0, max_len - T2), mode='constant', value=0)
+        # if user_audio is None ignore it
+        if user_audio is not None:
+            user_audio = torchaudio.functional.resample(user_audio.float(), user_audio_sr, pred_audio_sr)
+            T1, T2 = pred_audio.shape[0], user_audio.shape[0]
+            max_len = max(T1, T2)
+            pred_audio_padded = torch.nn.functional.pad(pred_audio, (0, max_len - T1), mode='constant', value=0)
+            user_audio_padded = torch.nn.functional.pad(user_audio, (0, max_len - T2), mode='constant', value=0)
 
-        # combine audio in a multichannel audio
-        combined_wav = torch.cat(
-            [
-                user_audio_padded.squeeze().unsqueeze(0).detach().cpu(),
-                pred_audio_padded.squeeze().unsqueeze(0).detach().cpu(),
-            ],
-            dim=0,
-        )
-
+            # combine audio in a multichannel audio
+            combined_wav = torch.cat(
+                [
+                    user_audio_padded.squeeze().unsqueeze(0).detach().cpu(),
+                    pred_audio_padded.squeeze().unsqueeze(0).detach().cpu(),
+                ],
+                dim=0,
+            ).squeeze()
+            
+        else:
+            combined_wav = pred_audio.unsqueeze(0).detach().cpu()
+        print(combined_wav.shape)
         # save audio
-        torchaudio.save(out_audio_path, combined_wav.squeeze(), pred_audio_sr)
+        torchaudio.save(out_audio_path, combined_wav, pred_audio_sr)
         logging.info(f"Audio saved at: {out_audio_path}")
 
     def update(
@@ -114,15 +119,15 @@ class ResultsLogger:
             # save audio
             sample_id = samples_id[i][:150]  # make sure that sample id is not too big
             out_audio_path = os.path.join(self.audio_save_path, f"{name}_{sample_id}.wav")
-            self.merge_and_save_audio(out_audio_path, pred_audio[i], pred_audio_sr, user_audio[i], user_audio_sr)
+            self.merge_and_save_audio(out_audio_path, pred_audio[i], pred_audio_sr, user_audio[i] if user_audio is not None else None, user_audio_sr)
 
             if pred_audio_tf is not None:
                 out_audio_path_tf = out_audio_path.replace(".wav", "_tf.wav")
-                self.merge_and_save_audio(out_audio_path_tf, pred_audio_tf[i], pred_audio_sr, user_audio[i], user_audio_sr)
+                self.merge_and_save_audio(out_audio_path_tf, pred_audio_tf[i], pred_audio_sr, user_audio[i] if user_audio is not None else None, user_audio_sr)
 
             if target_audio is not None:
                 out_audio_path_gt = out_audio_path.replace(".wav", "_GT.wav")
-                self.merge_and_save_audio(out_audio_path_gt, target_audio[i], pred_audio_sr, user_audio[i], user_audio_sr)
+                self.merge_and_save_audio(out_audio_path_gt, target_audio[i], pred_audio_sr, user_audio[i] if user_audio is not None else None, user_audio_sr)
 
             # create a wav with eou prediction for debug purposes
             if eou_pred is not None:
