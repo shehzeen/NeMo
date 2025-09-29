@@ -1580,7 +1580,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 results["audio_tf"] = results["audio_tf"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
                 # remove prompt from target audio
                 target_audio_no_prompt = dataset_batch["target_audio"][:, -int(next_subword_ids.size(-1)*self.target_samples_per_frame):]
-
+                target_audio_no_prompt_lens = dataset_batch["target_audio_lens"] - (torch.tensor(dataset_batch["desc_plus_audio_prompt_lens"], dtype=torch.long, device=dataset_batch["target_audio_lens"].device) * self.target_samples_per_frame)
                 # for i, l in enumerate(dataset_batch["desc_plus_audio_prompt_lens"]):
                 #    results["audio_tf"][i, :l*self.target_samples_per_frame] = 0.0
 
@@ -1591,6 +1591,17 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                     # resample audio to the asr sampling rate
                     metric_audio_pred = resample(metric_audio_pred, self.target_sample_rate, 16000)
                     metric_audio_pred_lens = (metric_audio_pred_lens / self.target_sample_rate * 16000).to(torch.long)
+
+                    if self.cfg.get("use_GT_transcriptions_for_metrics", True):
+                        # use target audio transcription for metrics
+                        target_audio = resample(target_audio_no_prompt, self.target_sample_rate, 16000)
+                        target_audio_lens= (target_audio_no_prompt_lens / self.target_sample_rate * 16000).to(torch.long)
+                        target_asr_texts = self.asr_bleu.asr.transcribe(
+                            [audio[:alen] for audio, alen in zip(target_audio, target_audio_lens)],
+                            batch_size=target_audio.shape[0],
+                            verbose=False,
+                        )
+                        dataset_batch["target_texts"] = [asr_hyp.text for asr_hyp in target_asr_texts]
 
                     asr_hyps = self.asr_bleu.update(
                         name=name,

@@ -87,7 +87,7 @@ class ResultsLogger:
             
         else:
             combined_wav = pred_audio.unsqueeze(0).detach().cpu()
-        print(combined_wav.shape)
+
         # save audio
         torchaudio.save(out_audio_path, combined_wav, pred_audio_sr)
         logging.info(f"Audio saved at: {out_audio_path}")
@@ -164,6 +164,7 @@ class ResultsLogger:
         # uses append here to avoid needs to cache
         with open(out_json_path, 'a+', encoding='utf-8') as fout:
             for out_dict in out_dicts:
-                json.dump(out_dict, fout)
+                fout.write(json.dumps(out_dict, ensure_ascii=False, indent=4) + '\n')
+                # json.dump(out_dict, fout)
 
         logging.info(f"Metadata file for {name} dataset updated at: {out_json_path}")
