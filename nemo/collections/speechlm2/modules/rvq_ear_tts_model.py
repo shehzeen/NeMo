@@ -406,6 +406,8 @@ class RVQEARTTSConfig(Config):
     random_target_masking: bool = False
     exponent: float = 3.0
 
+    phoneme_vocab_size: int = None # to be set when using phoneme tokenizer
+
     def __post_init__(self):
         if self.cas_config is not None:
             self.cas_config = CASConfig(**self.cas_config)
@@ -435,6 +437,9 @@ class RVQEARTTSOutput:
     codes: Tensor | None = None
     lm_logits: Tensor | None = None
     eos_flag: Tensor | None = None
+
+    phoneme_loss: Tensor | None = None
+    phoneme_logits: Tensor | None = None
 
     def __getitem__(self, item: str | int):
         """Allows for accessing attributes by key or index."""
@@ -1315,6 +1320,12 @@ class RVQEARTTSModel(PreTrainedModel):
             if self.config.cas_config
             else None
         )
+        
+        self.embed_phoneme = None
+        self.phoneme_head = None
+        if hasattr(self.config, 'phoneme_vocab_size') and self.config.phoneme_vocab_size is not None:
+            self.embed_phoneme = nn.Embedding(self.config.phoneme_vocab_size, self.hidden_size)
+            self.phoneme_head = nn.Linear(self.hidden_size, self.config.phoneme_vocab_size)
 
         # Prediction Heads
         if not self.config.disable_eos_prediction:
@@ -1391,6 +1402,8 @@ class RVQEARTTSModel(PreTrainedModel):
         subword_ids: Tensor | None,
         subword_mask: Tensor | None,
         uncond_dec_flag: Tensor,
+        phoneme_ids: Tensor | None,
+        phoneme_mask: Tensor | None,
     ) -> Tensor:
         """Computes the final conditioning tensor by combining all sources."""
         cond = torch.zeros((1, 1, self.hidden_size), device=uncond_dec_flag.device)
@@ -1405,6 +1418,9 @@ class RVQEARTTSModel(PreTrainedModel):
             # at least one value should be true, otherwise we can completly skip it to avoid errors
             if subword_mask is not None and subword_mask.any():
                 cond = cond + self.embed_subword(subword_ids, subword_mask)
+        
+        if phoneme_ids is not None:
+            cond = cond + self.embed_phoneme(phoneme_ids)
 
         # Replace with null embedding for unconditional generation
         cond = torch.where(uncond_dec_flag, self.null_emb, cond)
@@ -1481,6 +1497,8 @@ class RVQEARTTSModel(PreTrainedModel):
         position_ids: Tensor | None = None,
         context_hidden_state: Tensor | None = None,
         subword_ids: Tensor | None = None,
+        phoneme_ids: Tensor | None = None,
+        phoneme_mask: Tensor | None = None,
         subword_mask: Tensor | None = None,
         audio_mask: Tensor | None = None,
         non_prompt_mask: Tensor | None = None,
@@ -1583,10 +1601,14 @@ class RVQEARTTSModel(PreTrainedModel):
                 subword_ids = torch.cat([subword_ids] * 2, 0)
                 if subword_mask is not None:
                     subword_mask = torch.cat([subword_mask] * 2, 0)
+            if phoneme_ids is not None:
+                phoneme_ids = torch.cat([phoneme_ids] * 2, 0)
+                if phoneme_mask is not None:
+                    phoneme_mask = torch.cat([phoneme_mask] * 2, 0)
             uncond_dec_flag = torch.cat([uncond_dec_flag, torch.ones_like(uncond_dec_flag)], 0)
 
         # Prepare conditioning
-        cond = self._prepare_conditioning(context_hidden_state, subword_ids, subword_mask, uncond_dec_flag)
+        cond = self._prepare_conditioning(context_hidden_state, subword_ids, subword_mask, uncond_dec_flag, phoneme_ids, phoneme_mask)
 
         # Main backbone pass
         backbone_outputs = self.backbone(
@@ -1605,6 +1627,20 @@ class RVQEARTTSModel(PreTrainedModel):
             else:
                 lm_logits = None
 
+            if self.phoneme_head is not None:
+                phoneme_logits = self.phoneme_head(hidden_states)
+                phoneme_loss = (
+                    F.cross_entropy(
+                        phoneme_logits.transpose(1, 2),
+                        phoneme_ids,
+                        reduction="none",
+                    )
+                    * phoneme_mask.float()
+                ).sum() / phoneme_mask.float().sum().clamp_min(1)
+            else:
+                phoneme_logits = None
+                phoneme_loss = 0.0
+
             mog_input_embeds = self.embed_code(self.depthsum_embedding(src_masked_code))
             if self.config.random_target_masking:
                 mog_input_embeds = mog_input_embeds + self.embed_target_mask((tgt_code_mask.sum(-1) - 1).clamp_min(0))
@@ -1614,9 +1650,9 @@ class RVQEARTTSModel(PreTrainedModel):
             lm_loss, c_loss, k_loss = self._compute_losses(
                 code, lm_logits, mog_logits, mog_mus, mog_mu_res, mog_logs, src_code_mask, tgt_code_mask, audio_mask
             )
-            total_loss = lm_loss + c_loss + k_loss
+            total_loss = lm_loss + c_loss + k_loss + phoneme_loss
 
-            return RVQEARTTSOutput(loss=total_loss, lm_loss=lm_loss, c_loss=c_loss, k_loss=k_loss, hidden_states=hidden_states)
+            return RVQEARTTSOutput(loss=total_loss, lm_loss=lm_loss, c_loss=c_loss, k_loss=k_loss, hidden_states=hidden_states, phoneme_loss=phoneme_loss, phoneme_logits=phoneme_logits)
         else:  # Inference
             if not generation_config:
                 return RVQEARTTSOutput(
@@ -1625,14 +1661,15 @@ class RVQEARTTSModel(PreTrainedModel):
                 )
             else:
                 if teacher_forcing_inference:
-                    generated_codes, lm_logits, eos_flag = self.generate_teacher_forcing(hidden_states, generation_config)
+                    generated_codes, lm_logits, eos_flag, phoneme_logits = self.generate_teacher_forcing(hidden_states, generation_config)
                 else:
-                    generated_codes, lm_logits, eos_flag = self.generate_step(hidden_states, ignore_eos_flag_stop=ignore_eos_flag_stop, **generation_config)
+                    generated_codes, lm_logits, eos_flag, phoneme_logits = self.generate_step(hidden_states, ignore_eos_flag_stop=ignore_eos_flag_stop, **generation_config)
                 return RVQEARTTSOutput(
                     past_key_values=backbone_outputs.past_key_values,
                     codes=generated_codes,
                     lm_logits=lm_logits,
                     eos_flag=eos_flag,
+                    phoneme_logits=phoneme_logits,
                 )
 
     @torch.no_grad()
@@ -1649,6 +1686,7 @@ class RVQEARTTSModel(PreTrainedModel):
             generated_codes: [B, T, ...] generated codes per frame
             lm_logits: [B, T, vocab_size] language model logits
             eos_flag: [B, T] boolean tensor indicating EOS
+            phoneme_logits: [B, T, phoneme_vocab_size] phoneme logits (if applicable)
         """
         B, T, H = hidden_states.shape
 
@@ -1682,7 +1720,12 @@ class RVQEARTTSModel(PreTrainedModel):
             lm_logits = None
             eos_flag = None
 
-        return generated_codes, lm_logits, eos_flag
+        if self.phoneme_head is not None:
+            phoneme_logits = self.phoneme_head(hidden_states)
+        else:
+            phoneme_logits = None
+
+        return generated_codes, lm_logits, eos_flag, phoneme_logits
 
     @torch.no_grad()
     def generate_step(
@@ -1713,10 +1756,11 @@ class RVQEARTTSModel(PreTrainedModel):
             eos_threshold (float | None): The threshold for EOS prediction.
 
         Returns:
-            tuple[Tensor | None, Tensor, Tensor]: A tuple containing:
+            tuple[Tensor | None, Tensor, Tensor, Tensor | None]: A tuple containing:
                 - the generated codes.
                 - The logits from `lm_head`.
                 - The EOS flag.
+                - The phoneme logits (if applicable).
         """
         # 1. Preparation
         if guidance_scale is not None:
@@ -1774,6 +1818,10 @@ class RVQEARTTSModel(PreTrainedModel):
             lm_logits = None
             eos_flag = None
 
+        if self.phoneme_head is not None:
+            phoneme_logits = self.phoneme_head(hidden_states)
+        else:
+            phoneme_logits = None
         # Initialize the full code tensor
         code = torch.zeros((b, t, d), dtype=torch.long, device=device) + self.config.codebook_size
 
@@ -1813,7 +1861,7 @@ class RVQEARTTSModel(PreTrainedModel):
             z = mog_mu + torch.exp(mog_logs) * torch.randn_like(mog_mu) * noise_scale_i
             code = depthsum_encoding_step(self.rvq_embs, z, code, cnt, k[0].item())
             cnt += k[0].item()
-        return code, lm_logits, eos_flag
+        return code, lm_logits, eos_flag, phoneme_logits
     
     def load_state_dict(self, state_dict, strict: bool = True):
         try:

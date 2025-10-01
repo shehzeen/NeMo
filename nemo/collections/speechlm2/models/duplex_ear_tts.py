@@ -76,6 +76,7 @@ from types import SimpleNamespace
 
 from nemo.collections.speechlm2.modules.rvq_ear_tts_model import RVQEARTTSModel, RVQEARTTSConfig, build_vocabs, SubwordFlagEmbedding
 from nemo.collections.speechlm2.modules.rvq_ear_tts_vae import RVQVAEModel
+from hydra.utils import instantiate
 
 def generate_multiturn_speaking_mask(input_ids: torch.Tensor, bos_token_id: int = 0, eos_token_id: int = 1):
     """
@@ -797,6 +798,14 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             self.tokenizer = WordSepTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True)
         else:
             self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True) # Note that we are using fast tokenizer
+        
+        self.phoneme_tokenizer = None
+        if self.cfg.get('phoneme_tokenizer', None) is not None:
+            self.phoneme_tokenizer = instantiate(self.cfg.phoneme_tokenizer)
+            self.phoneme_tokenizer.bos = len(self.phoneme_tokenizer.tokens)
+            self.phoneme_tokenizer.eos = len(self.phoneme_tokenizer.tokens) + 1
+            
+
 
         if 'Qwen2.5' in self.cfg.pretrained_lm_name:
             # For Qwen, '<|im_start|>' is a common choice for a BOS token.
@@ -1033,6 +1042,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         non_prompt_mask = batch["non_prompt_mask"]
         aligned_attention_mask = batch["aligned_attention_mask"]
         aligned_position_ids = batch["aligned_position_ids"]
+        phoneme_ids = batch.get("phoneme_ids", None)
+        phoneme_mask = batch.get("phoneme_mask", None)
 
         # extract target audio codes
         with fp32_precision(), torch.no_grad():
@@ -1264,6 +1275,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             "output_lens": target_codes_lens,
             "non_prompt_mask": non_prompt_mask,
             "input_text_tokens": input_text_tokens,
+            "phoneme_ids": phoneme_ids,
+            "phoneme_mask": phoneme_mask,
         }
 
     def training_step(self, batch: dict, batch_idx: int):
@@ -1296,6 +1309,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             position_ids=inputs["position_ids"],
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
+            phoneme_ids=inputs["phoneme_ids"],
+            phoneme_mask=inputs["phoneme_mask"],
             subword_mask=inputs["subword_mask"],
             non_prompt_mask=inputs["non_prompt_mask"],
         )

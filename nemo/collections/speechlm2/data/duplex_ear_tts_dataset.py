@@ -25,6 +25,7 @@ from lhotse.dataset.collation import collate_audio, collate_vectors
 from lhotse.utils import ifnone
 
 from nemo.collections.common.tokenizers import TokenizerSpec
+from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import BaseTokenizer
 from nemo.collections.speechlm2.data.utils import get_pad_id
 from nemo.utils import logging
 from nemo.collections.speechlm2.modules.ear_tts_commons import SCRIPT_PLACEHOLDER
@@ -168,6 +169,8 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         add_audio_prompt_after_description: bool = False,
         audio_prompt_duration: float = 3.0,
         num_delay_speech_tokens: int = 0,
+        num_delay_phoneme_tokens: int = 0,
+        phoneme_tokenizer = None,
     ):
         self.tokenizer = tokenizer
         self.frame_length = frame_length
@@ -181,6 +184,8 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         self.add_audio_prompt_after_description = add_audio_prompt_after_description
         self.audio_prompt_duration = audio_prompt_duration
         self.num_delay_speech_tokens = num_delay_speech_tokens
+        self.num_delay_phoneme_tokens = num_delay_phoneme_tokens
+        self.phoneme_tokenizer = phoneme_tokenizer
         
         assert tokenizer.bos is not None, "BOS support in the tokenizer is required for S2S models."
         assert tokenizer.eos is not None, "EOS support in the tokenizer is required for S2S models."
@@ -239,6 +244,7 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         target_audio, target_audio_lens = collate_audio(
             cuts.resample(self.target_sample_rate), recording_field="target_audio"
         )
+        # import ipdb; ipdb.set_trace()
         input_text_tokens, target_token_lens = collate_token_channel(
             cuts, self.tokenizer, self.frame_length, roles=self.output_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
         )
@@ -246,6 +252,15 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             cuts, self.tokenizer, self.frame_length, roles=self.input_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
         )
 
+        if self.phoneme_tokenizer is not None:
+            input_text_tokens_phonemes, target_token_lens_phonemes = collate_token_channel(
+                cuts, self.phoneme_tokenizer, self.frame_length, roles=self.output_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
+            )
+            source_tokens_phonemes, source_token_lens_phonemes = collate_token_channel(
+                cuts, self.phoneme_tokenizer, self.frame_length, roles=self.input_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
+            )
+
+        # import ipdb; ipdb.set_trace()
         # if context audio is available use it, otherwise use a random turn
         if hasattr(cuts[0], "context_audio"):
             speaker_reference_audio = []
@@ -479,6 +494,13 @@ def collate_token_channel(
     tokens = collate_vectors(tokens, padding_value=pad_id)
     return tokens, token_lens
 
+def text_to_ids_from_tokenizer(text, tokenizer):
+    if isinstance(tokenizer, TokenizerSpec):
+        return tokenizer.text_to_ids(text)
+    elif isinstance(tokenizer, BaseTokenizer):
+        return tokenizer.encode(text)
+    else:
+        raise ValueError(f"Unsupported tokenizer type: {type(tokenizer)}")
 
 def build_token_channel(
     cut: Cut,
@@ -497,9 +519,9 @@ def build_token_channel(
     for supervision in cut.supervisions:
         if supervision.speaker in roles:
             if add_text_bos_and_eos_in_each_turn:
-                text_ids = torch.as_tensor([tokenizer.bos] + tokenizer.text_to_ids(supervision.text))
+                text_ids = torch.as_tensor([tokenizer.bos] + text_to_ids_from_tokenizer(supervision.text, tokenizer))
             else:
-                text_ids = torch.as_tensor(tokenizer.text_to_ids(supervision.text))
+                text_ids = torch.as_tensor(text_to_ids_from_tokenizer(supervision.text, tokenizer))
 
             # Determine the frame offset for the start of the supervision to insert the text tokens.
             pos = compute_num_frames(supervision.start, frame_length, cut.sampling_rate)
