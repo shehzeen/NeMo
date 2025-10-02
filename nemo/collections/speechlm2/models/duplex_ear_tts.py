@@ -777,6 +777,13 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             if self.cfg.tts_config.get("use_subword_flag_emb", False):
                 self.subword_flag_emb = SubwordFlagEmbedding(self.cfg.pretrained_lm_name, self.cfg.tts_config.context_hidden_size)
 
+        self.phoneme_tokenizer = None
+        if self.cfg.get('phoneme_tokenizer', None) is not None:
+            self.phoneme_tokenizer = instantiate(self.cfg.phoneme_tokenizer)
+            self.phoneme_tokenizer.bos = len(self.phoneme_tokenizer.tokens)
+            self.phoneme_tokenizer.eos = len(self.phoneme_tokenizer.tokens) + 1
+            self.cfg.tts_config.phoneme_vocab_size = len(self.phoneme_tokenizer.tokens) + 2  # for bos and eos
+
         # instanciate eartts model and codec
         self._load_tts_model(self.cfg)
         self._codebook_size = self.tts_model.config.codebook_size
@@ -799,11 +806,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         else:
             self.tokenizer = AutoTokenizer(self.cfg.pretrained_lm_name, use_fast=True, trust_remote_code=True) # Note that we are using fast tokenizer
         
-        self.phoneme_tokenizer = None
-        if self.cfg.get('phoneme_tokenizer', None) is not None:
-            self.phoneme_tokenizer = instantiate(self.cfg.phoneme_tokenizer)
-            self.phoneme_tokenizer.bos = len(self.phoneme_tokenizer.tokens)
-            self.phoneme_tokenizer.eos = len(self.phoneme_tokenizer.tokens) + 1
+        
             
 
 
@@ -1042,8 +1045,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         non_prompt_mask = batch["non_prompt_mask"]
         aligned_attention_mask = batch["aligned_attention_mask"]
         aligned_position_ids = batch["aligned_position_ids"]
-        phoneme_ids = batch.get("phoneme_ids", None)
-        phoneme_mask = batch.get("phoneme_mask", None)
+        input_text_tokens_phonemes = batch["input_text_tokens_phonemes"]
+        target_text_tokens_phonemes = batch["target_text_tokens_phonemes"]
+        target_token_lens_phonemes = batch["target_token_lens_phonemes"]
 
         # extract target audio codes
         with fp32_precision(), torch.no_grad():
@@ -1082,6 +1086,8 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
                 return x  # leave others for now
 
             input_text_tokens = pad_or_truncate(input_text_tokens, pad_value=self.text_pad_id)
+            if input_text_tokens_phonemes is not None:
+                input_text_tokens_phonemes = pad_or_truncate(input_text_tokens_phonemes, pad_value=self.phoneme_tokenizer.pad)
             audio_mask = pad_or_truncate(audio_mask, pad_value=0)
             desc_mask = pad_or_truncate(desc_mask, pad_value=0)
             non_prompt_mask = pad_or_truncate(non_prompt_mask, pad_value=0)
@@ -1275,8 +1281,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             "output_lens": target_codes_lens,
             "non_prompt_mask": non_prompt_mask,
             "input_text_tokens": input_text_tokens,
-            "phoneme_ids": phoneme_ids,
-            "phoneme_mask": phoneme_mask,
+            "input_text_tokens_phonemes": input_text_tokens_phonemes,
+            "target_text_tokens_phonemes": target_text_tokens_phonemes, # Using same mask as subwords.
+            "target_token_lens_phonemes": target_token_lens_phonemes,
         }
 
     def training_step(self, batch: dict, batch_idx: int):
@@ -1309,8 +1316,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             position_ids=inputs["position_ids"],
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
-            phoneme_ids=inputs["phoneme_ids"],
-            phoneme_mask=inputs["phoneme_mask"],
+            input_phoneme_ids=inputs["input_text_tokens_phonemes"],
+            target_phoneme_ids=inputs["target_text_tokens_phonemes"],
+            phoneme_mask=inputs["subword_mask"],
             subword_mask=inputs["subword_mask"],
             non_prompt_mask=inputs["non_prompt_mask"],
         )
@@ -1404,6 +1412,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             position_ids=inputs["position_ids"],
             context_hidden_state=inputs["context_hidden_state"],
             subword_ids=inputs["subword_ids"],
+            input_phoneme_ids=inputs["input_text_tokens_phonemes"],
+            target_phoneme_ids=inputs["target_text_tokens_phonemes"],
+            phoneme_mask=inputs["subword_mask"],
             subword_mask=inputs["subword_mask"],
             non_prompt_mask=inputs["non_prompt_mask"],
             generation_config=self._get_generation_config(guidance_enabled=guidance_enabled),
@@ -1832,7 +1843,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
         init_inputs.update({"use_cache": True, "past_key_values": None, "guidance_enabled": guidance_enabled})
         # warmup the model and generate the very first audio token
         outputs = self.tts_model(**init_inputs)
-        code, _, _ = self.tts_model.generate_step(outputs.hidden_states[:, -1:], **generation_config)
+        code, _, _, _ = self.tts_model.generate_step(outputs.hidden_states[:, -1:], **generation_config)
         past_key_values = outputs.past_key_values
         return init_inputs, code, past_key_values
 
@@ -1886,7 +1897,7 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             # warmup the model and generate the very first audio token
             outputs = self.tts_model(**init_inputs)
 
-        code, _, _ = self.tts_model.generate_step(outputs.hidden_states[:, -1:], **generation_config)
+        code, _, _, _ = self.tts_model.generate_step(outputs.hidden_states[:, -1:], **generation_config)
         past_key_values = outputs.past_key_values
 
         # use the text tokens to stop generation

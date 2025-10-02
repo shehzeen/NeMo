@@ -256,9 +256,6 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             input_text_tokens_phonemes, target_token_lens_phonemes = collate_token_channel(
                 cuts, self.phoneme_tokenizer, self.frame_length, roles=self.output_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
             )
-            source_tokens_phonemes, source_token_lens_phonemes = collate_token_channel(
-                cuts, self.phoneme_tokenizer, self.frame_length, roles=self.input_roles, add_text_bos_and_eos_in_each_turn=self.add_text_bos_and_eos_in_each_turn,
-            )
 
         # import ipdb; ipdb.set_trace()
         # if context audio is available use it, otherwise use a random turn
@@ -309,6 +306,8 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
         if self.add_description:
             text_pad_id = get_pad_id(self.tokenizer)
             input_text_tokens_ = []
+            input_text_tokens_phonemes_ = []
+            target_text_tokens_phonemes_ = []
             source_tokens_ = []
             source_audio_ = []
             target_audio_ = []
@@ -340,6 +339,14 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
                     source_tokens_.append(torch.cat([desc_tokens_ids, prompt_audio_text_pad,  source_tokens[i]]))
                     source_token_lens[i] = source_token_lens[i] + len(desc_tokens_ids) + prompt_audio_text_pad_size
                     # add silence in the source audio while the prompt is being processed
+
+                    if self.phoneme_tokenizer is not None:
+                        input_phoneme_pad_size = len(desc_tokens_ids) + prompt_audio_text_pad_size + self.num_delay_phoneme_tokens
+                        phoneme_pad = torch.ones(input_phoneme_pad_size, device=input_text_tokens_phonemes.device, dtype=input_text_tokens_phonemes.dtype) * self.phoneme_tokenizer.pad
+                        input_text_tokens_phonemes_.append(torch.cat([phoneme_pad, input_text_tokens_phonemes[i][:-1]]))
+                        target_text_tokens_phonemes_.append(torch.cat([phoneme_pad, input_text_tokens_phonemes[i][1:]]))
+                        target_token_lens_phonemes[i] = target_token_lens_phonemes[i] + input_phoneme_pad_size - 1
+
                     pad_size = (len(desc_tokens_ids) * source_samples_per_frame) + prompt_audio.size(1)
                     pad_audio = torch.zeros(pad_size, device=source_audio.device, dtype=source_audio.dtype)
                     source_audio_.append(torch.cat([pad_audio, source_audio[i]]))
@@ -360,6 +367,14 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
                     source_tokens_.append(torch.cat([desc_tokens_ids, source_tokens[i]]))
                     source_token_lens[i] = source_token_lens[i] + len(desc_tokens_ids)
                     # add silence in the source audio while the prompt is being processed
+
+                    if self.phoneme_tokenizer is not None:
+                        input_phoneme_pad_size = len(desc_tokens_ids) + self.num_delay_phoneme_tokens
+                        phoneme_pad = torch.ones(input_phoneme_pad_size, device=input_text_tokens_phonemes.device, dtype=input_text_tokens_phonemes.dtype) * self.phoneme_tokenizer.pad
+                        input_text_tokens_phonemes_.append(torch.cat([phoneme_pad, input_text_tokens_phonemes[i][:-1]]))
+                        target_text_tokens_phonemes_.append(torch.cat([phoneme_pad, input_text_tokens_phonemes[i][1:]]))
+                        target_token_lens_phonemes[i] = target_token_lens_phonemes[i] + input_phoneme_pad_size - 1
+
                     pad_size = len(desc_tokens_ids) * source_samples_per_frame
                     pad_audio = torch.zeros(pad_size, device=source_audio.device, dtype=source_audio.dtype)
                     source_audio_.append(torch.cat([pad_audio, source_audio[i]]))
@@ -377,6 +392,9 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             # collate tensors
             input_text_tokens = collate_vectors(input_text_tokens_, padding_value=text_pad_id)
             source_tokens = collate_vectors(source_tokens_, padding_value=text_pad_id)
+            if self.phoneme_tokenizer is not None:
+                input_text_tokens_phonemes = collate_vectors(input_text_tokens_phonemes_, padding_value=self.phoneme_tokenizer.pad)
+                target_text_tokens_phonemes = collate_vectors(target_text_tokens_phonemes_, padding_value=self.phoneme_tokenizer.pad)
             source_audio = collate_vectors(source_audio_, padding_value=0)
             target_audio = collate_vectors(target_audio_, padding_value=0)
 
@@ -449,6 +467,9 @@ class DuplexEARTTSDataset(torch.utils.data.Dataset):
             "speaker_reference_audio": speaker_reference_audio,
             "speaker_reference_audio_lens": speaker_reference_audio_lens,
             "formatter": [getattr(cut, "formatter", "s2s_duplex") for cut in cuts],
+            "input_text_tokens_phonemes": input_text_tokens_phonemes if self.phoneme_tokenizer is not None else None,
+            "target_text_tokens_phonemes": target_text_tokens_phonemes if self.phoneme_tokenizer is not None else None,
+            "target_token_lens_phonemes": target_token_lens_phonemes if self.phoneme_tokenizer is not None else None,
         }
 
 

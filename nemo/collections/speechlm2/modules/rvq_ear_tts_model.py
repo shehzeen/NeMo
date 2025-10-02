@@ -1497,7 +1497,8 @@ class RVQEARTTSModel(PreTrainedModel):
         position_ids: Tensor | None = None,
         context_hidden_state: Tensor | None = None,
         subword_ids: Tensor | None = None,
-        phoneme_ids: Tensor | None = None,
+        input_phoneme_ids: Tensor | None = None,
+        target_phoneme_ids: Tensor | None = None,
         phoneme_mask: Tensor | None = None,
         subword_mask: Tensor | None = None,
         audio_mask: Tensor | None = None,
@@ -1534,6 +1535,7 @@ class RVQEARTTSModel(PreTrainedModel):
                           and the cache (for inference).
         """
         # Determine operating mode.
+        import ipdb; ipdb.set_trace()
         if training is None:
             training = self.training
 
@@ -1601,14 +1603,15 @@ class RVQEARTTSModel(PreTrainedModel):
                 subword_ids = torch.cat([subword_ids] * 2, 0)
                 if subword_mask is not None:
                     subword_mask = torch.cat([subword_mask] * 2, 0)
-            if phoneme_ids is not None:
-                phoneme_ids = torch.cat([phoneme_ids] * 2, 0)
+            if input_phoneme_ids is not None:
+                input_phoneme_ids = torch.cat([input_phoneme_ids] * 2, 0)
+                target_phoneme_ids = torch.cat([target_phoneme_ids] * 2, 0)
                 if phoneme_mask is not None:
                     phoneme_mask = torch.cat([phoneme_mask] * 2, 0)
             uncond_dec_flag = torch.cat([uncond_dec_flag, torch.ones_like(uncond_dec_flag)], 0)
 
         # Prepare conditioning
-        cond = self._prepare_conditioning(context_hidden_state, subword_ids, subword_mask, uncond_dec_flag, phoneme_ids, phoneme_mask)
+        cond = self._prepare_conditioning(context_hidden_state, subword_ids, subword_mask, uncond_dec_flag, input_phoneme_ids, phoneme_mask)
 
         # Main backbone pass
         backbone_outputs = self.backbone(
@@ -1627,12 +1630,12 @@ class RVQEARTTSModel(PreTrainedModel):
             else:
                 lm_logits = None
 
-            if self.phoneme_head is not None:
+            if self.phoneme_head is not None and target_phoneme_ids is not None:
                 phoneme_logits = self.phoneme_head(hidden_states)
                 phoneme_loss = (
                     F.cross_entropy(
                         phoneme_logits.transpose(1, 2),
-                        phoneme_ids,
+                        target_phoneme_ids,
                         reduction="none",
                     )
                     * phoneme_mask.float()
