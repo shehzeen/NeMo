@@ -1403,7 +1403,6 @@ class RVQEARTTSModel(PreTrainedModel):
         subword_mask: Tensor | None,
         uncond_dec_flag: Tensor,
         phoneme_ids: Tensor | None,
-        phoneme_mask: Tensor | None,
     ) -> Tensor:
         """Computes the final conditioning tensor by combining all sources."""
         cond = torch.zeros((1, 1, self.hidden_size), device=uncond_dec_flag.device)
@@ -1420,6 +1419,7 @@ class RVQEARTTSModel(PreTrainedModel):
                 cond = cond + self.embed_subword(subword_ids, subword_mask)
         
         if phoneme_ids is not None:
+            # @shehzeen: TODO, decide if we should have a mask here.
             cond = cond + self.embed_phoneme(phoneme_ids)
 
         # Replace with null embedding for unconditional generation
@@ -1535,7 +1535,7 @@ class RVQEARTTSModel(PreTrainedModel):
                           and the cache (for inference).
         """
         # Determine operating mode.
-        import ipdb; ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
         if training is None:
             training = self.training
 
@@ -1605,13 +1605,14 @@ class RVQEARTTSModel(PreTrainedModel):
                     subword_mask = torch.cat([subword_mask] * 2, 0)
             if input_phoneme_ids is not None:
                 input_phoneme_ids = torch.cat([input_phoneme_ids] * 2, 0)
+            if target_phoneme_ids is not None:
                 target_phoneme_ids = torch.cat([target_phoneme_ids] * 2, 0)
-                if phoneme_mask is not None:
-                    phoneme_mask = torch.cat([phoneme_mask] * 2, 0)
+            if phoneme_mask is not None:
+                phoneme_mask = torch.cat([phoneme_mask] * 2, 0)
             uncond_dec_flag = torch.cat([uncond_dec_flag, torch.ones_like(uncond_dec_flag)], 0)
 
         # Prepare conditioning
-        cond = self._prepare_conditioning(context_hidden_state, subword_ids, subword_mask, uncond_dec_flag, input_phoneme_ids, phoneme_mask)
+        cond = self._prepare_conditioning(context_hidden_state, subword_ids, subword_mask, uncond_dec_flag, input_phoneme_ids)
 
         # Main backbone pass
         backbone_outputs = self.backbone(
@@ -1630,19 +1631,19 @@ class RVQEARTTSModel(PreTrainedModel):
             else:
                 lm_logits = None
 
-            if self.phoneme_head is not None and target_phoneme_ids is not None:
+            phoneme_logits = None
+            phoneme_loss = 0.0
+            if self.phoneme_head is not None:
                 phoneme_logits = self.phoneme_head(hidden_states)
-                phoneme_loss = (
-                    F.cross_entropy(
-                        phoneme_logits.transpose(1, 2),
-                        target_phoneme_ids,
-                        reduction="none",
-                    )
-                    * phoneme_mask.float()
-                ).sum() / phoneme_mask.float().sum().clamp_min(1)
-            else:
-                phoneme_logits = None
-                phoneme_loss = 0.0
+                if target_phoneme_ids is not None:
+                    phoneme_loss = (
+                        F.cross_entropy(
+                            phoneme_logits.transpose(1, 2),
+                            target_phoneme_ids,
+                            reduction="none",
+                        )
+                        * phoneme_mask.float()
+                    ).sum() / phoneme_mask.float().sum().clamp_min(1)
 
             mog_input_embeds = self.embed_code(self.depthsum_embedding(src_masked_code))
             if self.config.random_target_masking:
@@ -1697,14 +1698,14 @@ class RVQEARTTSModel(PreTrainedModel):
         generated_codes_cache = []
         lm_logits_cache = []
         eos_flag_cache = []
-
+        phoneme_logits_cache = []
         # Iterate over time steps (frames)
         for t in range(T):
             # extract one frame (as the original generate_step expects)
             frame_hidden = hidden_states[:, t, :]  # [B, H]
 
             # call original generate_step
-            generated_codes, lm_logits, eos_flag = self.generate_step(
+            generated_codes, lm_logits, eos_flag, phoneme_logits = self.generate_step(
                 frame_hidden.unsqueeze(1),  # keep batch dim + frame dim
                 **generation_config
             )
@@ -1713,6 +1714,9 @@ class RVQEARTTSModel(PreTrainedModel):
                 generated_codes_cache.append(generated_codes)
                 lm_logits_cache.append(lm_logits)
                 eos_flag_cache.append(eos_flag)
+            
+            if phoneme_logits is not None:
+                phoneme_logits_cache.append(phoneme_logits)
 
         # Stack results along time dimension
         generated_codes = torch.stack(generated_codes_cache, dim=1)  # [B, T, ...]
@@ -1723,10 +1727,8 @@ class RVQEARTTSModel(PreTrainedModel):
             lm_logits = None
             eos_flag = None
 
-        if self.phoneme_head is not None:
-            phoneme_logits = self.phoneme_head(hidden_states)
-        else:
-            phoneme_logits = None
+        if len(phoneme_logits_cache) > 0:
+            phoneme_logits = torch.cat(phoneme_logits_cache, dim=1)   # [B, T, phoneme_vocab_size]
 
         return generated_codes, lm_logits, eos_flag, phoneme_logits
 

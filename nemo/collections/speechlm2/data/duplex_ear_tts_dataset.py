@@ -519,7 +519,23 @@ def text_to_ids_from_tokenizer(text, tokenizer):
     if isinstance(tokenizer, TokenizerSpec):
         return tokenizer.text_to_ids(text)
     elif isinstance(tokenizer, BaseTokenizer):
-        return tokenizer.encode(text)
+        token_ids = tokenizer.encode(text)
+        # Stack tokens by combining two consecutive tokens into a new unique token ID
+        if hasattr(tokenizer, 'stacking_factor') and tokenizer.stacking_factor > 1:
+            if len(token_ids) % tokenizer.stacking_factor != 0:
+                # Pad with pad token to make the length divisible by stacking_factor
+                padding_length = tokenizer.stacking_factor - (len(token_ids) % tokenizer.stacking_factor)
+                token_ids.extend([tokenizer.pad] * padding_length)
+            stacked_token_ids = []
+            for i in range(0, len(token_ids), tokenizer.stacking_factor):
+                stacked_id = 0
+                for j in range(tokenizer.stacking_factor):
+                    stacked_id *= len(tokenizer.tokens)
+                    stacked_id += token_ids[i + j]
+                stacked_token_ids.append(stacked_id)
+            return stacked_token_ids
+        else:
+            return token_ids
     else:
         raise ValueError(f"Unsupported tokenizer type: {type(tokenizer)}")
 
