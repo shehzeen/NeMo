@@ -407,6 +407,7 @@ class RVQEARTTSConfig(Config):
     exponent: float = 3.0
 
     phoneme_vocab_size: int = None # to be set when using phoneme tokenizer
+    phoneme_loss_scale: float = 1.0
 
     def __post_init__(self):
         if self.cas_config is not None:
@@ -1323,9 +1324,13 @@ class RVQEARTTSModel(PreTrainedModel):
         
         self.embed_phoneme = None
         self.phoneme_head = None
+        self.phoneme_loss_scale = self.config.phoneme_loss_scale
         if hasattr(self.config, 'phoneme_vocab_size') and self.config.phoneme_vocab_size is not None:
             self.embed_phoneme = nn.Embedding(self.config.phoneme_vocab_size, self.hidden_size)
+            # Initialize embed_phoneme to zero
+            nn.init.zeros_(self.embed_phoneme.weight)
             self.phoneme_head = nn.Linear(self.hidden_size, self.config.phoneme_vocab_size)
+            print("Phoneme loss scale", self.phoneme_loss_scale)
 
         # Prediction Heads
         if not self.config.disable_eos_prediction:
@@ -1654,7 +1659,7 @@ class RVQEARTTSModel(PreTrainedModel):
             lm_loss, c_loss, k_loss = self._compute_losses(
                 code, lm_logits, mog_logits, mog_mus, mog_mu_res, mog_logs, src_code_mask, tgt_code_mask, audio_mask
             )
-            total_loss = lm_loss + c_loss + k_loss + phoneme_loss
+            total_loss = lm_loss + c_loss + k_loss + self.phoneme_loss_scale * phoneme_loss
 
             return RVQEARTTSOutput(loss=total_loss, lm_loss=lm_loss, c_loss=c_loss, k_loss=k_loss, hidden_states=hidden_states, phoneme_loss=phoneme_loss, phoneme_logits=phoneme_logits)
         else:  # Inference

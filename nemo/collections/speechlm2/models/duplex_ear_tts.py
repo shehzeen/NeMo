@@ -1331,6 +1331,9 @@ class DuplexEARTTS(LightningModule, HFHubMixin):
             non_prompt_mask=inputs["non_prompt_mask"],
         )
         loss_dict = {"lm_loss": tts_output.lm_loss, "c_loss": tts_output.c_loss, "k_loss": tts_output.k_loss}
+        if tts_output.phoneme_loss is not None:
+            loss_dict["phoneme_loss"] = tts_output.phoneme_loss
+            
         loss = sum(loss_dict.values())
         if self.cfg.get("use_char_ids_loss", None):
             char_logits = self.char_head(tts_output.hidden_states)
