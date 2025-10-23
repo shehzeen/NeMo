@@ -53,4 +53,25 @@ dataset_meta_info = {
         'audio_dir': '/',
         'feature_dir': None,
     },
+    'riva_challenging_qwen': {
+        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/riva_challenging_filtered.json',
+        'audio_dir' : '/datap/misc/Datasets/riva',
+        'feature_dir' : '/datap/misc/Datasets/riva',
+        'load_cached_codes_if_available': False,
+        'tokenizer_names': ['qwen'],
+    },
+    'riva_dummy_qwen': {
+        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/riva_dummy.json',
+        'audio_dir' : '/datap/misc/Datasets/riva',
+        'feature_dir' : '/datap/misc/Datasets/riva',
+        'load_cached_codes_if_available': False,
+        'tokenizer_names': ['qwen'],
+    },
+    'libri_unseen_test_qwen': {
+        'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/test_clean_withContextAudioPaths.json',
+        'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'feature_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
+        'load_cached_codes_if_available': False,
+        'tokenizer_names': ['qwen'],
+    },
 }

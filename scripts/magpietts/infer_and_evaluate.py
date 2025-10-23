@@ -36,7 +36,7 @@ from PIL import Image
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPATokenizer
 from nemo.collections.tts.data.text_to_speech_dataset import MagpieTTSDataset
-from nemo.collections.tts.models import MagpieTTSModel
+from nemo.collections.tts.models import MagpieTTSModel, MagpieTTSDecoderModel
 
 # EVALUATION_DATASETS is the full list of datasets for evaluation of a new model.
 EVALUATION_DATASETS = (
@@ -296,7 +296,9 @@ def run_inference(
     eos_detection_method=None,
     ignore_finished_sentence_tracking=False,
     with_utmosv2=True,
+    is_decoder_only_model=False,
 ):
+    model_cls = MagpieTTSDecoderModel if is_decoder_only_model else MagpieTTSModel
     # Load model
     if hparams_file is not None and checkpoint_file is not None:
         model_cfg = OmegaConf.load(hparams_file)
@@ -311,7 +313,7 @@ def run_inference(
                 model_cfg, codecmodel_path, legacy_codebooks, legacy_text_conditioning
             )
 
-        model = MagpieTTSModel(cfg=model_cfg)
+        model = model_cls(cfg=model_cfg)
         model.use_kv_cache_for_inference = True
 
         # Load weights from checkpoint file
@@ -321,12 +323,12 @@ def run_inference(
         model.load_state_dict(state_dict)
         checkpoint_name = checkpoint_file.split("/")[-1].split(".ckpt")[0]
     elif nemo_file is not None:
-        model_cfg = MagpieTTSModel.restore_from(nemo_file, return_config=True)
+        model_cfg = model_cls.restore_from(nemo_file, return_config=True)
         with open_dict(model_cfg):
             model_cfg, cfg_sample_rate = update_config(
                 model_cfg, codecmodel_path, legacy_codebooks, legacy_text_conditioning
             )
-        model = MagpieTTSModel.restore_from(nemo_file, override_config_path=model_cfg)
+        model = model_cls.restore_from(nemo_file, override_config_path=model_cfg)
         model.use_kv_cache_for_inference = True
         checkpoint_name = nemo_file.split("/")[-1].split(".nemo")[0]
     else:
@@ -409,13 +411,22 @@ def run_inference(
             os.makedirs(pred_audio_dir, exist_ok=True)
             delete_old_generated_files(pred_audio_dir)
 
+            if is_decoder_only_model:
+                _load_16khz_audio = False
+                _use_text_conditioning_encoder = True
+                _pad_context_text_to_max_duration = False
+            else:
+                _load_16khz_audio = model.model_type == 'single_encoder_sv_tts'
+                _use_text_conditioning_encoder = model.use_text_conditioning_encoder
+                _pad_context_text_to_max_duration = model.pad_context_text_to_max_duration
+
             test_dataset = MagpieTTSDataset(
                 dataset_meta=dataset_meta,
                 sample_rate=model.sample_rate,
                 min_duration=0.5,
                 max_duration=20,
                 codec_model_samples_per_frame=model.codec_model_samples_per_frame,
-                bos_id=model.bos_id,
+                bos_id=None,
                 eos_id=model.eos_id,
                 context_audio_bos_id=model.context_audio_bos_id,
                 context_audio_eos_id=model.context_audio_eos_id,
@@ -426,10 +437,10 @@ def run_inference(
                 load_cached_codes_if_available=False,
                 dataset_type='test',
                 tokenizer_config=None,
-                load_16khz_audio=model.model_type == 'single_encoder_sv_tts',
-                use_text_conditioning_tokenizer=model.use_text_conditioning_encoder,
+                load_16khz_audio=_load_16khz_audio,
+                use_text_conditioning_tokenizer=_use_text_conditioning_encoder,
                 text_conditioning_tokenizer_name=model.text_conditioning_tokenizer_name,
-                pad_context_text_to_max_duration=model.pad_context_text_to_max_duration,
+                pad_context_text_to_max_duration=_pad_context_text_to_max_duration,
                 context_duration_min=context_duration_min,
                 context_duration_max=context_duration_max,
             )
@@ -438,10 +449,13 @@ def run_inference(
             ), f"Dataset length and manifest length should be the same. Dataset length: {len(test_dataset)}, Manifest length: {len(manifest_records)}"
 
             test_dataset.text_tokenizer = model.tokenizer
+            if is_decoder_only_model:
+                test_dataset.text_conditioning_tokenizer = model.tokenizer.first_tokenizer
             # Set phoneme prob = 1 for g2p
             g2p = None
             if isinstance(model.tokenizer, AggregatedTTSTokenizer):
-                g2p = model.tokenizer.tokenizers["english_phoneme"].g2p
+                if "english_phoneme" in model.tokenizer.tokenizers:
+                    g2p = model.tokenizer.tokenizers["english_phoneme"].g2p
             elif isinstance(model.tokenizer, IPATokenizer):
                 g2p = model.tokenizer.g2p
             if g2p is not None:
@@ -468,43 +482,58 @@ def run_inference(
                         batch_cuda[key] = batch[key]
 
                 st = time.time()
-                (
-                    predicted_audio,
-                    predicted_audio_lens,
-                    predicted_codes,
-                    predicted_codes_lens,
-                    rtf_metrics,
-                    cross_attention_maps,
-                    _,
-                ) = model.infer_batch(
-                    batch_cuda,
-                    max_decoder_steps=440,
-                    temperature=temperature,
-                    topk=topk,
-                    use_cfg=use_cfg,
-                    cfg_scale=cfg_scale,
-                    return_cross_attn_probs=True,
-                    apply_attention_prior=apply_attention_prior,
-                    prior_epsilon=attention_prior_epsilon,
-                    lookahead_window_size=attention_prior_lookahead_window,
-                    estimate_alignment_from_layers=estimate_alignment_from_layers,
-                    apply_prior_to_layers=apply_prior_to_layers,
-                    start_prior_after_n_audio_steps=start_prior_after_n_audio_steps,
-                    use_local_transformer_for_inference=use_local_transformer,
-                    maskgit_n_steps=maskgit_n_steps,
-                    maskgit_noise_scale=maskgit_noise_scale,
-                    maskgit_fixed_schedule=maskgit_fixed_schedule,
-                    maskgit_sampling_type=maskgit_sampling_type,
-                    ignore_finished_sentence_tracking=ignore_finished_sentence_tracking,
-                    eos_detection_method=eos_detection_method,
-                )
+
+                if is_decoder_only_model:
+                    predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens, rtf_metrics = model.infer_batch(
+                        batch_cuda,
+                        max_decoder_steps=440,
+                        temperature=temperature,
+                        topk=topk,
+                        use_local_transformer_for_inference=use_local_transformer,
+                        maskgit_n_steps=maskgit_n_steps,
+                        use_cfg=use_cfg,
+                        cfg_scale=cfg_scale,
+                    )
+                    cross_attention_maps = None
+                else:
+                    (
+                        predicted_audio,
+                        predicted_audio_lens,
+                        predicted_codes,
+                        predicted_codes_lens,
+                        rtf_metrics,
+                        cross_attention_maps,
+                        _,
+                    ) = model.infer_batch(
+                        batch_cuda,
+                        max_decoder_steps=440,
+                        temperature=temperature,
+                        topk=topk,
+                        use_cfg=use_cfg,
+                        cfg_scale=cfg_scale,
+                        return_cross_attn_probs=True,
+                        apply_attention_prior=apply_attention_prior,
+                        prior_epsilon=attention_prior_epsilon,
+                        lookahead_window_size=attention_prior_lookahead_window,
+                        estimate_alignment_from_layers=estimate_alignment_from_layers,
+                        apply_prior_to_layers=apply_prior_to_layers,
+                        start_prior_after_n_audio_steps=start_prior_after_n_audio_steps,
+                        use_local_transformer_for_inference=use_local_transformer,
+                        maskgit_n_steps=maskgit_n_steps,
+                        maskgit_noise_scale=maskgit_noise_scale,
+                        maskgit_fixed_schedule=maskgit_fixed_schedule,
+                        maskgit_sampling_type=maskgit_sampling_type,
+                        ignore_finished_sentence_tracking=ignore_finished_sentence_tracking,
+                        eos_detection_method=eos_detection_method,
+                    )
 
                 all_rtf_metrics.append(rtf_metrics)
                 et = time.time()
                 print(f"Time taken for inference: {et-st}", predicted_audio.size())
                 for idx in range(predicted_audio.size(0)):
-                    cross_attn_map_image = Image.fromarray(cross_attention_maps[idx])
-                    cross_attn_map_image.save(os.path.join(pred_audio_dir, f"cross_attn_map_{item_idx}.png"))
+                    if cross_attention_maps is not None:
+                        cross_attn_map_image = Image.fromarray(cross_attention_maps[idx])
+                        cross_attn_map_image.save(os.path.join(pred_audio_dir, f"cross_attn_map_{item_idx}.png"))
 
                     predicted_audio_np = predicted_audio[idx].float().detach().cpu().numpy()
                     predicted_audio_np = predicted_audio_np[: predicted_audio_lens[idx]]
@@ -702,6 +731,7 @@ def main():
         default=['cer', 'pred_context_ssim', 'utmosv2'],
         help="Which metrics to add the violin plot.",
     )
+    parser.add_argument('--decoder_only_model', action='store_true')
     args = parser.parse_args()
 
     if args.datasets is None:
@@ -752,6 +782,7 @@ def main():
         eos_detection_method=args.eos_detection_method,
         ignore_finished_sentence_tracking=args.ignore_finished_sentence_tracking,
         with_utmosv2=not args.disable_utmosv2,
+        is_decoder_only_model=args.decoder_only_model
     )
 
     # Mode 1: Run inference from provided hparams and checkpoint files
