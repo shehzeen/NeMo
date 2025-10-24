@@ -449,6 +449,9 @@ def run_inference(
             ), f"Dataset length and manifest length should be the same. Dataset length: {len(test_dataset)}, Manifest length: {len(manifest_records)}"
 
             test_dataset.text_tokenizer = model.tokenizer
+            if hasattr(model, 'phoneme_tokenizer'):
+                test_dataset.phoneme_tokenizer = model.phoneme_tokenizer
+                
             if is_decoder_only_model:
                 test_dataset.text_conditioning_tokenizer = model.tokenizer.first_tokenizer
             # Set phoneme prob = 1 for g2p

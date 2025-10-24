@@ -415,6 +415,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         self.dataset_type = dataset_type
         self.tokenizer_config = tokenizer_config
         self.text_tokenizer = None  # Assigned in worker_init_fn in model file
+        self.phoneme_tokenizer = None  # Assigned in worker_init_fn in model file (if any)
         self.load_16khz_audio = load_16khz_audio
         self.use_text_conditioning_tokenizer = use_text_conditioning_tokenizer
         self.text_conditioning_tokenizer_name = text_conditioning_tokenizer_name
@@ -445,6 +446,14 @@ class MagpieTTSDataset(TextToSpeechDataset):
             "tokens": tokens,
             "text_len": text_len,
         }
+
+
+        if self.phoneme_tokenizer is not None:
+            phoneme_tokens = self.phoneme_tokenizer.encode(data.text)
+            phoneme_tokens = [self.phoneme_tokenizer.bos_token_id] + phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
+            phoneme_tokens_len = len(phoneme_tokens)
+            example["phoneme_tokens"] = torch.tensor(phoneme_tokens, dtype=torch.int32)
+            example["phoneme_tokens_len"] = phoneme_tokens_len
 
         if self.load_cached_codes_if_available and 'target_audio_codes_path' in data.manifest_entry:
             audio_codes_path = data.manifest_entry['target_audio_codes_path']
@@ -655,6 +664,9 @@ class MagpieTTSDataset(TextToSpeechDataset):
         reward_list = []
         raw_text_list = []
         language_list = []
+        phoneme_tokens_list = []
+        phoneme_tokens_len_list = []
+
         for example in batch:
             dataset_name_list.append(example["dataset_name"])
             audio_filepath_list.append(example["audio_filepath"])
@@ -663,6 +675,10 @@ class MagpieTTSDataset(TextToSpeechDataset):
 
             token_list.append(example["tokens"])
             token_len_list.append(example["text_len"])
+
+            if 'phoneme_tokens' in example:
+                phoneme_tokens_list.append(example["phoneme_tokens"])
+                phoneme_tokens_len_list.append(example["phoneme_tokens_len"])
 
             if 'audio' in example:
                 audio_list.append(example["audio"])
@@ -729,6 +745,13 @@ class MagpieTTSDataset(TextToSpeechDataset):
             batch_dict['audio_codes'] = batch_audio_codes
             batch_dict['audio_codes_lens'] = batch_audio_codes_len
 
+        if len(phoneme_tokens_list) > 0:
+            batch_phoneme_tokens_len = torch.IntTensor(phoneme_tokens_len_list)
+            phoneme_tokens_max_len = int(batch_phoneme_tokens_len.max().item())
+            batch_phoneme_tokens = stack_tensors(phoneme_tokens_list, max_lens=[phoneme_tokens_max_len])
+            batch_dict['phoneme_tokens'] = batch_phoneme_tokens
+            batch_dict['phoneme_tokens_lens'] = batch_phoneme_tokens_len
+            
         if len(context_audio_list) > 0:
             batch_context_audio_len = torch.IntTensor(context_audio_len_list)
             context_audio_max_len = int(batch_context_audio_len.max().item())
