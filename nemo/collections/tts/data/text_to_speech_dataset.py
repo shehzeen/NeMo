@@ -748,7 +748,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         if len(phoneme_tokens_list) > 0:
             batch_phoneme_tokens_len = torch.IntTensor(phoneme_tokens_len_list)
             phoneme_tokens_max_len = int(batch_phoneme_tokens_len.max().item())
-            batch_phoneme_tokens = stack_tensors(phoneme_tokens_list, max_lens=[phoneme_tokens_max_len])
+            batch_phoneme_tokens = stack_tensors(phoneme_tokens_list, max_lens=[phoneme_tokens_max_len], pad_value=self.phoneme_tokenizer.pad)
             batch_dict['phoneme_tokens'] = batch_phoneme_tokens
             batch_dict['phoneme_tokens_lens'] = batch_phoneme_tokens_len
             

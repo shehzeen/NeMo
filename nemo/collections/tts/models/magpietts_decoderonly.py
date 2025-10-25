@@ -23,7 +23,7 @@ from torch import nn
 from torch.utils.data import get_worker_info
 
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
-from nemo.collections.tts.data.text_to_speech_dataset_lhotse import MagpieTTSLhotseDataset, setup_tokenizers
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse import MagpieTTSLhotseDataset, setup_tokenizers, instantiate_phoneme_tokenizer
 
 from nemo.collections.tts.models import AudioCodecModel
 from nemo.collections.tts.modules import transformer_2501
@@ -43,13 +43,7 @@ import time
 from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter
 import random
 
-def instantiate_phoneme_tokenizer(phoneme_tokenizer_config):
-    phoneme_tokenizer = instantiate(phoneme_tokenizer_config)
-    phoneme_vocab_size = len(phoneme_tokenizer.tokens)
-    phoneme_tokenizer.bos_token_id = phoneme_vocab_size
-    phoneme_tokenizer.eos_token_id = phoneme_vocab_size + 1
-    phoneme_tokenizer.vocab_size = phoneme_vocab_size + 2
-    return phoneme_tokenizer
+
 
 def worker_init_fn(worker_id):
     # For mp.set_start_method("spawn", force=True)
@@ -1371,7 +1365,9 @@ class MagpieTTSDecoderModel(ModelPT):
             use_text_conditioning_tokenizer=True,
             text_conditioning_tokenizer_name=self.text_conditioning_tokenizer_name,
             tokenizer_config=self.cfg.text_tokenizers,
+            phoneme_tokenizer_config=self.cfg.get("phoneme_tokenizer", None)
         )
+        
         data_loader = get_lhotse_dataloader_from_config(
             config=dataset_cfg.dataset,
             global_rank=self.global_rank,
