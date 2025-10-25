@@ -1149,9 +1149,11 @@ class MagpieTTSDecoderModel(ModelPT):
             if not (dropout_conditional_input or dropout_text_input):
                 # Only compute phoneme loss if not doing unconditional training or text dropout
                 phoneme_loss, _ = self.compute_phoneme_loss(phoneme_logits, phoneme_tokens[:,:,1:].long(), phoneme_tokens_lens - 1)
+                print("No Dropout - phoneme loss:", phoneme_loss.item())
             else:
                 phoneme_loss = torch.tensor(0.0, device=logits.device)
-            
+                print("Dropout - phoneme loss skipped", phoneme_loss.item())
+
             loss = loss + phoneme_loss
 
         return {
