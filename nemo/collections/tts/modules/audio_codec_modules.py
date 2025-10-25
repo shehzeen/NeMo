@@ -471,6 +471,11 @@ class ResNetSpeakerEncoder(NeuralModule):
         )
 
     def load_checkpoint(self, checkpoint_path: str, strict=True):
+        import os
+        HARDCODED_CKPT_PATH = "/lustre/fsw/llmservice_nemo_speechlm/users/shehzeenh/mountdir/checkpoints/pytorch_model.bin"
+        if os.path.exists(HARDCODED_CKPT_PATH):
+            checkpoint_path = HARDCODED_CKPT_PATH
+            print(f"Using hardcoded checkpoint path: {checkpoint_path}")
         state = load_fsspec(checkpoint_path, map_location=torch.device("cpu"))
         self.load_state_dict(state["model"], strict=strict)
 
