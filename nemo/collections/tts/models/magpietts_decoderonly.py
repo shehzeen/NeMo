@@ -1175,7 +1175,7 @@ class MagpieTTSDecoderModel(ModelPT):
             audio_eos_id=self.audio_eos_id,
             context_audio_bos_id=self.context_audio_bos_id,
             context_audio_eos_id=self.context_audio_eos_id,
-            num_audio_codebooks=self.num_audio_codebooks,
+            num_audio_codebooks=self.data_num_audio_codebooks,
             codec_model_samples_per_frame=self.codec_model_samples_per_frame,
             prior_scaling_factor=0.0,
             load_cached_codes_if_available=self.cfg.load_cached_codes_if_available,
@@ -1203,7 +1203,7 @@ class MagpieTTSDecoderModel(ModelPT):
             audio_eos_id=self.audio_eos_id,
             context_audio_bos_id=self.context_audio_bos_id,
             context_audio_eos_id=self.context_audio_eos_id,
-            num_audio_codebooks=self.num_audio_codebooks,
+            num_audio_codebooks=self.data_num_audio_codebooks,
             prior_scaling_factor=0.0,
             load_cached_codes_if_available=self.cfg.load_cached_codes_if_available,
             dataset_type=mode,  # train or test used for setting phone prob to 1.0 in test dataset (worker_init_fn)
