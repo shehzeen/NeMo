@@ -130,18 +130,10 @@ class MagpieTTSDecoderModel(ModelPT):
         )
         
         num_tokens_tokenizer = len(self.tokenizer.tokens)
-        num_tokens = num_tokens_tokenizer + 2  # +2 for BOS and EOS
-        self.bos_id = num_tokens - 2
-        self.eos_id = num_tokens - 1
-        
-        if cfg.get('cfg_unk_token', None) is not None:
-            self.cfg_unk_token_id = self.tokenizer.first_tokenizer.convert_tokens_to_ids(cfg.cfg_unk_token)
-        else:
-            # Use pad token as unk token for CFG, if we don't have a specific unk token set
-            self.cfg_unk_token_id = self.tokenizer.first_tokenizer.pad_token_id
-            logging.warning(
-                "No cfg_unk_token specified in the config. Using pad token as unk token for CFG. "
-            )
+        num_tokens = num_tokens_tokenizer + 3  # +2 for BOS and EOS
+        self.bos_id = num_tokens - 3
+        self.eos_id = num_tokens - 2
+        self.cfg_unk_token_id = num_tokens - 1
 
         self.pad_context_text_to_max_duration = False
 
@@ -174,6 +166,9 @@ class MagpieTTSDecoderModel(ModelPT):
             self.decoder = hf_transformer.model
             self.lm_text_head = hf_transformer.lm_head
 
+        self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
+        self.decoder.set_input_embeddings(self.text_embedding)
+        
         if self.use_bpe_char_tokenizer:
             # BPE char tokenizer
             assert len(self.tokenizer.tokenizers) == 1, "BPE char tokenizer should only be used with one tokenizer"
@@ -185,6 +180,7 @@ class MagpieTTSDecoderModel(ModelPT):
             special_vocab = {
                 '<BOS>': self.bos_id,
                 '<EOS>': self.eos_id,
+                '<CFG_UNK>': self.cfg_unk_token_id,
             }
             self.cas_encoder = CharAwareSubwordEncoder(
                 d_embed=cfg.embedding_dim,
