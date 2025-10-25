@@ -962,7 +962,6 @@ class MagpieTTSDecoderModel(ModelPT):
 
 
     def stack_codes(self, codes, codes_lens, bos_id, eos_id, stacking_factor, num_codebooks):
-        stacking_factor = self.frame_stacking_factor
         if stacking_factor == 1:
             return codes, codes_lens
         
@@ -1147,9 +1146,13 @@ class MagpieTTSDecoderModel(ModelPT):
                 target_lens=phoneme_tokens_lens-1,
             )
             phoneme_logits = self.phoneme_final_proj(pred_embeddings_phoneme) # (B, T', phoneme_stacking_factor * phoneme_vocab_size)
-            phoneme_loss, _ = self.compute_phoneme_loss(phoneme_logits, phoneme_tokens[:,:,1:].long(), phoneme_tokens_lens - 1)
-            if not dropout_text_input:
-                loss = loss + phoneme_loss
+            if not (dropout_conditional_input or dropout_text_input):
+                # Only compute phoneme loss if not doing unconditional training or text dropout
+                phoneme_loss, _ = self.compute_phoneme_loss(phoneme_logits, phoneme_tokens[:,:,1:].long(), phoneme_tokens_lens - 1)
+            else:
+                phoneme_loss = torch.tensor(0.0, device=logits.device)
+            
+            loss = loss + phoneme_loss
 
         return {
             'loss': loss,
@@ -1310,6 +1313,10 @@ class MagpieTTSDecoderModel(ModelPT):
         if self.local_transformer_type != LocalTransformerType.NO_LT:
             val_local_transformer_loss = collect("val_local_transformer_loss")
             self.log("val/local_transformer_loss", val_local_transformer_loss, prog_bar=True, sync_dist=True)
+        
+        if self.phoneme_tokenizer is not None:
+            val_phoneme_loss = collect("val_phoneme_loss")
+            self.log("val/phoneme_loss", val_phoneme_loss, prog_bar=True, sync_dist=True)
         
         self.validation_step_outputs.clear()  # free memory
 
