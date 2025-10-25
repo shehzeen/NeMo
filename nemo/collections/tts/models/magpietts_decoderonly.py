@@ -15,6 +15,7 @@ from typing import List, Sequence, Tuple
 import torch
 import wandb
 from hydra.utils import instantiate
+from functools import partial
 from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from omegaconf import DictConfig
@@ -39,6 +40,7 @@ from transformers import (
     AutoModelForCausalLM
 )
 import time
+from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter
 
 def worker_init_fn(worker_id):
     # For mp.set_start_method("spawn", force=True)
@@ -71,18 +73,47 @@ class MagpieTTSDecoderModel(ModelPT):
             del codec_model.discriminator
 
         # Set up codebook configuration
-        self.num_audio_codebooks = codec_model.num_codebooks
+        vector_quantizer = cfg.get('vector_quantizer')
+        if vector_quantizer is not None:
+            vector_quantizer = instantiate(vector_quantizer)
+            num_audio_codebooks = vector_quantizer.num_codebooks
+            codebook_size = vector_quantizer.codebook_size
+            codec_converter = VectorQuantizerIndexConverter(
+                vector_quantizer_original=codec_model.vector_quantizer,
+                vector_quantizer_new=vector_quantizer,
+            )
+            data_num_audio_codebooks = codec_model.vector_quantizer.num_codebooks
+        else:
+            num_audio_codebooks = codec_model.num_codebooks
+            data_num_audio_codebooks = num_audio_codebooks
+            codebook_size = codec_model.codebook_size
+            codec_converter = None
+        
+
+        # The dataloader needs to know the number of codebooks that the context codes were stored in
+        # In the case where there are no context codes saved, and there is no context audio (in the text context path),
+        # We create a dummy context code tensor that is only [context_BOS, context_EOS] that is repeated for
+        # data_num_audio_codebooks
+        self.data_num_audio_codebooks = data_num_audio_codebooks
+        self.num_audio_codebooks = num_audio_codebooks
+        self.codebook_size = codebook_size
+
+        
         self.codec_model_samples_per_frame = codec_model.samples_per_frame
         # Our codebooks start with actual audio codec tokens, followed by special tokens.
         # The `forced_*` options are for backward compatibility for models trained with older code.
         num_audio_tokens = codec_model.codebook_size
-        self.audio_bos_id = cfg.get('forced_audio_bos_id', num_audio_tokens + SpecialAudioToken.AUDIO_BOS.value)
-        self.audio_eos_id = cfg.get('forced_audio_eos_id', num_audio_tokens + SpecialAudioToken.AUDIO_EOS.value)
-        self.context_audio_bos_id = cfg.get('forced_context_audio_bos_id', num_audio_tokens + SpecialAudioToken.AUDIO_CONTEXT_BOS.value)
-        self.context_audio_eos_id = cfg.get('forced_context_audio_eos_id', num_audio_tokens + SpecialAudioToken.AUDIO_CONTEXT_EOS.value)
-        self.num_all_tokens_per_codebook = cfg.get('forced_num_all_tokens_per_codebook',num_audio_tokens + len(SpecialAudioToken))
-        self.mask_token_id = cfg.get('forced_mask_token_id', num_audio_tokens + SpecialAudioToken.MASK_TOKEN.value)
+        # Our codebooks start with actual audio codec tokens, followed by special tokens.
+        # The `forced_*` options are for backward compatibility for models trained with older code.
+        get_token_index = partial(SpecialAudioToken.get_index, base_codebook_size=self.codebook_size)
+        self.audio_bos_id = get_token_index(SpecialAudioToken.AUDIO_BOS)
+        self.audio_eos_id = get_token_index(SpecialAudioToken.AUDIO_EOS)
+        self.context_audio_bos_id = get_token_index(SpecialAudioToken.AUDIO_CONTEXT_BOS)
+        self.context_audio_eos_id = get_token_index(SpecialAudioToken.AUDIO_CONTEXT_EOS)
+        self.mask_token_id = get_token_index(SpecialAudioToken.MASK_TOKEN)
+        self.num_all_tokens_per_codebook = self.codebook_size + len(SpecialAudioToken)
         self.use_bpe_char_tokenizer = cfg.get('use_bpe_char_tokenizer', False)
+
         # If specified, use this as the text conditioning tokenizer. Otherwise, use the first tokenizer.
         self.text_conditioning_tokenizer_name = cfg.get('text_conditioning_tokenizer_name', None)
         if self.text_conditioning_tokenizer_name is None:
@@ -98,8 +129,10 @@ class MagpieTTSDecoderModel(ModelPT):
             mode='train',
         )
         
-
-        self.eos_id = self.tokenizer.first_tokenizer.eos_token_id
+        num_tokens_tokenizer = len(self.tokenizer.tokens)
+        num_tokens = num_tokens_tokenizer + 2  # +2 for BOS and EOS
+        self.bos_id = num_tokens - 2
+        self.eos_id = num_tokens - 1
         
         if cfg.get('cfg_unk_token', None) is not None:
             self.cfg_unk_token_id = self.tokenizer.first_tokenizer.convert_tokens_to_ids(cfg.cfg_unk_token)
@@ -117,6 +150,7 @@ class MagpieTTSDecoderModel(ModelPT):
         # This needs to happen after super().__init__()
         self._codec_model = codec_model
         self._codec_model.freeze()  #Lightning does requires_grad = False and self.eval()
+        self._codec_converter = codec_converter
 
         audio_embeddings = []
         for _ in range(self.num_audio_codebooks * self.frame_stacking_factor):
@@ -148,7 +182,10 @@ class MagpieTTSDecoderModel(ModelPT):
             subword_vocab = tokenizer.get_vocab()
             # special tokens will be stored as it is in the char_vocab
             # Each special token will only be mapped to one char id
-            special_vocab = {}
+            special_vocab = {
+                '<BOS>': self.bos_id,
+                '<EOS>': self.eos_id,
+            }
             self.cas_encoder = CharAwareSubwordEncoder(
                 d_embed=cfg.embedding_dim,
                 llm_tokenizer_vocab=subword_vocab,
@@ -237,6 +274,8 @@ class MagpieTTSDecoderModel(ModelPT):
         self._codec_model.eval()
         with torch.no_grad(), torch.autocast(device_type=audio.device.type, dtype=torch.float32):
             codes, codes_len = self._codec_model.encode(audio=audio, audio_len=audio_len)
+            if self._codec_converter is not None:
+                codes = self._codec_converter.convert_original_to_new(audio_tokens=codes, audio_lens=codes_len)
             # Add a timestep to begining and end of codes tensor
             bos_tensor = torch.full(
                 (codes.size(0), codes.size(1), 1), audio_bos_id, dtype=codes.dtype, device=codes.device
@@ -273,6 +312,10 @@ class MagpieTTSDecoderModel(ModelPT):
             codes_copy[codes == self.audio_bos_id] = 0  # zero is the padding token
             codes_copy[codes == self.audio_eos_id] = 0
             # Pass the modified integer token IDs
+            if self._codec_converter is not None:
+                codes_copy = self._codec_converter.convert_new_to_original(
+                    audio_tokens=codes_copy, audio_lens=codes_len
+                )
             audio, audio_len = self._codec_model.decode(tokens=codes_copy, tokens_len=codes_len)
             # audio: (B, T)
             # audio_len: (B,)
@@ -761,6 +804,10 @@ class MagpieTTSDecoderModel(ModelPT):
         if 'context_audio_codes' in batch:
             context_audio_codes = batch['context_audio_codes']
             context_audio_codes_lens = batch['context_audio_codes_lens']
+            if self._codec_converter is not None:
+                context_audio_codes = self._codec_converter.convert_original_to_new(
+                    audio_tokens=context_audio_codes, audio_lens=context_audio_codes_lens
+                ).long()
         else:
             context_audio_codes, context_audio_codes_lens = self.audio_to_codes(
                 batch['context_audio'], batch['context_audio_lens'], audio_type='context'
@@ -913,6 +960,10 @@ class MagpieTTSDecoderModel(ModelPT):
         else:
             audio_codes = batch['audio_codes']
             audio_codes_lens = batch['audio_codes_lens']
+            if self._codec_converter is not None:
+                audio_codes = self._codec_converter.convert_original_to_new(
+                    audio_tokens=audio_codes, audio_lens=audio_codes_lens
+                ).long()
         
         audio_codes, audio_codes_lens = self.stack_audio_codes(audio_codes, audio_codes_lens)
         audio_codes_lens_input = audio_codes_lens_target = audio_codes_lens - 1
@@ -1152,7 +1203,6 @@ class MagpieTTSDecoderModel(ModelPT):
             sample_rate=self.sample_rate,
             volume_norm=dataset_cfg.volume_norm,
             codec_model_samples_per_frame=self.codec_model_samples_per_frame,
-            codec_model_name=self.cfg.codec_model_name,
             audio_bos_id=self.audio_bos_id,
             audio_eos_id=self.audio_eos_id,
             context_audio_bos_id=self.context_audio_bos_id,
