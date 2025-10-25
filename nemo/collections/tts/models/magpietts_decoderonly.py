@@ -1147,7 +1147,7 @@ class MagpieTTSDecoderModel(ModelPT):
                 target_lens=phoneme_tokens_lens-1,
             )
             phoneme_logits = self.phoneme_final_proj(pred_embeddings_phoneme) # (B, T', phoneme_stacking_factor * phoneme_vocab_size)
-            phoneme_loss, _ = self.compute_phoneme_loss(phoneme_logits, phoneme_tokens[:,:,1:], phoneme_tokens_lens - 1)
+            phoneme_loss, _ = self.compute_phoneme_loss(phoneme_logits, phoneme_tokens[:,:,1:].long(), phoneme_tokens_lens - 1)
             if not dropout_text_input:
                 loss = loss + phoneme_loss
 
