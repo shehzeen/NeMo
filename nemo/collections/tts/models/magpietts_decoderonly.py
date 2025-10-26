@@ -868,10 +868,11 @@ class MagpieTTSDecoderModel(ModelPT):
             text_mask = get_mask_from_lengths(text_lens)
             cas_embedding = self.cas_encoder(text, subword_mask=text_mask)  # (B, L, E)
             text_embedded = text_embedded + cas_embedding
-            if text_embedded.shape[1] < self.streaming_speech_delay + 1:
-                # If text is too short, pad it with zeros
-                padding_tensor = torch.zeros(text_embedded.shape[0], self.streaming_speech_delay + 1 - text_embedded.shape[1], text_embedded.shape[2], device=text_embedded.device)
-                text_embedded = torch.cat([text_embedded, padding_tensor], dim=1)
+        
+        if text_embedded.shape[1] < self.streaming_speech_delay + 1:
+            # If text is too short, pad it with zeros
+            padding_tensor = torch.zeros(text_embedded.shape[0], self.streaming_speech_delay + 1 - text_embedded.shape[1], text_embedded.shape[2], device=text_embedded.device)
+            text_embedded = torch.cat([text_embedded, padding_tensor], dim=1)
 
         if dropout_text_input:
             # Make text embedding all zeros
@@ -1594,9 +1595,10 @@ class MagpieTTSDecoderModel(ModelPT):
                     print("use_bos_phoneme", use_bos_phoneme)
                     pred_phoneme_tokens = (use_bos_phoneme * phoneme_bos_tensor + (1 - use_bos_phoneme) * pred_phoneme_tokens).long()  # (B, phoneme_stacking_factor)
                     
-                    print("all_codes_next_phoneme_argmax", all_codes_next_phoneme_argmax)
+                    print("pred_phoneme_tokens", pred_phoneme_tokens)
                     gt_phoneme_idx = min(idx, gt_phoneme_tokens.size(2) - 1)
                     gt_phoneme_tokens_current = gt_phoneme_tokens[:, :, gt_phoneme_idx] # (B, phoneme_stacking_factor)
+                    print("gt_phoneme_tokens_current", gt_phoneme_tokens_current)
                     
                     input_phoneme_tokens_current = gt_phoneme_tokens_current if phoneme_input_type == 'gt' else pred_phoneme_tokens
                     input_phoneme_embedding = self.embed_phoneme_tokens(input_phoneme_tokens_current.unsqueeze(2))  # (B, phoneme_stacking_factor, E)
