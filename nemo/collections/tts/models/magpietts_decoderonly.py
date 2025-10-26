@@ -353,6 +353,7 @@ class MagpieTTSDecoderModel(ModelPT):
         return audio_embedding
 
     def embed_phoneme_tokens(self, phoneme_tokens):
+        # phoneme_tokens: (B, S, T')
         phoneme_embedding = None
         for c in range(phoneme_tokens.size(1)):
             embedding = self.phoneme_embeddings[c](phoneme_tokens[:, c, :])
@@ -1444,10 +1445,10 @@ class MagpieTTSDecoderModel(ModelPT):
     def setup_test_data(self, cfg):
         self._test_dl = self._setup_test_dataloader(cfg)
 
-    def infer_batch(self, batch, max_decoder_steps=500, temperature=0.7, topk=80, use_local_transformer_for_inference=False, maskgit_n_steps=3, use_cfg=False, cfg_scale=1.0):
+    def infer_batch(self, batch, max_decoder_steps=500, temperature=0.7, topk=80, use_local_transformer_for_inference=False, maskgit_n_steps=3, use_cfg=False, cfg_scale=1.0, phoneme_input_type='gt', phoneme_sampling_method='argmax'):
         with torch.inference_mode():
             start_time = time.time()
-            context_tensors = self.prepare_context_tensors(batch)
+            context_tensors = self.prepare_context_tensors(batch, dropout_text_input=False)
             context_embedding = context_tensors['context_embedding']  # (B, T_total, E)
             context_lens = context_tensors['context_lens']  # (B,)
             remaining_text_embedded = context_tensors['remaining_text_embedded']
@@ -1455,7 +1456,7 @@ class MagpieTTSDecoderModel(ModelPT):
             
             if self.phoneme_tokenizer is not None:
                 context_lens_for_phonemes = context_lens - self.streaming_speech_delay + self.streaming_phonemes_delay
-                phoneme_channel_input, phoneme_channel_input_lens, _, _ = self.prepare_phoneme_channel_input(
+                phoneme_channel_input, phoneme_channel_input_lens, gt_phoneme_tokens, gt_phoneme_token_lens = self.prepare_phoneme_channel_input(
                     batch['phoneme_tokens'], 
                     batch['phoneme_tokens_lens'], 
                     context_lens_for_phonemes
@@ -1521,12 +1522,16 @@ class MagpieTTSDecoderModel(ModelPT):
                 # 0 if we have started reading the remaining text otherwise negative (indicating how far we are before we start reading the remaining text)
                 current_text_positions.append(min_context_len - context_plus_audio_lens[item_idx])
             current_text_positions = torch.tensor(current_text_positions, device=context_embedding.device).long()
-
-
             if self.phoneme_tokenizer is not None:
                 current_phoneme_positions = current_text_positions - current_text_positions.max() - 1 # Make it 0-indexed.
                 # current_text_positions = current_text_positions - self.streaming_speech_delay + self.streaming_phonemes_delay    
-            
+            pred_phoneme_token_lists = [
+                [] for _ in range(actual_batch_size)
+            ]
+            gt_phoneme_token_lists = [
+                [] for _ in range(actual_batch_size)
+            ]
+            phoneme_stream_ended = torch.zeros(actual_batch_size, device=context_embedding.device).bool() # (B,) Whether phoneme stream has ended for this item.
             for idx in range(max_decoder_steps):
                 print("current_phoneme_positions", current_phoneme_positions)
                 current_text_positions += 1
@@ -1575,14 +1580,49 @@ class MagpieTTSDecoderModel(ModelPT):
                     all_codes_next_argmax = self.sample_codes_from_logits(all_code_logits_t, temperature=0.01) # (B, num_codebooks)
 
                 phoneme_channel_input_t = None
+                
                 if self.phoneme_tokenizer is not None:
                     all_codes_next_phoneme = self.sample_codes_from_logits_phoneme(all_code_logits_t_phoneme, temperature=temperature, topk=topk) # (B, phoneme_stacking_factor)
                     all_codes_next_phoneme_argmax = self.sample_codes_from_logits_phoneme(all_code_logits_t_phoneme, temperature=0.01) # (B, phoneme_stacking_factor)
-                    use_phoneme_input = (current_phoneme_positions >= 0).unsqueeze(1).unsqueeze(2).float()
-                    zero_phoneme_embedding = torch.zeros(actual_batch_size, self.cfg.embedding_dim, device=all_codes_next_phoneme.device).unsqueeze(1)
-                    phoneme_channel_input_t = phoneme_channel_input[torch.arange(actual_batch_size), current_phoneme_positions.clamp(min=0) + min_context_len, :].unsqueeze(1)
-                    phoneme_channel_input_t = use_phoneme_input * phoneme_channel_input_t + (1 - use_phoneme_input) * zero_phoneme_embedding
+                    pred_phoneme_tokens = all_codes_next_phoneme_argmax if phoneme_sampling_method == 'argmax' else all_codes_next_phoneme # B, phoneme_stacking_factor
+                    phoneme_bos_tensor = torch.full(
+                        (actual_batch_size, self.phoneme_stacking_factor),
+                        self.phoneme_tokenizer.bos_token_id, 
+                        device=context_embedding.device
+                    ).long() # (B, phoneme_stacking_factor)
+                    use_bos_phoneme = (current_phoneme_positions == 0).unsqueeze(1).long()
+                    print("use_bos_phoneme", use_bos_phoneme)
+                    pred_phoneme_tokens = (use_bos_phoneme * phoneme_bos_tensor + (1 - use_bos_phoneme) * pred_phoneme_tokens).long()  # (B, phoneme_stacking_factor)
+                    
+                    print("all_codes_next_phoneme_argmax", all_codes_next_phoneme_argmax)
+                    gt_phoneme_idx = min(idx, gt_phoneme_tokens.size(2) - 1)
+                    gt_phoneme_tokens_current = gt_phoneme_tokens[:, :, gt_phoneme_idx] # (B, phoneme_stacking_factor)
+                    
+                    input_phoneme_tokens_current = gt_phoneme_tokens_current if phoneme_input_type == 'gt' else pred_phoneme_tokens
+                    input_phoneme_embedding = self.embed_phoneme_tokens(input_phoneme_tokens_current.unsqueeze(2))  # (B, phoneme_stacking_factor, E)
+                    
+                    use_phoneme_input = (current_phoneme_positions >= 0) * (~phoneme_stream_ended) # (B,)
+                    use_phoneme_input = use_phoneme_input.unsqueeze(1).unsqueeze(2).float()  # (B, 1, 1)
+                    zero_phoneme_embedding = torch.zeros(actual_batch_size, self.cfg.embedding_dim, device=all_codes_next_phoneme.device).unsqueeze(1) # (B, 1, E)
+                    # phoneme_channel_input_t = phoneme_channel_input[torch.arange(actual_batch_size), current_phoneme_positions.clamp(min=0) + min_context_len, :].unsqueeze(1) # (B, 1, E)
+                    phoneme_channel_input_t = use_phoneme_input * input_phoneme_embedding + (1 - use_phoneme_input) * zero_phoneme_embedding
+                    print("use_phoneme_input", use_phoneme_input)
+                    for item_idx in range(actual_batch_size):
+                        if use_phoneme_input[item_idx,0,0] > 0:
+                            for phoneme_channel_idx in range(self.phoneme_stacking_factor):
+                                _phoneme_token = pred_phoneme_tokens[item_idx, phoneme_channel_idx].item()
+                                if _phoneme_token not in [self.phoneme_tokenizer.eos_token_id, self.phoneme_tokenizer.bos_token_id, self.phoneme_tokenizer.pad]:
+                                    pred_phoneme_token_lists[item_idx].append(_phoneme_token)
+                                
+                                _gt_phoneme_token = gt_phoneme_tokens_current[item_idx, phoneme_channel_idx].item()
+                                if _gt_phoneme_token not in [self.phoneme_tokenizer.eos_token_id, self.phoneme_tokenizer.bos_token_id, self.phoneme_tokenizer.pad]:
+                                    gt_phoneme_token_lists[item_idx].append(_gt_phoneme_token)
+                                
+                        if torch.any(input_phoneme_tokens_current[item_idx] == self.phoneme_tokenizer.eos_token_id):
+                            print("Phoneme end detected for item {} at timestep {}".format(item_idx, idx))
+                            phoneme_stream_ended[item_idx] = True
                     all_codes_next_phoneme = all_codes_next_phoneme.unsqueeze(1)
+                    # import ipdb; ipdb.set_trace()
 
                 for item_idx in range(all_codes_next_argmax.size(0)):
                     if item_idx not in end_indices and idx + min_context_len > context_plus_audio_lens[item_idx]:
@@ -1597,9 +1637,6 @@ class MagpieTTSDecoderModel(ModelPT):
                 new_emb = self.embed_audio_tokens(audio_codes_next.unsqueeze(2))  # (B, 1, E)
                 new_emb_unconditional = new_emb * 1
                 
-                if phoneme_channel_input_t is not None:
-                    new_emb = new_emb + phoneme_channel_input_t
-
                 if self.text_input_mode == 'streaming':
                     _bs = context_embedding.size(0)
                     remaining_text_embedded_current = remaining_text_embedded[torch.arange(_bs), current_text_positions.clamp(min=0) , :].unsqueeze(1) # (B, 1, E)
@@ -1608,17 +1645,21 @@ class MagpieTTSDecoderModel(ModelPT):
                 
                 context_incomplete_mask = context_plus_audio_lens > idx + min_context_len # (B,)
                 # True if we have not yet reached the end of the context for this item
-                
+                # import ipdb; ipdb.set_trace()
                 if context_incomplete_mask.any():
                     # If some contexts are not yet complete.
                     context_incomplete_mask = context_incomplete_mask.unsqueeze(1).unsqueeze(2).float()  # (B, 1, 1)
                     context_embedding = context_plus_audio_embedded[:,min_context_len+idx:min_context_len+idx+1,:] # (B, 1, E)
-                    next_input = context_incomplete_mask * context_embedding + (1 - context_incomplete_mask) * new_emb                    
+                    next_input = context_incomplete_mask * context_embedding + (1 - context_incomplete_mask) * new_emb
+                    if phoneme_channel_input_t is not None:
+                        next_input += phoneme_channel_input_t
                     if use_cfg:
                         next_input_unconditional = context_incomplete_mask * dummy_context_embedding_unconditional + (1 - context_incomplete_mask) * new_emb_unconditional
                         next_input = torch.cat([next_input, next_input_unconditional], dim=0)  # (2B, 1, E)
                 else:
                     next_input = new_emb
+                    if phoneme_channel_input_t is not None:
+                        next_input += phoneme_channel_input_t
                     if use_cfg:
                         next_input = torch.cat([next_input, new_emb_unconditional], dim=0)  # (2B, 1, E)
                         
@@ -1634,6 +1675,14 @@ class MagpieTTSDecoderModel(ModelPT):
                     print("All items finished at timestep {}".format(idx))
                     break
             
+            for item_idx in range(actual_batch_size):
+                print("Predicted phoneme tokens for item {}: {}".format(item_idx, pred_phoneme_token_lists[item_idx]))
+                print("GT phoneme tokens for item {}: {}".format(item_idx, gt_phoneme_token_lists[item_idx]))
+                predicted_phoneme_text = self.phoneme_tokenizer.decode(pred_phoneme_token_lists[item_idx])
+                gt_phoneme_text = self.phoneme_tokenizer.decode(gt_phoneme_token_lists[item_idx])
+                print("Predicted phoneme text for item {}: {}".format(item_idx, predicted_phoneme_text))
+                print("GT phoneme text for item {}: {}".format(item_idx, gt_phoneme_text))
+
             tts_generation_time = time.time() - start_time
             tts_generation_time_per_frame = tts_generation_time / len(all_predictions)
             pred_codes_start_indices = context_plus_audio_lens - min_context_len # (B,)

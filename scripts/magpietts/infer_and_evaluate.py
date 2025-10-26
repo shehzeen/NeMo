@@ -297,6 +297,8 @@ def run_inference(
     ignore_finished_sentence_tracking=False,
     with_utmosv2=True,
     is_decoder_only_model=False,
+    phoneme_input_type="gt", # gt or predicted
+    phoneme_sampling_method="argmax", # argmax or multinomial
 ):
     model_cls = MagpieTTSDecoderModel if is_decoder_only_model else MagpieTTSModel
     # Load model
@@ -457,7 +459,7 @@ def run_inference(
             # Set phoneme prob = 1 for g2p
             g2p = None
             if isinstance(model.tokenizer, AggregatedTTSTokenizer):
-                if "english_phoneme" in model.tokenizer.tokenizers:
+                if "english_phoneme" in model.tokenizer.tokenizers and hasattr(model.tokenizer.tokenizers["english_phoneme"], "g2p"):
                     g2p = model.tokenizer.tokenizers["english_phoneme"].g2p
             elif isinstance(model.tokenizer, IPATokenizer):
                 g2p = model.tokenizer.g2p
@@ -496,6 +498,8 @@ def run_inference(
                         maskgit_n_steps=maskgit_n_steps,
                         use_cfg=use_cfg,
                         cfg_scale=cfg_scale,
+                        phoneme_input_type=phoneme_input_type,
+                        phoneme_sampling_method=phoneme_sampling_method,
                     )
                     cross_attention_maps = None
                 else:
@@ -735,6 +739,20 @@ def main():
         help="Which metrics to add the violin plot.",
     )
     parser.add_argument('--decoder_only_model', action='store_true')
+    parser.add_argument(
+        '--phoneme_input_type',
+        type=str,
+        default="gt",
+        choices=["gt", "predicted"],
+        help="Type of phoneme input for decoder-only models: ground-truth ('gt') or predicted ('predicted').",
+    )
+    parser.add_argument(
+        '--phoneme_sampling_method',
+        type=str,
+        default="argmax",
+        choices=["argmax", "multinomial"],
+        help="Phoneme sampling method for decoder-only models: 'argmax' or 'multinomial'.",
+    )
     args = parser.parse_args()
 
     if args.datasets is None:
@@ -785,7 +803,9 @@ def main():
         eos_detection_method=args.eos_detection_method,
         ignore_finished_sentence_tracking=args.ignore_finished_sentence_tracking,
         with_utmosv2=not args.disable_utmosv2,
-        is_decoder_only_model=args.decoder_only_model
+        is_decoder_only_model=args.decoder_only_model,
+        phoneme_input_type=args.phoneme_input_type,
+        phoneme_sampling_method=args.phoneme_sampling_method,
     )
 
     # Mode 1: Run inference from provided hparams and checkpoint files
