@@ -1534,10 +1534,11 @@ class MagpieTTSDecoderModel(ModelPT):
             ]
             phoneme_stream_ended = torch.zeros(actual_batch_size, device=context_embedding.device).bool() # (B,) Whether phoneme stream has ended for this item.
             for idx in range(max_decoder_steps):
-                print("current_phoneme_positions", current_phoneme_positions)
+                # import ipdb; ipdb.set_trace()
                 current_text_positions += 1
                 if self.phoneme_tokenizer is not None:
                     current_phoneme_positions += 1
+                    print("current_phoneme_positions", current_phoneme_positions)
                 if idx % 20 == 0:
                     print(f"Decoding timestep {idx}")
 
@@ -1646,6 +1647,7 @@ class MagpieTTSDecoderModel(ModelPT):
                     
                 
                 context_incomplete_mask = context_plus_audio_lens > idx + min_context_len # (B,)
+                # import ipdb; ipdb.set_trace()
                 # True if we have not yet reached the end of the context for this item
                 # import ipdb; ipdb.set_trace()
                 if context_incomplete_mask.any():
@@ -1677,13 +1679,14 @@ class MagpieTTSDecoderModel(ModelPT):
                     print("All items finished at timestep {}".format(idx))
                     break
             
-            for item_idx in range(actual_batch_size):
-                print("Predicted phoneme tokens for item {}: {}".format(item_idx, pred_phoneme_token_lists[item_idx]))
-                print("GT phoneme tokens for item {}: {}".format(item_idx, gt_phoneme_token_lists[item_idx]))
-                predicted_phoneme_text = self.phoneme_tokenizer.decode(pred_phoneme_token_lists[item_idx])
-                gt_phoneme_text = self.phoneme_tokenizer.decode(gt_phoneme_token_lists[item_idx])
-                print("Predicted phoneme text for item {}: {}".format(item_idx, predicted_phoneme_text))
-                print("GT phoneme text for item {}: {}".format(item_idx, gt_phoneme_text))
+            if self.phoneme_tokenizer is not None:
+                for item_idx in range(actual_batch_size):
+                    print("Predicted phoneme tokens for item {}: {}".format(item_idx, pred_phoneme_token_lists[item_idx]))
+                    print("GT phoneme tokens for item {}: {}".format(item_idx, gt_phoneme_token_lists[item_idx]))
+                    predicted_phoneme_text = self.phoneme_tokenizer.decode(pred_phoneme_token_lists[item_idx])
+                    gt_phoneme_text = self.phoneme_tokenizer.decode(gt_phoneme_token_lists[item_idx])
+                    print("Predicted phoneme text for item {}: {}".format(item_idx, predicted_phoneme_text))
+                    print("GT phoneme text for item {}: {}".format(item_idx, gt_phoneme_text))
 
             tts_generation_time = time.time() - start_time
             tts_generation_time_per_frame = tts_generation_time / len(all_predictions)
