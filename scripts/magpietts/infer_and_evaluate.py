@@ -353,7 +353,7 @@ def run_inference(
     # Build checkpoint name
     checkpoint_name = (
         f"{exp_name}{checkpoint_name}_Temp{temperature}_Topk{topk}_Cfg_{use_cfg}_{cfg_scale}_"
-        f"Prior_{apply_attention_prior}_"
+        f"Prior_{apply_attention_prior}_PIT_{phoneme_input_type}_"
     )
     if apply_attention_prior:
         # Only add prior config details if prior is enabled (to avoid super long checkpoint names)
