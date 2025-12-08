@@ -1446,10 +1446,10 @@ class MagpieTTSDecoderModel(ModelPT):
     def setup_test_data(self, cfg):
         self._test_dl = self._setup_test_dataloader(cfg)
 
-    def infer_batch(self, batch, max_decoder_steps=500, temperature=0.7, topk=80, use_local_transformer_for_inference=False, maskgit_n_steps=3, use_cfg=False, cfg_scale=1.0, phoneme_input_type='gt', phoneme_sampling_method='argmax'):
+    def infer_batch(self, batch, max_decoder_steps=500, temperature=0.7, topk=80, use_local_transformer_for_inference=False, maskgit_n_steps=3, use_cfg=False, cfg_scale=1.0, phoneme_input_type='gt', phoneme_sampling_method='argmax', dropout_text_input=False):
         with torch.inference_mode():
             start_time = time.time()
-            context_tensors = self.prepare_context_tensors(batch, dropout_text_input=False)
+            context_tensors = self.prepare_context_tensors(batch, dropout_text_input=dropout_text_input)
             context_embedding = context_tensors['context_embedding']  # (B, T_total, E)
             context_lens = context_tensors['context_lens']  # (B,)
             remaining_text_embedded = context_tensors['remaining_text_embedded']

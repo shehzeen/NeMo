@@ -299,6 +299,7 @@ def run_inference(
     is_decoder_only_model=False,
     phoneme_input_type="gt", # gt or predicted
     phoneme_sampling_method="argmax", # argmax or multinomial
+    dropout_text_input=False,
 ):
     model_cls = MagpieTTSDecoderModel if is_decoder_only_model else MagpieTTSModel
     # Load model
@@ -354,6 +355,7 @@ def run_inference(
     checkpoint_name = (
         f"{exp_name}{checkpoint_name}_Temp{temperature}_Topk{topk}_Cfg_{use_cfg}_{cfg_scale}_"
         f"Prior_{apply_attention_prior}_PIT_{phoneme_input_type}_"
+        f"SWDropout_{dropout_text_input}_"
     )
     if apply_attention_prior:
         # Only add prior config details if prior is enabled (to avoid super long checkpoint names)
@@ -500,6 +502,7 @@ def run_inference(
                         cfg_scale=cfg_scale,
                         phoneme_input_type=phoneme_input_type,
                         phoneme_sampling_method=phoneme_sampling_method,
+                        dropout_text_input=dropout_text_input,
                     )
                     cross_attention_maps = None
                 else:
@@ -753,6 +756,7 @@ def main():
         choices=["argmax", "multinomial"],
         help="Phoneme sampling method for decoder-only models: 'argmax' or 'multinomial'.",
     )
+    parser.add_argument('--dropout_text_input', action='store_true', help="Apply dropout to text input tokens.")
     args = parser.parse_args()
 
     if args.datasets is None:
@@ -806,6 +810,7 @@ def main():
         is_decoder_only_model=args.decoder_only_model,
         phoneme_input_type=args.phoneme_input_type,
         phoneme_sampling_method=args.phoneme_sampling_method,
+        dropout_text_input=args.dropout_text_input,
     )
 
     # Mode 1: Run inference from provided hparams and checkpoint files
