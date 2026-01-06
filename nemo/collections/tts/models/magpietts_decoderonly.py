@@ -143,6 +143,7 @@ class MagpieTTSDecoderModel(ModelPT):
         self.cfg_unk_token_id = num_tokens - 1
         self.phoneme_tokenizer = None
         self.dropout_text_input_prob = cfg.get('dropout_text_input_prob', 0.0)
+        self.dropout_phoneme_input_prob = cfg.get('dropout_phoneme_input_prob', 0.0)
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
@@ -1040,6 +1041,7 @@ class MagpieTTSDecoderModel(ModelPT):
     
     def process_batch(self, batch, mode="train"):
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
+        dropout_phoneme_input = ((random.random() < self.dropout_phoneme_input_prob) and (not dropout_text_input)) if mode == 'train' else False
         context_tensors = self.prepare_context_tensors(batch, dropout_text_input)
         print("text lens", context_tensors['text_lens'])
         remaining_text_embedded = context_tensors['remaining_text_embedded']
@@ -1103,7 +1105,7 @@ class MagpieTTSDecoderModel(ModelPT):
             else:
                 phoneme_channel_input = phoneme_channel_input[:, :context_plus_audio_embedded.shape[1], :]
 
-            if not dropout_conditional_input:
+            if (not dropout_conditional_input) and (not dropout_phoneme_input):
                 context_plus_audio_embedded = context_plus_audio_embedded + phoneme_channel_input
 
         transformer_out = self.forward(
@@ -1148,7 +1150,7 @@ class MagpieTTSDecoderModel(ModelPT):
                 target_lens=phoneme_tokens_lens-1,
             )
             phoneme_logits = self.phoneme_final_proj(pred_embeddings_phoneme) # (B, T', phoneme_stacking_factor * phoneme_vocab_size)
-            if not (dropout_conditional_input or dropout_text_input):
+            if not (dropout_conditional_input or dropout_text_input or dropout_phoneme_input):
                 # Only compute phoneme loss if not doing unconditional training or text dropout
                 phoneme_loss, _ = self.compute_phoneme_loss(phoneme_logits, phoneme_tokens[:,:,1:].long(), phoneme_tokens_lens - 1)
                 print("No Dropout - phoneme loss:", phoneme_loss.item())

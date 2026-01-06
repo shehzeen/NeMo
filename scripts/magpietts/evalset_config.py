@@ -62,8 +62,8 @@ dataset_meta_info = {
     },
     'riva_dummy_qwen': {
         'manifest_path' : '/home/shehzeenh/Code/DecoderNeMo/Data/riva_dummy.json',
-        'audio_dir' : '/Data/RivaData/riva',
-        'feature_dir' : '/Data/RivaData/riva',
+        'audio_dir' : '/DataShehzeen/RivaData/riva',
+        'feature_dir' : '/DataShehzeen/RivaData/riva',
         'load_cached_codes_if_available': False,
         'tokenizer_names': ['english_phoneme'],
     },
