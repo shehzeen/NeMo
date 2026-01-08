@@ -73,6 +73,7 @@ class MagpieTTSDecoderModel(ModelPT):
         # load codec
         codec_model = AudioCodecModel.restore_from(cfg.get('codecmodel_path'), strict=False)
         self.sample_rate = codec_model.sample_rate
+        self.output_sample_rate = codec_model.output_sample_rate
         
         if hasattr(codec_model, "discriminator"):
             # del codec discriminator to free memory
@@ -1449,6 +1450,7 @@ class MagpieTTSDecoderModel(ModelPT):
         self._test_dl = self._setup_test_dataloader(cfg)
 
     def infer_batch(self, batch, max_decoder_steps=500, temperature=0.7, topk=80, use_local_transformer_for_inference=False, maskgit_n_steps=3, use_cfg=False, cfg_scale=1.0, phoneme_input_type='gt', phoneme_sampling_method='argmax', dropout_text_input=False):
+        # TODO: Make this API same as MagpieTTS model.
         with torch.inference_mode():
             start_time = time.time()
             context_tensors = self.prepare_context_tensors(batch, dropout_text_input=dropout_text_input)
@@ -1718,7 +1720,7 @@ class MagpieTTSDecoderModel(ModelPT):
                 'tts_generation_time_per_frame': tts_generation_time_per_frame,
                 'batch_size': context_embedding.size(0),
             }
-
+            
             return predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens, rtf_metrics
 
 
