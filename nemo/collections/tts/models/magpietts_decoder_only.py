@@ -74,6 +74,7 @@ class MagpieTTSDecoderModel(ModelPT):
         codec_model = AudioCodecModel.restore_from(cfg.get('codecmodel_path'), strict=False)
         self.sample_rate = codec_model.sample_rate
         self.output_sample_rate = codec_model.output_sample_rate
+
         if hasattr(codec_model, "discriminator"):
             # del codec discriminator to free memory
             del codec_model.discriminator
@@ -1924,7 +1925,7 @@ class MagpieTTSDecoderModel(ModelPT):
                 'tts_generation_time_per_frame': tts_generation_time_per_frame,
                 'batch_size': context_embedding.size(0),
             }
-            
+
             return predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens, rtf_metrics
 
     @classmethod
