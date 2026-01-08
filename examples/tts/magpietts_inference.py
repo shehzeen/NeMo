@@ -182,7 +182,9 @@ def run_inference_and_evaluation(
         violin_plot_metrics.remove('utmosv2')
 
     # Load model
-    model, checkpoint_name = load_magpie_model(model_config, is_decoder_only_model=inference_config.is_decoder_only_model)
+    model, checkpoint_name = load_magpie_model(
+        model_config, is_decoder_only_model=inference_config.is_decoder_only_model
+    )
 
     # Add experiment name prefix if requested
     if log_exp_name and model_config.checkpoint_file:
@@ -502,7 +504,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
     target_group.add_argument('--ssim_target', type=float, default=None)
     target_group.add_argument('--is_decoder_only_model', action='store_true')
     target_group.add_argument('--phoneme_input_type', type=str, default='gt', choices=['predicted', 'gt'])
-    target_group.add_argument('--phoneme_sampling_method', type=str, default='greedy', choices=['greedy', 'multinomial'])
+    target_group.add_argument(
+        '--phoneme_sampling_method', type=str, default='greedy', choices=['greedy', 'multinomial']
+    )
     target_group.add_argument('--dropout_text_input', action='store_true')
 
     return parser

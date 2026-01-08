@@ -59,6 +59,7 @@ def setup_tokenizers(all_tokenizers_config, mode='train'):
 
     return aggregated_tokenizer
 
+
 def instantiate_phoneme_tokenizer(phoneme_tokenizer_config):
     phoneme_tokenizer = instantiate(phoneme_tokenizer_config)
     phoneme_vocab_size = len(phoneme_tokenizer.tokens)
@@ -66,6 +67,7 @@ def instantiate_phoneme_tokenizer(phoneme_tokenizer_config):
     phoneme_tokenizer.eos_token_id = phoneme_vocab_size + 1
     phoneme_tokenizer.vocab_size = phoneme_vocab_size + 2
     return phoneme_tokenizer
+
 
 def check_speaker_format(item: str):
     # enforce the format as example like "| Language:en Dataset:HiFiTTS Speaker:9136_other |".
@@ -410,7 +412,9 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
 
             if self.phoneme_tokenizer is not None:
                 phoneme_tokens = self.phoneme_tokenizer.encode(text_str)
-                phoneme_tokens = [self.phoneme_tokenizer.bos_token_id] + phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
+                phoneme_tokens = (
+                    [self.phoneme_tokenizer.bos_token_id] + phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
+                )
                 phoneme_tokens_len = len(phoneme_tokens)
                 phoneme_token_list.append(torch.tensor(phoneme_tokens, dtype=torch.int32))
                 phoneme_token_len_list.append(phoneme_tokens_len)
@@ -435,9 +439,11 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         }
 
         if self.phoneme_tokenizer is not None:
-            batch_dict["phoneme_tokens"] = collate_vectors(phoneme_token_list, padding_value=self.phoneme_tokenizer.pad)
+            batch_dict["phoneme_tokens"] = collate_vectors(
+                phoneme_token_list, padding_value=self.phoneme_tokenizer.pad
+            )
             batch_dict["phoneme_tokens_lens"] = torch.IntTensor(phoneme_token_len_list)
-            
+
         # audio for SV.
         if len(audio_list_16khz) > 0:
             batch_dict["audio_16khz"] = collate_vectors(audio_list_16khz, padding_value=0.0)
