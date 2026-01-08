@@ -190,7 +190,7 @@ def run_inference_and_evaluation(
         violin_plot_metrics.remove('utmosv2')
 
     # Load model
-    model, checkpoint_name = load_magpie_model(model_config)
+    model, checkpoint_name = load_magpie_model(model_config, is_decoder_only_model=inference_config.is_decoder_only_model)
 
     # Log architecture summary and get MoE info + FLOPs metrics
     moe_info, flops_per_component = log_model_architecture_summary(model)
@@ -502,6 +502,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
     target_group = parser.add_argument_group('Quality Targets')
     target_group.add_argument('--cer_target', type=float, default=None)
     target_group.add_argument('--ssim_target', type=float, default=None)
+    target_group.add_argument('--is_decoder_only_model', action='store_true')
+    target_group.add_argument('--phoneme_input_type', type=str, default='gt', choices=['predicted', 'gt'])
+    target_group.add_argument('--phoneme_sampling_method', type=str, default='greedy', choices=['greedy', 'multinomial'])
+    target_group.add_argument('--dropout_text_input', action='store_true')
 
     return parser
 
@@ -553,6 +557,10 @@ def main(argv=None):
         maskgit_noise_scale=args.maskgit_noise_scale,
         maskgit_fixed_schedule=args.maskgit_fixed_schedule,
         maskgit_sampling_type=args.maskgit_sampling_type,
+        is_decoder_only_model=args.is_decoder_only_model,
+        phoneme_input_type=args.phoneme_input_type,
+        phoneme_sampling_method=args.phoneme_sampling_method,
+        dropout_text_input=args.dropout_text_input,
     )
 
     eval_config = EvaluationConfig(
