@@ -34,7 +34,7 @@ import torch
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPATokenizer
 from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset, MagpieTTSDataset
-from nemo.collections.tts.models import MagpieTTSModel, MagpieTTSDecoderModel
+from nemo.collections.tts.models import MagpieTTSDecoderModel, MagpieTTSModel
 from nemo.collections.tts.models.magpietts import ModelInferenceParameters
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.utils import logging
@@ -133,7 +133,7 @@ class MagpieInferenceRunner:
     """
 
     def __init__(
-        self,# model can be MagpieTTSModel or DecoderOnlyMagpieTTSModel
+        self,  # model can be MagpieTTSModel or DecoderOnlyMagpieTTSModel
         model: Union[MagpieTTSModel, MagpieTTSDecoderModel],
         config: InferenceConfig,
     ):
@@ -157,7 +157,9 @@ class MagpieInferenceRunner:
         """Configure the tokenizer for inference (phoneme prob = 1.0)."""
         g2p = None
         if isinstance(self.model.tokenizer, AggregatedTTSTokenizer):
-            if "english_phoneme" in self.model.tokenizer.tokenizers and hasattr(self.model.tokenizer.tokenizers["english_phoneme"], "g2p"):
+            if "english_phoneme" in self.model.tokenizer.tokenizers and hasattr(
+                self.model.tokenizer.tokenizers["english_phoneme"], "g2p"
+            ):
                 g2p = self.model.tokenizer.tokenizers["english_phoneme"].g2p
         elif isinstance(self.model.tokenizer, IPATokenizer):
             g2p = self.model.tokenizer.g2p

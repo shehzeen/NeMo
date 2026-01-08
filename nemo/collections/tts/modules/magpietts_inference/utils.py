@@ -28,7 +28,7 @@ from typing import Dict, Optional, Tuple, Union
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from nemo.collections.tts.models import MagpieTTSModel, MagpieTTSDecoderModel
+from nemo.collections.tts.models import MagpieTTSDecoderModel, MagpieTTSModel
 from nemo.utils import logging
 
 
@@ -253,7 +253,9 @@ def update_checkpoint_state_dict(state_dict: dict) -> dict:
     return new_state_dict
 
 
-def load_magpie_model(config: ModelLoadConfig, device: str = "cuda", is_decoder_only_model: bool = False) -> Tuple[Union[MagpieTTSModel, MagpieTTSDecoderModel], str]:
+def load_magpie_model(
+    config: ModelLoadConfig, device: str = "cuda", is_decoder_only_model: bool = False
+) -> Tuple[Union[MagpieTTSModel, MagpieTTSDecoderModel], str]:
     """Load a MagpieTTS model from checkpoint or NeMo archive.
 
     Supports two loading modes:
