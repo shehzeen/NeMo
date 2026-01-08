@@ -35,7 +35,7 @@ from PIL import Image
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPATokenizer
 from nemo.collections.tts.data.text_to_speech_dataset import LongFormTTSInferenceDataset, MagpieTTSDataset
-from nemo.collections.tts.models import MagpieTTSModel
+from nemo.collections.tts.models import MagpieTTSModel, MagpieTTSDecoderModel
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.utils import logging
 
@@ -102,10 +102,15 @@ class InferenceConfig:
     # EOS detection
     eos_detection_method: str = "argmax_or_multinomial_any"
     ignore_finished_sentence_tracking: bool = False
+    phoneme_input_type: str = "gt"  # gt or predicted
+    phoneme_sampling_method: str = "argmax"  # argmax or multinomial
+    dropout_text_input: bool = False
 
     # Longform inference mode
     longform_mode: str = "auto"  # "auto" | "always" | "never"
     longform_word_threshold: int = 40  # Word threshold for auto-detection
+
+    is_decoder_only_model: bool = False
 
     def build_identifier(self) -> str:
         """Build a unique identifier string for this configuration.
@@ -161,8 +166,8 @@ class MagpieInferenceRunner:
     """
 
     def __init__(
-        self,
-        model: MagpieTTSModel,
+        self,# model can be MagpieTTSModel or DecoderOnlyMagpieTTSModel
+        model: Union[MagpieTTSModel, MagpieTTSDecoderModel],
         config: InferenceConfig,
     ):
         """Initialize the inference runner.
@@ -186,7 +191,8 @@ class MagpieInferenceRunner:
         """Configure the tokenizer for inference (phoneme prob = 1.0)."""
         g2p = None
         if isinstance(self.model.tokenizer, AggregatedTTSTokenizer):
-            g2p = self.model.tokenizer.tokenizers["english_phoneme"].g2p
+            if "english_phoneme" in self.model.tokenizer.tokenizers and hasattr(self.model.tokenizer.tokenizers["english_phoneme"], "g2p"):
+                g2p = self.model.tokenizer.tokenizers["english_phoneme"].g2p
         elif isinstance(self.model.tokenizer, IPATokenizer):
             g2p = self.model.tokenizer.g2p
 
@@ -269,6 +275,15 @@ class MagpieInferenceRunner:
             logging.info("Creating LongFormTTSInferenceDataset for longform inference")
             dataset = self._create_longform_dataset(dataset_meta, context_duration_min, context_duration_max)
         else:
+            if self.config.is_decoder_only_model:
+                _load_16khz_audio = False
+                _use_text_conditioning_encoder = True
+                _pad_context_text_to_max_duration = False
+            else:
+                _load_16khz_audio = self.model.model_type == 'single_encoder_sv_tts'
+                _use_text_conditioning_encoder = self.model.use_text_conditioning_encoder
+                _pad_context_text_to_max_duration = self.model.pad_context_text_to_max_duration
+
             logging.info("Creating MagpieTTSDataset for standard inference")
             dataset = MagpieTTSDataset(
                 dataset_meta=dataset_meta,
@@ -287,15 +302,21 @@ class MagpieInferenceRunner:
                 load_cached_codes_if_available=False,
                 dataset_type='test',
                 tokenizer_config=None,
-                load_16khz_audio=self.model.model_type == 'single_encoder_sv_tts',
-                use_text_conditioning_tokenizer=self.model.use_text_conditioning_encoder,
+                load_16khz_audio=_load_16khz_audio,
+                use_text_conditioning_tokenizer=_use_text_conditioning_encoder,
                 text_conditioning_tokenizer_name=self.model.text_conditioning_tokenizer_name,
-                pad_context_text_to_max_duration=self.model.pad_context_text_to_max_duration,
+                pad_context_text_to_max_duration=_pad_context_text_to_max_duration,
                 context_duration_min=context_duration_min,
                 context_duration_max=context_duration_max,
             )
             # Attach model's tokenizer for standard dataset
             dataset.text_tokenizer = self.model.tokenizer
+
+            if hasattr(self.model, 'phoneme_tokenizer'):
+                dataset.phoneme_tokenizer = self.model.phoneme_tokenizer
+                
+            if self.config.is_decoder_only_model:
+                dataset.text_conditioning_tokenizer = self.model.tokenizer.first_tokenizer
 
         return dataset
 
@@ -397,33 +418,52 @@ class MagpieInferenceRunner:
 
             # Run inference
             start_time = time.time()
-            output = self.model.infer_batch(
-                batch_cuda,
-                max_decoder_steps=self.config.max_decoder_steps,
-                temperature=self.config.temperature,
-                topk=self.config.topk,
-                use_cfg=self.config.use_cfg,
-                cfg_scale=self.config.cfg_scale,
-                return_cross_attn_probs=save_cross_attention_maps,
-                apply_attention_prior=self.config.apply_attention_prior,
-                prior_epsilon=self.config.attention_prior_epsilon,
-                lookahead_window_size=self.config.attention_prior_lookahead_window,
-                estimate_alignment_from_layers=self.config.estimate_alignment_from_layers,
-                apply_prior_to_layers=self.config.apply_prior_to_layers,
-                start_prior_after_n_audio_steps=self.config.start_prior_after_n_audio_steps,
-                use_local_transformer_for_inference=self.config.use_local_transformer,
-                maskgit_n_steps=self.config.maskgit_n_steps,
-                maskgit_noise_scale=self.config.maskgit_noise_scale,
-                maskgit_fixed_schedule=self.config.maskgit_fixed_schedule,
-                maskgit_sampling_type=self.config.maskgit_sampling_type,
-                ignore_finished_sentence_tracking=self.config.ignore_finished_sentence_tracking,
-                eos_detection_method=self.config.eos_detection_method,
-            )
+            if self.config.is_decoder_only_model:
+                output = self.model.infer_batch(
+                    batch_cuda,
+                    max_decoder_steps=440,
+                    temperature=self.config.temperature,
+                    topk=self.config.topk,
+                    use_cfg=self.config.use_cfg,
+                    cfg_scale=self.config.cfg_scale,
+                    use_local_transformer_for_inference=self.config.use_local_transformer,
+                    maskgit_n_steps=self.config.maskgit_n_steps,
+                    phoneme_input_type=self.config.phoneme_input_type,
+                    phoneme_sampling_method=self.config.phoneme_sampling_method,
+                    dropout_text_input=self.config.dropout_text_input,
+                )
+                predicted_audio = output[0]
+                predicted_audio_lens = output[1]
+                rtf_metrics = output[4]
+                cross_attention_maps = None
+            else:
+                output = self.model.infer_batch(
+                    batch_cuda,
+                    max_decoder_steps=self.config.max_decoder_steps,
+                    temperature=self.config.temperature,
+                    topk=self.config.topk,
+                    use_cfg=self.config.use_cfg,
+                    cfg_scale=self.config.cfg_scale,
+                    return_cross_attn_probs=save_cross_attention_maps,
+                    apply_attention_prior=self.config.apply_attention_prior,
+                    prior_epsilon=self.config.attention_prior_epsilon,
+                    lookahead_window_size=self.config.attention_prior_lookahead_window,
+                    estimate_alignment_from_layers=self.config.estimate_alignment_from_layers,
+                    apply_prior_to_layers=self.config.apply_prior_to_layers,
+                    start_prior_after_n_audio_steps=self.config.start_prior_after_n_audio_steps,
+                    use_local_transformer_for_inference=self.config.use_local_transformer,
+                    maskgit_n_steps=self.config.maskgit_n_steps,
+                    maskgit_noise_scale=self.config.maskgit_noise_scale,
+                    maskgit_fixed_schedule=self.config.maskgit_fixed_schedule,
+                    maskgit_sampling_type=self.config.maskgit_sampling_type,
+                    ignore_finished_sentence_tracking=self.config.ignore_finished_sentence_tracking,
+                    eos_detection_method=self.config.eos_detection_method,
+                )
 
-            predicted_audio = output.predicted_audio
-            predicted_audio_lens = output.predicted_audio_lens
-            rtf_metrics = output.rtf_metrics
-            cross_attention_maps = output.cross_attention_maps
+                predicted_audio = output.predicted_audio
+                predicted_audio_lens = output.predicted_audio_lens
+                rtf_metrics = output.rtf_metrics
+                cross_attention_maps = output.cross_attention_maps
 
             all_rtf_metrics.append(rtf_metrics)
             elapsed = time.time() - start_time

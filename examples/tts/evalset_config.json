@@ -1,8 +1,8 @@
 {
-    "an4_val_ci": {
-        "manifest_path": "/home/TestData/an4_dataset/an4_val_context_v1.json",
-        "audio_dir": "/",
-        "feature_dir": null
+    "riva_hard_digits": {
+        "manifest_path": "/Data/evaluation_manifests/hard-digits-path-corrected.ndjson",
+        "audio_dir": "/Data/RIVA-TTS",
+        "feature_dir": "/Data/RIVA-TTS"
     }
 }
 

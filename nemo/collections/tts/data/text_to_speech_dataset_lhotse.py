@@ -59,6 +59,13 @@ def setup_tokenizers(all_tokenizers_config, mode='train'):
 
     return aggregated_tokenizer
 
+def instantiate_phoneme_tokenizer(phoneme_tokenizer_config):
+    phoneme_tokenizer = instantiate(phoneme_tokenizer_config)
+    phoneme_vocab_size = len(phoneme_tokenizer.tokens)
+    phoneme_tokenizer.bos_token_id = phoneme_vocab_size
+    phoneme_tokenizer.eos_token_id = phoneme_vocab_size + 1
+    phoneme_tokenizer.vocab_size = phoneme_vocab_size + 2
+    return phoneme_tokenizer
 
 def check_speaker_format(item: str):
     # enforce the format as example like "| Language:en Dataset:HiFiTTS Speaker:9136_other |".
@@ -152,6 +159,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         tokenizer_config: DictConfig = None,
         text_context_remapping: Dict[str, str] = None,
         text_context_remapping_prob: float = 0.0,
+        phoneme_tokenizer_config: DictConfig = None,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -176,8 +184,10 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         self.context_duration_max = context_duration_max
         self.tokenizer_config = tokenizer_config
         self.text_tokenizer = None
+        self.phoneme_tokenizer = None
         self.text_context_remapping = text_context_remapping
         self.text_context_remapping_prob = text_context_remapping_prob
+        self.phoneme_tokenizer_config = phoneme_tokenizer_config
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
         num_codec_frames = int(duration * sample_rate / self.codec_model_samples_per_frame)
@@ -204,6 +214,12 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
             self.eos_id = self.bos_id + 1
             self.pad_id = self.text_tokenizer.pad
 
+        if self.phoneme_tokenizer is None and self.phoneme_tokenizer_config is not None:
+            worker_info = torch.utils.data.get_worker_info()
+            worker_id = worker_info.id if worker_info is not None else 0
+            logging.info(f"Worker {worker_id} initializing phoneme tokenizer...")
+            self.phoneme_tokenizer = instantiate_phoneme_tokenizer(self.phoneme_tokenizer_config)
+
         # define list to store batched information
         dataset_name_list = []
         audio_list = []
@@ -226,6 +242,8 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         raw_text_list = (
             []
         )  # raw text here is the string of normalized text or text stored in the supervision segment. Used to distinguish from text tokens.
+        phoneme_token_list = []
+        phoneme_token_len_list = []
         for cut in cuts:
             speaker = cut.supervisions[0].speaker
             if not check_speaker_format(speaker):
@@ -426,6 +444,13 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
             token_list.append(tokens)
             token_len_list.append(text_len)
 
+            if self.phoneme_tokenizer is not None:
+                phoneme_tokens = self.phoneme_tokenizer.encode(text_str)
+                phoneme_tokens = [self.phoneme_tokenizer.bos_token_id] + phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
+                phoneme_tokens_len = len(phoneme_tokens)
+                phoneme_token_list.append(torch.tensor(phoneme_tokens, dtype=torch.int32))
+                phoneme_token_len_list.append(phoneme_tokens_len)
+
             if self.include_align_prior:
                 align_prior = beta_binomial_prior_distribution(
                     phoneme_count=text_len, mel_count=spec_len, scaling_factor=self.prior_scaling_factor
@@ -445,6 +470,10 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
             "text_lens": torch.IntTensor(token_len_list),
         }
 
+        if self.phoneme_tokenizer is not None:
+            batch_dict["phoneme_tokens"] = collate_vectors(phoneme_token_list, padding_value=self.phoneme_tokenizer.pad)
+            batch_dict["phoneme_tokens_lens"] = torch.IntTensor(phoneme_token_len_list)
+            
         # audio for SV.
         if len(audio_list_16khz) > 0:
             batch_dict["audio_16khz"] = collate_vectors(audio_list_16khz, padding_value=0.0)

@@ -178,7 +178,7 @@ def run_inference_and_evaluation(
         violin_plot_metrics.remove('utmosv2')
 
     # Load model
-    model, checkpoint_name = load_magpie_model(model_config)
+    model, checkpoint_name = load_magpie_model(model_config, is_decoder_only_model=inference_config.is_decoder_only_model)
 
     # Add experiment name prefix if requested
     if log_exp_name and model_config.checkpoint_file:
@@ -516,6 +516,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
     target_group = parser.add_argument_group('Quality Targets')
     target_group.add_argument('--cer_target', type=float, default=None)
     target_group.add_argument('--ssim_target', type=float, default=None)
+    target_group.add_argument('--is_decoder_only_model', action='store_true')
+    target_group.add_argument('--phoneme_input_type', type=str, default='gt', choices=['predicted', 'gt'])
+    target_group.add_argument('--phoneme_sampling_method', type=str, default='greedy', choices=['greedy', 'multinomial'])
+    target_group.add_argument('--dropout_text_input', action='store_true')
 
     return parser
 
@@ -574,6 +578,10 @@ def main():
         maskgit_sampling_type=args.maskgit_sampling_type,
         eos_detection_method=args.eos_detection_method,
         ignore_finished_sentence_tracking=args.ignore_finished_sentence_tracking,
+        is_decoder_only_model=args.is_decoder_only_model,
+        phoneme_input_type=args.phoneme_input_type,
+        phoneme_sampling_method=args.phoneme_sampling_method,
+        dropout_text_input=args.dropout_text_input,
     )
 
     eval_config = EvaluationConfig(
@@ -635,6 +643,7 @@ def main():
                 inference_config=inference_config,
                 eval_config=eval_config,
                 dataset_meta_info=dataset_meta_info,
+                datasets=datasets,
                 out_dir=args.out_dir,
                 num_repeats=args.num_repeats,
                 confidence_level=args.confidence_level,
