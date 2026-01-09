@@ -281,69 +281,82 @@ class MagpieTTSDecoderModel(ModelPT):
                         new_state_dict[key[len(name_with_dot) :]] = state_dict[key]
                 child.load_state_dict(new_state_dict)
 
-    def audio_to_codes(self, audio, audio_len, audio_type='target'):
-        # audio: (B, T)
-        # audio_len: (B,)
-        if audio_type == 'target':
-            audio_eos_id = self.audio_eos_id
-            audio_bos_id = self.audio_bos_id
-        elif audio_type == 'context':
-            audio_eos_id = self.context_audio_eos_id
-            audio_bos_id = self.context_audio_bos_id
-        else:
-            raise ValueError(f"Received audio_type of {audio_type}. Must be `target` or `context`")
+    def add_eos_token(self, codes, codes_len, eos_id, num_eos_tokens=1):
+        # codes: (B, C, T')
+        # codes_len: (B,)
+        codes = torch.nn.functional.pad(input=codes, pad=(0, num_eos_tokens), value=0)
+        codes_len = codes_len + num_eos_tokens
+        # Insert EOS token at new final token entry
+        for idx in range(codes.size(0)):
+            codes[idx, :, codes_len[idx] - 1] = eos_id
 
+        return codes, codes_len
+
+    def add_special_tokens(self, codes, codes_len, bos_id, eos_id, num_bos_tokens=1, num_eos_tokens=1):
+        # codes: (B, C, T')
+        # codes_len: (B,)
+        codes = torch.nn.functional.pad(input=codes, pad=(num_bos_tokens, 0), value=bos_id)
+        codes_len = codes_len + num_bos_tokens
+        codes, codes_len = self.add_eos_token(
+            codes=codes, codes_len=codes_len, eos_id=eos_id, num_eos_tokens=num_eos_tokens
+        )
+        return codes, codes_len
+
+    def remove_bos_token(self, codes, codes_len, num_tokens=1):
+        # codes: (B, C, T')
+        # codes_len: (B,)
+        codes = codes[:, :, num_tokens:]
+        codes_len = codes_len - num_tokens
+        return codes, codes_len
+
+    def remove_embedded_bos_token(self, embedded, embedded_len):
+        # codes: (B, T', C)
+        # codes_len: (B,)
+        embedded = embedded[:, 1:, :]
+        embedded_len = embedded_len - 1
+        return embedded, embedded_len
+
+    def remove_eos_token(self, codes, codes_len):
+        # codes: (B, C, T')
+        # codes_len: (B,)
+        codes_len = codes_len - 1
+        codes = codes[:, :, :-1]
+        mask = get_mask_from_lengths(lengths=codes_len)
+        codes = codes * mask.unsqueeze(1)
+        return codes, codes_len
+
+    def remove_embedded_eos_token(self, embedded, embedded_len):
+        # embedded: (B, T', D)
+        # embedded_len: (B,)
+        embedded_len = embedded_len - 1
+        embedded = embedded[:, :-1, :]
+        mask = get_mask_from_lengths(lengths=embedded_len)
+        embedded = embedded * mask.unsqueeze(2)
+        return embedded, embedded_len
+
+    def remove_special_tokens(self, codes, codes_len, num_bos_tokens=1):
+        codes, codes_len = self.remove_bos_token(codes=codes, codes_len=codes_len, num_tokens=num_bos_tokens)
+        codes, codes_len = self.remove_eos_token(codes=codes, codes_len=codes_len)
+        return codes, codes_len
+    
+    def audio_to_codes(self, audio, audio_len, sample_rate=None):
         self._codec_model.eval()
         with torch.no_grad(), torch.autocast(device_type=audio.device.type, dtype=torch.float32):
-            codes, codes_len = self._codec_model.encode(audio=audio, audio_len=audio_len)
-            if self._codec_converter is not None:
-                codes = self._codec_converter.convert_original_to_new(audio_tokens=codes, audio_lens=codes_len)
-            # Add a timestep to begining and end of codes tensor
-            bos_tensor = torch.full(
-                (codes.size(0), codes.size(1), 1), audio_bos_id, dtype=codes.dtype, device=codes.device
-            )
-            pad_tensor = torch.full(
-                (codes.size(0), codes.size(1), 1), 0, dtype=codes.dtype, device=codes.device
-            )  # 0 is the padding token in the audio codebook
-            codes = torch.cat([bos_tensor, codes, pad_tensor], dim=-1)
-            # codes: (B, C, T')
-            # codes_len: (B,)
-            for idx in range(codes.size(0)):
-                codes[idx, :, codes_len[idx] + 1] = audio_eos_id
-            codes_len = codes_len + 2
-
-            return codes.long(), codes_len.long()
+            codes, codes_len = self._codec_model.encode(audio=audio, audio_len=audio_len, sample_rate=sample_rate)
+            return codes, codes_len
 
     def codes_to_audio(self, codes, codes_len):
         # codes: (B, C, T')
         # codes_len: (B,)
-        if self.frame_stacking_factor > 1 and codes.size(1) == self.num_audio_codebooks * self.frame_stacking_factor:
-            # Unstack the audio codes if they are stacked
-            codes, codes_len = self.unstack_codes(codes, codes_len, self.frame_stacking_factor)
-
-        if codes.size(2) < 5:
-            # If the codes are too short, we need to pad them
-            codes = torch.cat(
-                [codes, torch.zeros(codes.size(0), codes.size(1), 5 - codes.size(2), device=codes.device)], dim=2
-            ).long()
-            codes_len = codes_len + 5 - codes.size(2)
-
         self._codec_model.eval()
         with torch.no_grad(), torch.autocast(device_type=codes.device.type, dtype=torch.float32):
-            # Make a copy to avoid modifying the original tensor if it's used elsewhere
-            codes_copy = codes.clone()
-            # Replace eos and bos tokens with padding in the copied tensor
-            codes_copy[codes == self.audio_bos_id] = 0  # zero is the padding token
-            codes_copy[codes == self.audio_eos_id] = 0
             # Pass the modified integer token IDs
             if self._codec_converter is not None:
-                codes_copy = self._codec_converter.convert_new_to_original(
-                    audio_tokens=codes_copy, audio_lens=codes_len
-                )
-            audio, audio_len = self._codec_model.decode(tokens=codes_copy, tokens_len=codes_len)
+                codes = self._codec_converter.convert_new_to_original(audio_tokens=codes, audio_lens=codes_len)
+            audio, audio_len = self._codec_model.decode(tokens=codes, tokens_len=codes_len)
             # audio: (B, T)
             # audio_len: (B,)
-            return audio, audio_len
+            return audio, audio_len, codes
 
     def embed_audio_tokens(self, audio_tokens):
         # audio_tokens: (B, C, T')
@@ -502,7 +515,7 @@ class MagpieTTSDecoderModel(ModelPT):
             codebook_logits = logits[:, :, si:ei]  # (B, T', num_tokens_per_codebook)
             codebook_targets = audio_codes[:, codebook]  # (B, T')
             codebook_loss = self.cross_entropy_loss(
-                codebook_logits.permute(0, 2, 1), codebook_targets  # (B, num_tokens_per_codebook, T')
+                codebook_logits.permute(0, 2, 1), codebook_targets.long()  # (B, num_tokens_per_codebook, T')
             )  # (B, T')
             codebook_loss = codebook_loss * loss_mask[:, codebook, :]
             codebook_loss = codebook_loss.sum() / loss_mask[:, codebook, :].sum()
@@ -810,12 +823,24 @@ class MagpieTTSDecoderModel(ModelPT):
         wandb_audio_log = {}
 
         pred_audio_codes = self.logits_to_audio_codes(logits, audio_codes_lens_target)
-        pred_audio, pred_audio_lens = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target)
-        target_audio, target_audio_lens = self.codes_to_audio(target_audio_codes, audio_codes_lens_target)
+        pred_audio_codes, _ = self.remove_eos_token(
+            codes=pred_audio_codes,
+            codes_len=audio_codes_lens_target,
+        )
+        pred_audio, pred_audio_lens = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target-1)
+        target_audio_codes, _ = self.remove_eos_token(
+            codes=target_audio_codes,
+            codes_len=audio_codes_lens_target,
+        )
+        target_audio, target_audio_lens = self.codes_to_audio(target_audio_codes, audio_codes_lens_target-1)
 
         context_audio, context_audio_lens = None, None
         if context_audio_codes is not None and context_audio_codes.shape[2] > 3:
             # > 3 ensures, it is a valid context audio tensor (and not dummy tensor used in text context)
+            context_audio_codes, context_audio_codes_lens = self.remove_special_tokens(
+                codes=context_audio_codes,
+                codes_len=context_audio_codes_lens,
+            )
             context_audio, context_audio_lens = self.codes_to_audio(context_audio_codes, context_audio_codes_lens)
 
         for logger in self.loggers:
@@ -963,8 +988,16 @@ class MagpieTTSDecoderModel(ModelPT):
                 ).long()
         else:
             context_audio_codes, context_audio_codes_lens = self.audio_to_codes(
-                batch['context_audio'], batch['context_audio_lens'], audio_type='context'
+                batch['context_audio'], batch['context_audio_lens']
             )
+        
+        context_audio_codes, context_audio_codes_lens = self.add_special_tokens(
+            codes=context_audio_codes,
+            codes_len=context_audio_codes_lens,
+            bos_id=self.context_audio_bos_id,
+            eos_id=self.context_audio_eos_id,
+        )
+
 
         context_audio_codes, context_audio_codes_lens = self.stack_codes(
             context_audio_codes,
@@ -1129,7 +1162,7 @@ class MagpieTTSDecoderModel(ModelPT):
             else False
         )
         context_tensors = self.prepare_context_tensors(batch, dropout_text_input)
-        print("text lens", context_tensors['text_lens'])
+        # print("text lens", context_tensors['text_lens'])
         remaining_text_embedded = context_tensors['remaining_text_embedded']
         context_embedding = context_tensors['context_embedding']
         context_lens = context_tensors['context_lens']
@@ -1159,6 +1192,14 @@ class MagpieTTSDecoderModel(ModelPT):
                 audio_codes = self._codec_converter.convert_original_to_new(
                     audio_tokens=audio_codes, audio_lens=audio_codes_lens
                 ).long()
+
+        
+        audio_codes, audio_codes_lens = self.add_special_tokens(
+            codes=audio_codes,
+            codes_len=audio_codes_lens,
+            bos_id=self.audio_bos_id,
+            eos_id=self.audio_eos_id,
+        )
 
         audio_codes, audio_codes_lens = self.stack_codes(
             audio_codes,
@@ -1198,8 +1239,8 @@ class MagpieTTSDecoderModel(ModelPT):
                     batch['phoneme_tokens'], batch['phoneme_tokens_lens'], context_lens_for_phonemes
                 )
             )
-            print("phoneme_tokens_lens", phoneme_tokens_lens)
-            print("audio_codes_lens", audio_codes_lens_input)
+            # print("phoneme_tokens_lens", phoneme_tokens_lens)
+            # print("audio_codes_lens", audio_codes_lens_input)
             if phoneme_channel_input.shape[1] < context_plus_audio_embedded.shape[1]:
                 padding_tensor = torch.zeros(
                     phoneme_channel_input.shape[0],
@@ -1455,10 +1496,6 @@ class MagpieTTSDecoderModel(ModelPT):
             sample_rate=self.sample_rate,
             bos_id=None,
             eos_id=self.eos_id,
-            audio_bos_id=self.audio_bos_id,
-            audio_eos_id=self.audio_eos_id,
-            context_audio_bos_id=self.context_audio_bos_id,
-            context_audio_eos_id=self.context_audio_eos_id,
             num_audio_codebooks=self.data_num_audio_codebooks,
             codec_model_samples_per_frame=self.codec_model_samples_per_frame,
             prior_scaling_factor=0.0,
@@ -1486,10 +1523,6 @@ class MagpieTTSDecoderModel(ModelPT):
             sample_rate=self.sample_rate,
             volume_norm=dataset_cfg.volume_norm,
             codec_model_samples_per_frame=self.codec_model_samples_per_frame,
-            audio_bos_id=self.audio_bos_id,
-            audio_eos_id=self.audio_eos_id,
-            context_audio_bos_id=self.context_audio_bos_id,
-            context_audio_eos_id=self.context_audio_eos_id,
             num_audio_codebooks=self.data_num_audio_codebooks,
             prior_scaling_factor=0.0,
             load_cached_codes_if_available=self.cfg.load_cached_codes_if_available,
@@ -1909,6 +1942,7 @@ class MagpieTTSDecoderModel(ModelPT):
                 target_lens=predicted_codes_lens,
             )
             predicted_codes = predicted_codes.permute(0, 2, 1)  # (B, num_codebooks, T)
+            predicted_codes, predicted_codes_lens = self.remove_eos_token(predicted_codes, predicted_codes_lens)
             predicted_audio, predicted_audio_lens = self.codes_to_audio(predicted_codes, predicted_codes_lens)
 
             end_time = time.time()
