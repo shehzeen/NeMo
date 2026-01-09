@@ -338,7 +338,7 @@ class MagpieTTSDecoderModel(ModelPT):
         codes, codes_len = self.remove_bos_token(codes=codes, codes_len=codes_len, num_tokens=num_bos_tokens)
         codes, codes_len = self.remove_eos_token(codes=codes, codes_len=codes_len)
         return codes, codes_len
-    
+
     def audio_to_codes(self, audio, audio_len, sample_rate=None):
         self._codec_model.eval()
         with torch.no_grad(), torch.autocast(device_type=audio.device.type, dtype=torch.float32):
@@ -827,12 +827,12 @@ class MagpieTTSDecoderModel(ModelPT):
             codes=pred_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        pred_audio, pred_audio_lens = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target-1)
+        pred_audio, pred_audio_lens = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target - 1)
         target_audio_codes, _ = self.remove_eos_token(
             codes=target_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        target_audio, target_audio_lens = self.codes_to_audio(target_audio_codes, audio_codes_lens_target-1)
+        target_audio, target_audio_lens = self.codes_to_audio(target_audio_codes, audio_codes_lens_target - 1)
 
         context_audio, context_audio_lens = None, None
         if context_audio_codes is not None and context_audio_codes.shape[2] > 3:
@@ -990,14 +990,13 @@ class MagpieTTSDecoderModel(ModelPT):
             context_audio_codes, context_audio_codes_lens = self.audio_to_codes(
                 batch['context_audio'], batch['context_audio_lens']
             )
-        
+
         context_audio_codes, context_audio_codes_lens = self.add_special_tokens(
             codes=context_audio_codes,
             codes_len=context_audio_codes_lens,
             bos_id=self.context_audio_bos_id,
             eos_id=self.context_audio_eos_id,
         )
-
 
         context_audio_codes, context_audio_codes_lens = self.stack_codes(
             context_audio_codes,
@@ -1193,7 +1192,6 @@ class MagpieTTSDecoderModel(ModelPT):
                     audio_tokens=audio_codes, audio_lens=audio_codes_lens
                 ).long()
 
-        
         audio_codes, audio_codes_lens = self.add_special_tokens(
             codes=audio_codes,
             codes_len=audio_codes_lens,
