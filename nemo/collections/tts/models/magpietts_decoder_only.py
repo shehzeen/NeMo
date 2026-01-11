@@ -169,16 +169,23 @@ class MagpieTTSDecoderModel(ModelPT):
             self.phoneme_embeddings = nn.ModuleList(phoneme_embeddings)
             self.phoneme_final_proj = nn.Linear(cfg.hidden_dim, self.phoneme_vocab_size * self.phoneme_stacking_factor)
 
-        if cfg.transformer_hf_backend == "custom_qwen3_moe":
-            # from transformers.models import qwen3_moe
-            # config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(intermediate_size=3072, num_hidden_layers=5, num_experts=64)
-            # self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
-            from transformers.models import qwen2_moe
-
-            config_qwen2 = qwen2_moe.configuration_qwen2_moe.Qwen2MoeConfig(
-                hidden_size=1536, intermediate_size=3072, num_hidden_layers=5, num_experts=32
-            )
-            self.decoder = qwen2_moe.modeling_qwen2_moe.Qwen2MoeModel(config_qwen2)
+        if cfg.transformer_hf_backend == "custom_qwen3_moe_5layer":
+            from transformers.models import qwen3_moe
+            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(hidden_size=1536, intermediate_size=3072, num_hidden_layers=5, num_experts=64)
+            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
+        elif cfg.transformer_hf_backend == "custom_qwen3_moe_10layer":
+            from transformers.models import qwen3_moe
+            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(hidden_size=1536, intermediate_size=3072, num_hidden_layers=10, num_experts=64)
+            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
+        elif cfg.transformer_hf_backend == "custom_qwen3_moe_15layer":
+            from transformers.models import qwen3_moe
+            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(hidden_size=1536, intermediate_size=3072, num_hidden_layers=15, num_experts=64)
+            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
+            # from transformers.models import qwen2_moe
+            # config_qwen2 = qwen2_moe.configuration_qwen2_moe.Qwen2MoeConfig(
+            #     hidden_size=1536, intermediate_size=3072, num_hidden_layers=5, num_experts=32
+            # )
+            # self.decoder = qwen2_moe.modeling_qwen2_moe.Qwen2MoeModel(config_qwen2)
         else:
             self.transformer_backend_config = AutoConfig.from_pretrained(
                 cfg.transformer_hf_backend,
@@ -352,6 +359,7 @@ class MagpieTTSDecoderModel(ModelPT):
         if self.frame_stacking_factor > 1 and codes.size(1) == self.num_audio_codebooks * self.frame_stacking_factor:
             # Unstack the audio codes if they are stacked
             codes, codes_len = self.unstack_codes(codes, codes_len, self.frame_stacking_factor)
+
         with torch.no_grad(), torch.autocast(device_type=codes.device.type, dtype=torch.float32):
             # Pass the modified integer token IDs
             if self._codec_converter is not None:
