@@ -110,7 +110,7 @@ class AudioCodecModel(ModelPT):
         self.audio_decoder = instantiate(cfg.audio_decoder)
 
         # Discriminator setup
-        self.discriminator = instantiate(cfg.discriminator)
+        # self.discriminator = instantiate(cfg.discriminator)
 
         # Mel loss setup
         loss_resolutions = cfg.loss_resolutions
