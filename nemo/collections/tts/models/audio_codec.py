@@ -182,9 +182,15 @@ class AudioCodecModel(ModelPT):
             self.speaker_encoder = ResNetSpeakerEncoder()
             # load pretrained model
             # self.speaker_encoder.load_checkpoint("https://github.com/coqui-ai/TTS/releases/download/speaker_encoder_model/model_se.pth.tar")
-            self.speaker_encoder.load_checkpoint(
-                "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/pytorch_model.bin", strict=False
-            )
+            import os
+            if os.path.exists("/mountdir/checkpoints/pytorch_model.bin"):
+                self.speaker_encoder.load_checkpoint(
+                    "/mountdir/checkpoints/pytorch_model.bin", strict=False
+                )
+            else:
+                self.speaker_encoder.load_checkpoint(
+                    "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/pytorch_model.bin", strict=False
+                )
             # freeze the pretrained speaker encoder
             self.speaker_encoder.freeze()
             print("Speaker encoder loaded and frozen !!")
