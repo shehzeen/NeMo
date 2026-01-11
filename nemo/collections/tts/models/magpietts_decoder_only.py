@@ -190,6 +190,13 @@ class MagpieTTSDecoderModel(ModelPT):
                 hidden_size=1536, intermediate_size=3072, num_hidden_layers=15, num_experts=64
             )
             self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
+        elif cfg.transformer_hf_backend == "custom_qwen3_moe_20layer":
+            from transformers.models import qwen3_moe
+
+            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(
+                hidden_size=1536, intermediate_size=3072, num_hidden_layers=20, num_experts=64
+            )
+            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
             # from transformers.models import qwen2_moe
             # config_qwen2 = qwen2_moe.configuration_qwen2_moe.Qwen2MoeConfig(
             #     hidden_size=1536, intermediate_size=3072, num_hidden_layers=5, num_experts=32
