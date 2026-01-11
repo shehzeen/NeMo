@@ -349,6 +349,9 @@ class MagpieTTSDecoderModel(ModelPT):
         # codes: (B, C, T')
         # codes_len: (B,)
         self._codec_model.eval()
+        if self.frame_stacking_factor > 1 and codes.size(1) == self.num_audio_codebooks * self.frame_stacking_factor:
+            # Unstack the audio codes if they are stacked
+            codes, codes_len = self.unstack_codes(codes, codes_len, self.frame_stacking_factor)
         with torch.no_grad(), torch.autocast(device_type=codes.device.type, dtype=torch.float32):
             # Pass the modified integer token IDs
             if self._codec_converter is not None:
