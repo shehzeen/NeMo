@@ -827,12 +827,12 @@ class MagpieTTSDecoderModel(ModelPT):
             codes=pred_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        pred_audio, pred_audio_lens = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target - 1)
+        pred_audio, pred_audio_lens, _ = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target - 1)
         target_audio_codes, _ = self.remove_eos_token(
             codes=target_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        target_audio, target_audio_lens = self.codes_to_audio(target_audio_codes, audio_codes_lens_target - 1)
+        target_audio, target_audio_lens, _ = self.codes_to_audio(target_audio_codes, audio_codes_lens_target - 1)
 
         context_audio, context_audio_lens = None, None
         if context_audio_codes is not None and context_audio_codes.shape[2] > 3:
@@ -841,7 +841,7 @@ class MagpieTTSDecoderModel(ModelPT):
                 codes=context_audio_codes,
                 codes_len=context_audio_codes_lens,
             )
-            context_audio, context_audio_lens = self.codes_to_audio(context_audio_codes, context_audio_codes_lens)
+            context_audio, context_audio_lens, _ = self.codes_to_audio(context_audio_codes, context_audio_codes_lens)
 
         for logger in self.loggers:
             is_wandb = isinstance(logger, WandbLogger)
@@ -1940,7 +1940,7 @@ class MagpieTTSDecoderModel(ModelPT):
             )
             predicted_codes = predicted_codes.permute(0, 2, 1)  # (B, num_codebooks, T)
             predicted_codes, predicted_codes_lens = self.remove_eos_token(predicted_codes, predicted_codes_lens)
-            predicted_audio, predicted_audio_lens = self.codes_to_audio(predicted_codes, predicted_codes_lens)
+            predicted_audio, predicted_audio_lens, _ = self.codes_to_audio(predicted_codes, predicted_codes_lens)
 
             end_time = time.time()
             total_audio_duration_generated = (
