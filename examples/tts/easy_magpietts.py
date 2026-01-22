@@ -16,13 +16,13 @@ import lightning.pytorch as pl
 import torch.multiprocessing as mp
 from omegaconf import OmegaConf
 
-from nemo.collections.tts.models import MagpieTTSDecoderModel
+from nemo.collections.tts.models import EasyMagpieTTSModel
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 
 
-@hydra_runner(config_path="conf/magpietts", config_name="magpietts_decoderonly_en")
+@hydra_runner(config_path="conf/magpietts", config_name="easy_magpietts")
 def main(cfg):
     logging.info('\nConfig Params:\n%s', OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -42,7 +42,7 @@ def main(cfg):
     trainer.callbacks.append(pl.callbacks.LearningRateMonitor(logging_interval='step', log_weight_decay=True))
     exp_manager(trainer, cfg.get("exp_manager", None))
 
-    model = MagpieTTSDecoderModel(cfg=cfg.model, trainer=trainer)
+    model = EasyMagpieTTSModel(cfg=cfg.model, trainer=trainer)
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
 
     if cfg.get('mode', 'train') == 'train':

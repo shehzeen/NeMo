@@ -34,7 +34,7 @@ import torch
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPATokenizer
 from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset, MagpieTTSDataset
-from nemo.collections.tts.models import MagpieTTSDecoderModel, MagpieTTSModel
+from nemo.collections.tts.models import EasyMagpieTTSModel, MagpieTTSModel
 from nemo.collections.tts.models.magpietts import ModelInferenceParameters
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.utils import logging
@@ -134,7 +134,7 @@ class MagpieInferenceRunner:
 
     def __init__(
         self,  # model can be MagpieTTSModel or DecoderOnlyMagpieTTSModel
-        model: Union[MagpieTTSModel, MagpieTTSDecoderModel],
+        model: Union[MagpieTTSModel, EasyMagpieTTSModel],
         config: InferenceConfig,
     ):
         """Initialize the inference runner.

@@ -193,6 +193,8 @@ def run_inference_and_evaluation(
     model, checkpoint_name = load_magpie_model(
         model_config, is_decoder_only_model=inference_config.is_decoder_only_model
     )
+    # change model to fp32 for inference
+    model = model.float()
 
     # Log architecture summary and get MoE info + FLOPs metrics
     moe_info, flops_per_component = log_model_architecture_summary(model)
@@ -550,6 +552,14 @@ def main(argv=None):
                 model_inference_parameters[field_name] = parse_layer_list(arg_from_cmdline)
             else:
                 model_inference_parameters[field_name] = arg_from_cmdline
+
+    if "max_decoder_steps" not in model_inference_parameters:
+        if args.longform_mode in {'always', 'auto'}:
+            model_inference_parameters["max_decoder_steps"] = args.longform_max_decoder_steps
+        elif args.is_decoder_only_model:
+            model_inference_parameters["max_decoder_steps"] = 220
+        else:
+            model_inference_parameters["max_decoder_steps"] = 440
 
     inference_config = InferenceConfig(
         model_inference_parameters=ModelInferenceParameters.from_dict(model_inference_parameters),
