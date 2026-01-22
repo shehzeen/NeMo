@@ -185,6 +185,8 @@ def run_inference_and_evaluation(
     model, checkpoint_name = load_magpie_model(
         model_config, is_decoder_only_model=inference_config.is_decoder_only_model
     )
+    # change model to fp32 for inference
+    model = model.float()
 
     # Add experiment name prefix if requested
     if log_exp_name and model_config.checkpoint_file:
@@ -541,6 +543,8 @@ def main():
     elif args.longform_mode == 'auto':
         # Use longform steps if any text appears long (will be checked in runner)
         max_decoder_steps = args.longform_max_decoder_steps
+    elif args.is_decoder_only_model:
+        max_decoder_steps = 220
     else:  # 'never'
         max_decoder_steps = 440
     model_inference_parameters = {}

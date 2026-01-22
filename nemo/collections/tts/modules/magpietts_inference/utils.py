@@ -28,7 +28,7 @@ from typing import Optional, Tuple, Union
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from nemo.collections.tts.models import MagpieTTSDecoderModel, MagpieTTSModel
+from nemo.collections.tts.models import EasyMagpieTTSModel, MagpieTTSModel
 from nemo.utils import logging
 
 
@@ -180,7 +180,7 @@ def update_checkpoint_state_dict(state_dict: dict) -> dict:
 
 def load_magpie_model(
     config: ModelLoadConfig, device: str = "cuda", is_decoder_only_model: bool = False
-) -> Tuple[Union[MagpieTTSModel, MagpieTTSDecoderModel], str]:
+) -> Tuple[Union[MagpieTTSModel, EasyMagpieTTSModel], str]:
     """Load a MagpieTTS model from checkpoint or NeMo archive.
 
     Supports two loading modes:
@@ -198,7 +198,7 @@ def load_magpie_model(
         ValueError: If configuration is invalid or sample rates don't match.
     """
     config.validate()
-    model_cls = MagpieTTSDecoderModel if is_decoder_only_model else MagpieTTSModel
+    model_cls = EasyMagpieTTSModel if is_decoder_only_model else MagpieTTSModel
     if config.hparams_file is not None and config.checkpoint_file is not None:
         # Mode 1: Load from hparams + checkpoint
         model_cfg = OmegaConf.load(config.hparams_file)
