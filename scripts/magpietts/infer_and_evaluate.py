@@ -40,7 +40,7 @@ from nemo.collections.tts.models import MagpieTTSModel, MagpieTTSDecoderModel
 
 # EVALUATION_DATASETS is the full list of datasets for evaluation of a new model.
 EVALUATION_DATASETS = (
-    "riva_hard_digits,riva_hard_letters,riva_hard_money,riva_hard_short,vctk,libritts_seen,libritts_test_clean"
+    "riva_multibpe,riva_hard_digits,riva_hard_letters,riva_hard_money,riva_hard_short,vctk,libritts_seen,libritts_test_clean"
 )
 
 
@@ -493,7 +493,7 @@ def run_inference(
                 if is_decoder_only_model:
                     predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens, rtf_metrics = model.infer_batch(
                         batch_cuda,
-                        max_decoder_steps=440,
+                        max_decoder_steps=220,
                         temperature=temperature,
                         topk=topk,
                         use_local_transformer_for_inference=use_local_transformer,

@@ -67,6 +67,12 @@ dataset_meta_info = {
         'load_cached_codes_if_available': False,
         'tokenizer_names': ['english_phoneme'],
     },
+    'riva_multibpe' : {
+        'manifest_path' : '/home/shehzeenh/Code/DecoderNeMo/riva_hard_multi_bpe.ndjson',
+        'audio_dir': '/Data/RIVA-TTS',
+        'feature_dir': '/Data/RIVA-TTS',
+        'tokenizer_names': ['english_phoneme'],
+    },
     'libri_unseen_test_qwen': {
         'manifest_path' : '/home/pneekhara/2023/SimpleT5NeMo/manifests/test_clean_withContextAudioPaths.json',
         'audio_dir' : '/datap/misc/LibriTTSfromNemo/LibriTTS',
