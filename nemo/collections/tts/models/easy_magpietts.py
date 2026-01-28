@@ -135,7 +135,7 @@ class EasyMagpieTTSModel(ModelPT):
         )
 
         num_tokens_tokenizer = len(self.tokenizer.tokens)
-        num_tokens = num_tokens_tokenizer + 3  # +2 for BOS and EOS
+        num_tokens = num_tokens_tokenizer + 3  # +3 for BOS, EOS, CFG_UNK
         self.bos_id = num_tokens - 3
         self.eos_id = num_tokens - 2
         self.cfg_unk_token_id = num_tokens - 1
@@ -168,48 +168,14 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_embeddings = nn.ModuleList(phoneme_embeddings)
             self.phoneme_final_proj = nn.Linear(cfg.hidden_dim, self.phoneme_vocab_size * self.phoneme_stacking_factor)
 
-        if cfg.transformer_hf_backend == "custom_qwen3_moe_5layer":
-            from transformers.models import qwen3_moe
+        self.transformer_backend_config = AutoConfig.from_pretrained(
+            cfg.transformer_hf_backend,
+            trust_remote_code=True,
+        )
 
-            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(
-                hidden_size=1536, intermediate_size=3072, num_hidden_layers=5, num_experts=64
-            )
-            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
-        elif cfg.transformer_hf_backend == "custom_qwen3_moe_10layer":
-            from transformers.models import qwen3_moe
-
-            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(
-                hidden_size=1536, intermediate_size=3072, num_hidden_layers=10, num_experts=64
-            )
-            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
-        elif cfg.transformer_hf_backend == "custom_qwen3_moe_15layer":
-            from transformers.models import qwen3_moe
-
-            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(
-                hidden_size=1536, intermediate_size=3072, num_hidden_layers=15, num_experts=64
-            )
-            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
-        elif cfg.transformer_hf_backend == "custom_qwen3_moe_20layer":
-            from transformers.models import qwen3_moe
-
-            config = qwen3_moe.configuration_qwen3_moe.Qwen3MoeConfig(
-                hidden_size=1536, intermediate_size=3072, num_hidden_layers=20, num_experts=64
-            )
-            self.decoder = qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel(config)
-            # from transformers.models import qwen2_moe
-            # config_qwen2 = qwen2_moe.configuration_qwen2_moe.Qwen2MoeConfig(
-            #     hidden_size=1536, intermediate_size=3072, num_hidden_layers=5, num_experts=32
-            # )
-            # self.decoder = qwen2_moe.modeling_qwen2_moe.Qwen2MoeModel(config_qwen2)
-        else:
-            self.transformer_backend_config = AutoConfig.from_pretrained(
-                cfg.transformer_hf_backend,
-                trust_remote_code=True,
-            )
-
-            hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
-            self.decoder = hf_transformer.model
-            self.lm_text_head = hf_transformer.lm_head
+        hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
+        self.decoder = hf_transformer.model
+        self.lm_text_head = hf_transformer.lm_head
 
         self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
         self.decoder.set_input_embeddings(self.text_embedding)
@@ -467,32 +433,18 @@ class EasyMagpieTTSModel(ModelPT):
 
         return all_code_logits
 
-    def compute_loss(self, logits, audio_codes, audio_codes_lens, mask_tokens_mask=None):
+    def compute_loss(self, logits, audio_codes, audio_codes_lens):
         """
         Computes the audio codebook loss. Used by
         (1) The main Magpie-TTS transformer
-        (2) The local transformer, for both autoregressive and MaskGit methods
+        (2) The local transformer
 
         logits: (B, T', num_codebooks * num_tokens_per_codebook)
         audio_codes: (B, C, T')
         audio_codes_lens: (B,)
-        mask_tokens_mask: (B, C, T') True for tokens that were replaced with the MASK_TOKEN and should
-                                     therefore be the only ones included in the loss computation.
         """
         loss_mask = get_mask_from_lengths(audio_codes_lens)
-        if mask_tokens_mask is not None:
-            # For MaskGit we only compute loss for the masked tokens.
-            # *Both* conditions must be true:
-            # 1. the token is masked
-            # 2. the token is not padding
-            loss_mask = loss_mask.unsqueeze(1) * mask_tokens_mask
-            if not loss_mask.any():
-                # Without this we were very rarely getting NaNs in the loss
-                logging.warning("No tokens valid were found in compute_loss()!")
-                return torch.tensor(0.0, device=loss_mask.device), loss_mask
-        else:
-            # repeat loss mask for each codebook to simplify code below
-            loss_mask = loss_mask.unsqueeze(1).repeat(1, audio_codes.size(1), 1)
+        loss_mask = loss_mask.unsqueeze(1).repeat(1, audio_codes.size(1), 1)
         total_codebook_loss = None
         for codebook in range(audio_codes.size(1)):
             si = codebook * self.num_all_tokens_per_codebook
@@ -818,7 +770,6 @@ class EasyMagpieTTSModel(ModelPT):
         return joined, out_lengths
 
     def prepare_context_tensors(self, batch, dropout_text_input=False):
-        # Transcript
         text = batch['text']
         text_lens = batch['text_lens']
         text_embedded = self.decoder.get_input_embeddings()(text)
@@ -1131,8 +1082,8 @@ class EasyMagpieTTSModel(ModelPT):
         )
 
         logits = self.final_proj(pred_embeddings)  # (B, T', num_codebooks * num_tokens_per_codebook)
-        # import ipdb; ipdb.set_trace()
-        codebook_loss, loss_mask = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
+        
+        codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
         loss = codebook_loss
 
         local_transformer_loss = None
@@ -1143,7 +1094,7 @@ class EasyMagpieTTSModel(ModelPT):
                 pred_embeddings, audio_codes_target, targets_offset_by_one=False
             )
             local_transformer_loss, _ = self.compute_loss(
-                local_transformer_logits, audio_codes_target, audio_codes_lens_target, None
+                local_transformer_logits, audio_codes_target, audio_codes_lens_target
             )
             local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
             loss = loss + local_transformer_loss_scale * local_transformer_loss
