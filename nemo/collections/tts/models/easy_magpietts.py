@@ -849,7 +849,7 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio_codes, context_audio_codes_lens = self.audio_to_codes(
                 batch['context_audio'], batch['context_audio_lens']
             )
-        
+
         if self._codec_converter is not None:
             context_audio_codes = self._codec_converter.convert_original_to_new(
                 audio_tokens=context_audio_codes, audio_lens=context_audio_codes_lens
@@ -1051,7 +1051,7 @@ class EasyMagpieTTSModel(ModelPT):
         else:
             audio_codes = batch['audio_codes']
             audio_codes_lens = batch['audio_codes_lens']
-        
+
         if self._codec_converter is not None:
             audio_codes = self._codec_converter.convert_original_to_new(
                 audio_tokens=audio_codes, audio_lens=audio_codes_lens
