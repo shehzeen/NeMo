@@ -230,9 +230,11 @@ class EasyMagpieTTSModel(ModelPT):
 
         logging.info(f"Multi-mode training with {len(self.training_modes)} modes:")
         for mode in self.training_modes:
-            logging.info(f"  - {mode.name}: text_input_mode={mode.text_input_mode}, "
-                       f"streaming_phonemes_delay={mode.streaming_phonemes_delay}, "
-                       f"streaming_speech_delay={mode.streaming_speech_delay}")
+            logging.info(
+                f"  - {mode.name}: text_input_mode={mode.text_input_mode}, "
+                f"streaming_phonemes_delay={mode.streaming_phonemes_delay}, "
+                f"streaming_speech_delay={mode.streaming_speech_delay}"
+            )
 
         # Create a mapping from mode name to mode object for easy lookup during inference
         self.mode_name_to_mode = {mode.name: mode for mode in self.training_modes}
@@ -1015,9 +1017,7 @@ class EasyMagpieTTSModel(ModelPT):
         task_embedding_lens = None
         if self.task_embedding is not None and current_mode_idx is not None:
             batch_size = text.size(0)
-            mode_idx_tensor = torch.full(
-                (batch_size,), current_mode_idx, dtype=torch.long, device=text.device
-            )
+            mode_idx_tensor = torch.full((batch_size,), current_mode_idx, dtype=torch.long, device=text.device)
             task_embedding = self.task_embedding(mode_idx_tensor).unsqueeze(1)  # (B, 1, E)
             task_embedding_lens = torch.ones(batch_size, dtype=torch.long, device=text.device)  # (B,)
 
@@ -1432,7 +1432,9 @@ class EasyMagpieTTSModel(ModelPT):
             # Compute context length offset for phoneme alignment
             # This accounts for different delays in speech vs phoneme streams
             # Use the selected mode's streaming delays
-            context_lens_for_phonemes = context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
+            context_lens_for_phonemes = (
+                context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
+            )
 
             # Prepare phoneme channel input with proper alignment
             (
@@ -1874,7 +1876,9 @@ class EasyMagpieTTSModel(ModelPT):
             remaining_text_lens = context_tensors.remaining_text_lens
 
             if self.phoneme_tokenizer is not None:
-                context_lens_for_phonemes = context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
+                context_lens_for_phonemes = (
+                    context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
+                )
                 phoneme_channel_input, phoneme_channel_input_lens, gt_phoneme_tokens, gt_phoneme_token_lens = (
                     self.prepare_phoneme_channel_input(
                         batch['phoneme_tokens'], batch['phoneme_tokens_lens'], context_lens_for_phonemes
