@@ -225,7 +225,7 @@ class EasyMagpieTTSModel(ModelPT):
                     mode_idx=0,
                 )
             ]
-        
+
         else:
             self.training_modes = []
             for mode_idx, mode_cfg in enumerate(training_modes_cfg):
