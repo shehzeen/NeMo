@@ -1285,9 +1285,7 @@ class EasyMagpieTTSModel(ModelPT):
         audio_codes_input = audio_codes[:, :, :-1]  # (B, C, T') Input to the decoder
 
         # Embed audio tokens to get continuous representations
-        audio_codes_input_embedded = self.embed_audio_tokens(
-            audio_codes_input
-        )  # (B, T, E)
+        audio_codes_input_embedded = self.embed_audio_tokens(audio_codes_input)  # (B, T, E)
 
         # In streaming mode, add remaining text embeddings to audio embeddings
         # This provides text information at each audio timestep
@@ -1318,11 +1316,12 @@ class EasyMagpieTTSModel(ModelPT):
             context_lens_for_phonemes = context_lens - self.streaming_speech_delay + self.streaming_phonemes_delay
 
             # Prepare phoneme channel input with proper alignment
-            phoneme_channel_input, phoneme_channel_input_lens, phoneme_tokens_processed, phoneme_tokens_lens_processed = (
-                self.prepare_phoneme_channel_input(
-                    phoneme_tokens, phoneme_tokens_lens, context_lens_for_phonemes
-                )
-            )
+            (
+                phoneme_channel_input,
+                phoneme_channel_input_lens,
+                phoneme_tokens_processed,
+                phoneme_tokens_lens_processed,
+            ) = self.prepare_phoneme_channel_input(phoneme_tokens, phoneme_tokens_lens, context_lens_for_phonemes)
 
             # Align phoneme channel input to match the combined context+audio sequence length
             if phoneme_channel_input.shape[1] < context_plus_audio_embedded.shape[1]:
