@@ -215,18 +215,28 @@ class EasyMagpieTTSModel(ModelPT):
         # Each mode has its own task embedding that is prepended to the context
         training_modes_cfg = cfg.get('training_modes', None)
         if training_modes_cfg is None:
-            raise ValueError("training_modes must be specified in the config")
-
-        self.training_modes = []
-        for mode_idx, mode_cfg in enumerate(training_modes_cfg):
-            mode = TrainingMode(
-                name=mode_cfg.name,
-                text_input_mode=mode_cfg.text_input_mode,
-                streaming_phonemes_delay=mode_cfg.get('streaming_phonemes_delay', 0),
-                streaming_speech_delay=mode_cfg.get('streaming_speech_delay', 0),
-                mode_idx=mode_idx,
-            )
-            self.training_modes.append(mode)
+            # Create a default training mode for backward compatibility
+            self.training_modes = [
+                TrainingMode(
+                    name="streaming_4_8",
+                    text_input_mode="streaming",
+                    streaming_phonemes_delay=4,
+                    streaming_speech_delay=8,
+                    mode_idx=0,
+                )
+            ]
+        
+        else:
+            self.training_modes = []
+            for mode_idx, mode_cfg in enumerate(training_modes_cfg):
+                mode = TrainingMode(
+                    name=mode_cfg.name,
+                    text_input_mode=mode_cfg.text_input_mode,
+                    streaming_phonemes_delay=mode_cfg.get('streaming_phonemes_delay', 0),
+                    streaming_speech_delay=mode_cfg.get('streaming_speech_delay', 0),
+                    mode_idx=mode_idx,
+                )
+                self.training_modes.append(mode)
 
         logging.info(f"Multi-mode training with {len(self.training_modes)} modes:")
         for mode in self.training_modes:
