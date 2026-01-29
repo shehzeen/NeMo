@@ -36,11 +36,27 @@ model:
   cfg_unconditional_prob: 0.1
   # To get special_tokens of the tokenzer, you can do:
   # model.tokenizer.first_tokenizer.additional_special_tokens
-  text_input_mode: "streaming"
+  
+  # Multi-mode training configuration
+  # The model will randomly select one of the modes for each batch during training.
+  # Each mode has its own task embedding that is prepended to the context.
+  # During inference, you can specify which mode to use via the 'inference_mode' parameter.
+  training_modes:
+    - name: "full"
+      text_input_mode: "full"
+      streaming_phonemes_delay: 0  # Not used in full mode
+      streaming_speech_delay: 0    # Not used in full mode
+    - name: "streaming_4_8"
+      text_input_mode: "streaming"
+      streaming_phonemes_delay: 4
+      streaming_speech_delay: 8
+    - name: "streaming_2_4"
+      text_input_mode: "streaming"
+      streaming_phonemes_delay: 2
+      streaming_speech_delay: 4
+  
   frame_stacking_factor: 1
   phoneme_stacking_factor: 2
-  streaming_phonemes_delay: 4
-  streaming_speech_delay: 8
   dropout_text_input_prob: 0.3
 
   phoneme_tokenizer:

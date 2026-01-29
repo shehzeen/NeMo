@@ -49,6 +49,26 @@ from nemo.utils import logging
 
 
 @dataclass
+class TrainingMode:
+    """
+    Configuration for a training mode in multi-mode training.
+
+    Attributes:
+        name: Unique identifier for this mode (e.g., "full", "streaming_4_8")
+        text_input_mode: Either "full" or "streaming"
+        streaming_phonemes_delay: Delay for phoneme stream (only used in streaming mode)
+        streaming_speech_delay: Delay for speech stream (only used in streaming mode)
+        mode_idx: Index of this mode in the list of modes (used for task embedding lookup)
+    """
+
+    name: str
+    text_input_mode: str
+    streaming_phonemes_delay: int
+    streaming_speech_delay: int
+    mode_idx: int
+
+
+@dataclass
 class ContextTensors:
     """
     Output dataclass from prepare_context_tensors containing all context-related tensors.
@@ -96,6 +116,7 @@ class ProcessBatchOutput:
         audio_codes_lens_target: Length of target audio codes for each batch item, shape (B,)
         context_audio_codes: Audio codes extracted from context audio, shape (B, C, T')
         context_audio_codes_lens: Length of context audio codes for each batch item, shape (B,)
+        selected_training_mode: Name of the selected training mode (None if multi_mode_training is disabled)
     """
 
     loss: torch.Tensor
@@ -108,6 +129,7 @@ class ProcessBatchOutput:
     audio_codes_lens_target: torch.Tensor
     context_audio_codes: torch.Tensor
     context_audio_codes_lens: torch.Tensor
+    selected_training_mode: Optional[str] = None
 
 
 def worker_init_fn(worker_id):
@@ -187,9 +209,36 @@ class EasyMagpieTTSModel(ModelPT):
             self.text_conditioning_tokenizer_name = list(cfg.text_tokenizers.keys())[0]
 
         self.cfg_unconditional_prob = cfg.get('cfg_unconditional_prob', 0.0)
-        self.text_input_mode = cfg.get('text_input_mode', 'full')
-        self.streaming_speech_delay = cfg.get('streaming_speech_delay', 3)
-        self.streaming_phonemes_delay = cfg.get('streaming_phonemes_delay', 2)
+
+        # Multi-mode training configuration
+        # The model trains with multiple text input modes (full, streaming with various delays)
+        # Each mode has its own task embedding that is prepended to the context
+        training_modes_cfg = cfg.get('training_modes', None)
+        if training_modes_cfg is None:
+            raise ValueError("training_modes must be specified in the config")
+
+        self.training_modes = []
+        for mode_idx, mode_cfg in enumerate(training_modes_cfg):
+            mode = TrainingMode(
+                name=mode_cfg.name,
+                text_input_mode=mode_cfg.text_input_mode,
+                streaming_phonemes_delay=mode_cfg.get('streaming_phonemes_delay', 0),
+                streaming_speech_delay=mode_cfg.get('streaming_speech_delay', 0),
+                mode_idx=mode_idx,
+            )
+            self.training_modes.append(mode)
+
+        logging.info(f"Multi-mode training with {len(self.training_modes)} modes:")
+        for mode in self.training_modes:
+            logging.info(f"  - {mode.name}: text_input_mode={mode.text_input_mode}, "
+                       f"streaming_phonemes_delay={mode.streaming_phonemes_delay}, "
+                       f"streaming_speech_delay={mode.streaming_speech_delay}")
+
+        # Create a mapping from mode name to mode object for easy lookup during inference
+        self.mode_name_to_mode = {mode.name: mode for mode in self.training_modes}
+        # Default mode for inference if not specified (first mode in the list)
+        self.default_inference_mode = self.training_modes[0].name
+
         self.frame_stacking_factor = cfg.get('frame_stacking_factor', 1)
 
         self.tokenizer = setup_tokenizers(
@@ -242,6 +291,17 @@ class EasyMagpieTTSModel(ModelPT):
 
         self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
         self.decoder.set_input_embeddings(self.text_embedding)
+
+        # Task embedding for multi-mode training
+        # Each mode has a unique task embedding that is prepended to the context
+        # Only create task embedding if there are multiple modes
+        num_modes = len(self.training_modes)
+        if num_modes > 1:
+            self.task_embedding = nn.Embedding(num_modes, cfg.embedding_dim)
+            logging.info(f"Created task embedding with {num_modes} modes, embedding_dim={cfg.embedding_dim}")
+        else:
+            self.task_embedding = None
+            logging.info(f"Single training mode '{self.training_modes[0].name}', skipping task embedding")
 
         if self.use_bpe_char_tokenizer:
             # BPE char tokenizer
@@ -843,6 +903,7 @@ class EasyMagpieTTSModel(ModelPT):
         context_audio: Optional[torch.Tensor] = None,
         context_audio_lens: Optional[torch.Tensor] = None,
         dropout_text_input: bool = False,
+        training_mode: Optional[TrainingMode] = None,
     ) -> ContextTensors:
         """
         Prepare context tensors for the EasyMagpieTTS model.
@@ -865,6 +926,8 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio_lens: Length of context audio (B,).
                 Required if context_audio is provided.
             dropout_text_input: If True, zero out the text embedding for classifier-free guidance.
+            training_mode: Optional TrainingMode object specifying the mode to use.
+                If None, uses the first mode from training_modes as default.
 
         Returns:
             ContextTensors: A dataclass containing all prepared context tensors including:
@@ -884,17 +947,27 @@ class EasyMagpieTTSModel(ModelPT):
             ValueError: If neither context_audio_codes nor context_audio is provided.
             ValueError: If text_input_mode is not 'full' or 'streaming'.
         """
+        # Determine the mode parameters to use
+        # If no mode is specified, use the first (default) mode
+        if training_mode is None:
+            training_mode = self.training_modes[0]
+
+        current_text_input_mode = training_mode.text_input_mode
+        current_streaming_speech_delay = training_mode.streaming_speech_delay
+        current_streaming_phonemes_delay = training_mode.streaming_phonemes_delay
+        current_mode_idx = training_mode.mode_idx
+
         text_embedded = self.decoder.get_input_embeddings()(text)
         if self.use_bpe_char_tokenizer:
             text_mask = get_mask_from_lengths(text_lens)
             cas_embedding = self.cas_encoder(text, subword_mask=text_mask)  # (B, L, E)
             text_embedded = text_embedded + cas_embedding
 
-        if text_embedded.shape[1] < self.streaming_speech_delay + 1:
+        if text_embedded.shape[1] < current_streaming_speech_delay + 1:
             # If text is too short, pad it with zeros
             padding_tensor = torch.zeros(
                 text_embedded.shape[0],
-                self.streaming_speech_delay + 1 - text_embedded.shape[1],
+                current_streaming_speech_delay + 1 - text_embedded.shape[1],
                 text_embedded.shape[2],
                 device=text_embedded.device,
             )
@@ -936,27 +1009,51 @@ class EasyMagpieTTSModel(ModelPT):
         context_text_lens = context_text_tokens_lens
         context_text_embedded = self.decoder.get_input_embeddings()(context_text_tokens)  # (B, L, E)
 
+        # Prepare task embedding for multi-mode training
+        # Only use task embedding if there are multiple modes (task_embedding is not None)
+        task_embedding = None
+        task_embedding_lens = None
+        if self.task_embedding is not None and current_mode_idx is not None:
+            batch_size = text.size(0)
+            mode_idx_tensor = torch.full(
+                (batch_size,), current_mode_idx, dtype=torch.long, device=text.device
+            )
+            task_embedding = self.task_embedding(mode_idx_tensor).unsqueeze(1)  # (B, 1, E)
+            task_embedding_lens = torch.ones(batch_size, dtype=torch.long, device=text.device)  # (B,)
+
         remaining_text_embedded = None
         remaining_text_lens = None
-        if self.text_input_mode == 'full':
-            context_embedding, context_lens = self.join_embeddings_temporally(
-                embeddings=[context_audio_embedded, context_text_embedded, text_embedded],
-                lengths=[context_audio_codes_lens, context_text_lens, text_lens],
-            )
-        elif self.text_input_mode == 'streaming':
-            prompt_text_embedded = text_embedded[:, : self.streaming_speech_delay, :]
-            prompt_text_lens = torch.ones_like(text_lens) * self.streaming_speech_delay
-            context_embedding, context_lens = self.join_embeddings_temporally(
-                embeddings=[context_audio_embedded, context_text_embedded, prompt_text_embedded],
-                lengths=[context_audio_codes_lens, context_text_lens, prompt_text_lens],
-            )
-            remaining_text_embedded = text_embedded[:, self.streaming_speech_delay :, :]
-            remaining_text_lens = text_lens - self.streaming_speech_delay
+        if current_text_input_mode == 'full':
+            if task_embedding is not None:
+                context_embedding, context_lens = self.join_embeddings_temporally(
+                    embeddings=[task_embedding, context_audio_embedded, context_text_embedded, text_embedded],
+                    lengths=[task_embedding_lens, context_audio_codes_lens, context_text_lens, text_lens],
+                )
+            else:
+                context_embedding, context_lens = self.join_embeddings_temporally(
+                    embeddings=[context_audio_embedded, context_text_embedded, text_embedded],
+                    lengths=[context_audio_codes_lens, context_text_lens, text_lens],
+                )
+        elif current_text_input_mode == 'streaming':
+            prompt_text_embedded = text_embedded[:, :current_streaming_speech_delay, :]
+            prompt_text_lens = torch.ones_like(text_lens) * current_streaming_speech_delay
+            if task_embedding is not None:
+                context_embedding, context_lens = self.join_embeddings_temporally(
+                    embeddings=[task_embedding, context_audio_embedded, context_text_embedded, prompt_text_embedded],
+                    lengths=[task_embedding_lens, context_audio_codes_lens, context_text_lens, prompt_text_lens],
+                )
+            else:
+                context_embedding, context_lens = self.join_embeddings_temporally(
+                    embeddings=[context_audio_embedded, context_text_embedded, prompt_text_embedded],
+                    lengths=[context_audio_codes_lens, context_text_lens, prompt_text_lens],
+                )
+            remaining_text_embedded = text_embedded[:, current_streaming_speech_delay:, :]
+            remaining_text_lens = text_lens - current_streaming_speech_delay
             remaining_text_lens = remaining_text_lens.clamp(min=0)
             remaining_text_mask = get_mask_from_lengths(remaining_text_lens)
             remaining_text_embedded = remaining_text_embedded * remaining_text_mask.unsqueeze(2)  # (B, T, E)
         else:
-            raise ValueError(f"Invalid text input mode: {self.text_input_mode}")
+            raise ValueError(f"Invalid text input mode: {current_text_input_mode}")
 
         return ContextTensors(
             context_embedding=context_embedding,
@@ -1157,6 +1254,7 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_tokens: Optional[torch.Tensor] = None,
         phoneme_tokens_lens: Optional[torch.Tensor] = None,
         mode: str = "train",
+        training_mode: Optional[TrainingMode] = None,
     ) -> ProcessBatchOutput:
         """
         Process a batch of inputs to compute model outputs and losses.
@@ -1186,6 +1284,8 @@ class EasyMagpieTTSModel(ModelPT):
             phoneme_tokens: Phoneme token IDs (required if phoneme_tokenizer is enabled), shape (B, L_phoneme)
             phoneme_tokens_lens: Length of phoneme tokens for each batch item, shape (B,)
             mode: Training mode, either "train" or "val". Affects dropout behavior.
+            training_mode: Optional TrainingMode object specifying which mode to use.
+                If None and multi_mode_training is enabled, a random mode is selected during training.
 
         Returns:
             ProcessBatchOutput: Dataclass containing:
@@ -1200,6 +1300,23 @@ class EasyMagpieTTSModel(ModelPT):
                 - context_audio_codes: Audio codes from context
                 - context_audio_codes_lens: Length of context audio codes
         """
+        # Select training mode for multi-mode training
+        # During training, randomly select a mode if not specified
+        # During validation, use the first mode (default) if not specified
+        selected_training_mode = training_mode
+        if selected_training_mode is None:
+            if mode == 'train':
+                # Randomly select a mode during training
+                selected_training_mode = random.choice(self.training_modes)
+            else:
+                # Use the first mode during validation
+                selected_training_mode = self.training_modes[0]
+
+        # Get the current mode's parameters
+        current_text_input_mode = selected_training_mode.text_input_mode
+        current_streaming_speech_delay = selected_training_mode.streaming_speech_delay
+        current_streaming_phonemes_delay = selected_training_mode.streaming_phonemes_delay
+
         # Determine whether to apply text/phoneme dropout for regularization during training
         # Text dropout: randomly drop text input to encourage the model to rely on other signals
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
@@ -1222,6 +1339,7 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio=context_audio,
             context_audio_lens=context_audio_lens,
             dropout_text_input=dropout_text_input,
+            training_mode=selected_training_mode,
         )
 
         # Extract context tensors for use in the forward pass
@@ -1245,7 +1363,7 @@ class EasyMagpieTTSModel(ModelPT):
                 # inference easier especially with KV caching and using a duplicated batch.
                 context_embedding = cfg_token_embedding.expand(-1, context_embedding.size(1), -1)  # (B, T_total, E)
                 # Make unconditional remaining text embedding all zeros. Simplifies the inference implementation.
-                if self.text_input_mode == 'streaming':
+                if current_text_input_mode == 'streaming':
                     remaining_text_embedded = torch.zeros_like(remaining_text_embedded)
 
         # Convert raw audio to discrete codes if codes are not already provided
@@ -1313,7 +1431,8 @@ class EasyMagpieTTSModel(ModelPT):
         if self.phoneme_tokenizer is not None:
             # Compute context length offset for phoneme alignment
             # This accounts for different delays in speech vs phoneme streams
-            context_lens_for_phonemes = context_lens - self.streaming_speech_delay + self.streaming_phonemes_delay
+            # Use the selected mode's streaming delays
+            context_lens_for_phonemes = context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
 
             # Prepare phoneme channel input with proper alignment
             (
@@ -1417,6 +1536,7 @@ class EasyMagpieTTSModel(ModelPT):
             audio_codes_lens_target=audio_codes_lens_target,
             context_audio_codes=context_tensors.context_audio_codes,
             context_audio_codes_lens=context_tensors.context_audio_codes_lens,
+            selected_training_mode=selected_training_mode.name if selected_training_mode is not None else None,
         )
 
     def training_step(self, batch, batch_idx):
@@ -1450,6 +1570,13 @@ class EasyMagpieTTSModel(ModelPT):
         local_transformer_loss = batch_output.local_transformer_loss
         if local_transformer_loss is not None:
             self.log('train/local_transformer_loss', local_transformer_loss, prog_bar=True, sync_dist=True)
+
+        # Log training mode info for multi-mode training
+        if batch_output.selected_training_mode is not None:
+            # Log which mode was selected for this batch
+            # Convert mode name to an index for logging
+            mode_idx = self.mode_name_to_mode[batch_output.selected_training_mode].mode_idx
+            self.log('train/training_mode_idx', float(mode_idx), on_step=True)
 
         # Log batch info
         batch_size, text_token_max_len = batch["text"].shape
@@ -1692,10 +1819,43 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_input_type='gt',
         phoneme_sampling_method='argmax',
         dropout_text_input=False,
+        inference_mode: Optional[str] = None,
     ):
-        # TODO: Make this API same as MagpieTTS model.
+        """
+        Run inference on a batch of inputs.
+
+        Args:
+            batch: Input batch containing text, context, etc.
+            max_decoder_steps: Maximum number of decoding steps.
+            temperature: Sampling temperature.
+            topk: Top-k sampling parameter.
+            use_local_transformer_for_inference: Whether to use local transformer.
+            maskgit_n_steps: Number of MaskGit steps.
+            use_cfg: Whether to use classifier-free guidance.
+            cfg_scale: CFG scale factor.
+            phoneme_input_type: 'gt' for ground truth or 'pred' for predicted phonemes.
+            phoneme_sampling_method: 'argmax' or 'sample'.
+            dropout_text_input: Whether to dropout text input.
+            inference_mode: Name of the inference mode to use (e.g., "full", "streaming_4_8").
+                If None, uses the default inference mode (first mode in training_modes).
+        """
         with torch.inference_mode():
             start_time = time.time()
+
+            # Resolve inference mode
+            mode_name = inference_mode if inference_mode is not None else self.default_inference_mode
+            if mode_name in self.mode_name_to_mode:
+                selected_training_mode = self.mode_name_to_mode[mode_name]
+                logging.info(f"Using inference mode: {selected_training_mode.name}")
+            else:
+                available_modes = list(self.mode_name_to_mode.keys())
+                raise ValueError(f"Unknown inference mode '{mode_name}'. Available modes: {available_modes}")
+
+            # Get current mode parameters
+            current_text_input_mode = selected_training_mode.text_input_mode
+            current_streaming_speech_delay = selected_training_mode.streaming_speech_delay
+            current_streaming_phonemes_delay = selected_training_mode.streaming_phonemes_delay
+
             context_tensors = self.prepare_context_tensors(
                 text=batch['text'],
                 text_lens=batch['text_lens'],
@@ -1706,6 +1866,7 @@ class EasyMagpieTTSModel(ModelPT):
                 context_audio=batch.get('context_audio'),
                 context_audio_lens=batch.get('context_audio_lens'),
                 dropout_text_input=dropout_text_input,
+                training_mode=selected_training_mode,
             )
             context_embedding = context_tensors.context_embedding  # (B, T_total, E)
             context_lens = context_tensors.context_lens  # (B,)
@@ -1713,7 +1874,7 @@ class EasyMagpieTTSModel(ModelPT):
             remaining_text_lens = context_tensors.remaining_text_lens
 
             if self.phoneme_tokenizer is not None:
-                context_lens_for_phonemes = context_lens - self.streaming_speech_delay + self.streaming_phonemes_delay
+                context_lens_for_phonemes = context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
                 phoneme_channel_input, phoneme_channel_input_lens, gt_phoneme_tokens, gt_phoneme_token_lens = (
                     self.prepare_phoneme_channel_input(
                         batch['phoneme_tokens'], batch['phoneme_tokens_lens'], context_lens_for_phonemes
@@ -1736,7 +1897,7 @@ class EasyMagpieTTSModel(ModelPT):
             audio_codes_input = audio_codes_bos
 
             audio_codes_input_embedded = self.embed_audio_tokens(audio_codes_input)  # (B, T, E)
-            if self.text_input_mode == 'streaming':
+            if current_text_input_mode == 'streaming':
                 remaining_text_pad_length = max_decoder_steps - remaining_text_lens.max().item() + 1
                 remaining_text_pad_tensor = torch.zeros(
                     remaining_text_embedded.size(0),
@@ -1756,7 +1917,7 @@ class EasyMagpieTTSModel(ModelPT):
             min_context_len = context_plus_audio_lens.min().item()
             if self.phoneme_tokenizer is not None:
                 min_context_len = (
-                    min_context_len - self.streaming_speech_delay + self.streaming_phonemes_delay - 1
+                    min_context_len - current_streaming_speech_delay + current_streaming_phonemes_delay - 1
                 )  # 1 for audio BOS that we had added.
 
             actual_batch_size = context_embedding.size(0)
@@ -1947,7 +2108,7 @@ class EasyMagpieTTSModel(ModelPT):
                 new_emb = self.embed_audio_tokens(audio_codes_next.unsqueeze(2))  # (B, 1, E)
                 new_emb_unconditional = new_emb * 1
 
-                if self.text_input_mode == 'streaming':
+                if current_text_input_mode == 'streaming':
                     _bs = context_embedding.size(0)
                     remaining_text_embedded_current = remaining_text_embedded[
                         torch.arange(_bs), current_text_positions.clamp(min=0), :
