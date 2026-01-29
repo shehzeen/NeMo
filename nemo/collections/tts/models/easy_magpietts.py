@@ -1000,6 +1000,28 @@ class EasyMagpieTTSModel(ModelPT):
         return sliced
 
     def stack_codes(self, codes, codes_lens, bos_id, eos_id, stacking_factor, num_codebooks):
+        """
+        Stack multiple time steps into the channel dimension to reduce sequence length.
+
+        This function reshapes audio/phoneme codes by grouping consecutive time steps together
+        and placing them in the channel dimension. This allows the model to process multiple
+        frames in parallel while reducing the sequence length.
+
+        Args:
+            codes: Input codes tensor of shape (B, C, T) where B is batch size,
+                   C is number of codebooks, and T is sequence length.
+            codes_lens: Length of valid codes for each batch item, shape (B,).
+            bos_id: Beginning-of-sequence token ID used to detect and handle BOS tokens.
+            eos_id: End-of-sequence token ID used for padding.
+            stacking_factor: Number of time steps to stack together. If 1, no stacking is performed.
+            num_codebooks: Number of codebooks in the input.
+
+        Returns:
+            Tuple of:
+                - stacked_codes: Reshaped codes of shape (B, C * stacking_factor, T // stacking_factor).
+                  If input contains BOS tokens, they are preserved at the beginning.
+                - new_lens: Updated sequence lengths after stacking, shape (B,).
+        """
         if stacking_factor == 1:
             return codes, codes_lens
 
@@ -1032,6 +1054,26 @@ class EasyMagpieTTSModel(ModelPT):
         return codes, new_lens
 
     def unstack_codes(self, stacked_codes, stacked_lens, stacking_factor):
+        """
+        Reverse the stacking operation to recover the original time dimension.
+
+        This is the inverse of `stack_codes`. It takes codes that have been stacked
+        in the channel dimension and expands them back into the time dimension.
+
+        Args:
+            stacked_codes: Stacked codes tensor of shape (B, C * stacking_factor, T_stacked)
+                          where T_stacked = T_original // stacking_factor.
+            stacked_lens: Length of valid stacked sequences for each batch item, shape (B,).
+            stacking_factor: The stacking factor used in the original `stack_codes` call.
+                            If 1, no unstacking is performed.
+
+        Returns:
+            Tuple of:
+                - unstacked_codes: Codes with restored time dimension, shape (B, C, T_stacked * stacking_factor).
+                - orig_lens: Recovered sequence lengths, shape (B,). Note that these are the
+                  maximum possible lengths; actual valid lengths may be shorter due to
+                  padding applied during stacking.
+        """
         if stacking_factor == 1:
             return stacked_codes, stacked_lens
 
@@ -1051,7 +1093,29 @@ class EasyMagpieTTSModel(ModelPT):
         return x, orig_lens
 
     def prepare_phoneme_channel_input(self, phoneme_tokens, phoneme_tokens_lens, context_lens):
-        # import ipdb; ipdb.set_trace()
+        """
+        Prepare phoneme tokens as an auxiliary input channel for the decoder.
+
+        This function processes phoneme tokens by stacking them (if configured), embedding them,
+        and prepending a zero-padded context region. The resulting tensor can be used as an
+        additional input channel to provide phoneme conditioning to the audio decoder.
+
+        Args:
+            phoneme_tokens: Phoneme token IDs, shape (B, L) where B is batch size and
+                           L is the phoneme sequence length.
+            phoneme_tokens_lens: Length of valid phoneme tokens for each batch item, shape (B,).
+            context_lens: Length of the context region for each batch item, shape (B,).
+                         Used to prepend zero-padding to align with audio context.
+
+        Returns:
+            Tuple of:
+                - phoneme_channel_input: Embedded phoneme tokens with zero-padded context,
+                  shape (B, T_context + T_phoneme, E) where E is the embedding dimension.
+                - phoneme_channel_input_lens: Total length of phoneme channel input for each
+                  batch item (context_lens + phoneme_tokens_lens after stacking), shape (B,).
+                - phoneme_tokens: Stacked phoneme tokens, shape (B, phoneme_stacking_factor, T_stacked).
+                - phoneme_tokens_lens: Length of stacked phoneme tokens, shape (B,).
+        """
         phoneme_tokens = phoneme_tokens.unsqueeze(1)  # (B, 1, L)
         phoneme_tokens, phoneme_tokens_lens = self.stack_codes(
             phoneme_tokens,
@@ -1119,7 +1183,7 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio_lens: Length of context audio for each batch item, shape (B,)
             context_audio_codes: Pre-computed context audio codes (optional), shape (B, C, T_ctx)
             context_audio_codes_lens: Length of context audio codes for each batch item, shape (B,)
-            phoneme_tokens: Phoneme token IDs (required if phoneme_tokenizer is enabled), shape (B, P, L_phoneme)
+            phoneme_tokens: Phoneme token IDs (required if phoneme_tokenizer is enabled), shape (B, L_phoneme)
             phoneme_tokens_lens: Length of phoneme tokens for each batch item, shape (B,)
             mode: Training mode, either "train" or "val". Affects dropout behavior.
 
