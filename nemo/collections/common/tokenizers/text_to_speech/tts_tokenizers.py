@@ -1097,6 +1097,138 @@ class JapanesePhonemeTokenizer(BaseTokenizer):
         return [self._token2id[p] for p in ps]
 
 
+class IPABPETokenizer(BaseTokenizer):
+    """IPA BPE tokenizer using HuggingFace tokenizers library.
+
+    This tokenizer loads a pre-trained byte-level BPE tokenizer trained on IPA strings.
+    The tokenizer should be trained using the train_ipa_bpe_tokenizer.py script.
+
+    Note: Byte-level BPE tokenizers can represent any UTF-8 text by falling back to
+    individual bytes, so OOV tokens are not needed and not supported.
+
+    Args:
+        tokenizer_path: Path to the tokenizer.json file (or directory containing vocab.json and merges.txt).
+        pad: Pad token as string.
+        blank: Blank token as string.
+        add_blank_at: Add blank to labels in the specified order ("last") or after tokens (any non None),
+            if None then no blank in labels.
+    """
+
+    def __init__(
+        self,
+        tokenizer_path: str,
+        pad: str = BaseTokenizer.PAD,
+        blank: str = BaseTokenizer.BLANK,
+        add_blank_at: Optional[str] = None,
+    ):
+        import os
+
+        from tokenizers import Tokenizer
+
+        # Load the HuggingFace tokenizer
+        if os.path.isdir(tokenizer_path):
+            # If path is a directory, look for tokenizer.json
+            tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+            if not os.path.exists(tokenizer_file):
+                raise ValueError(
+                    f"tokenizer.json not found in {tokenizer_path}. "
+                    f"Please provide either a directory containing tokenizer.json or a direct path to tokenizer.json"
+                )
+        else:
+            tokenizer_file = tokenizer_path
+
+        if not os.path.exists(tokenizer_file):
+            raise ValueError(f"Tokenizer file not found: {tokenizer_file}")
+
+        self._hf_tokenizer = Tokenizer.from_file(tokenizer_file)
+        self._vocab_size = self._hf_tokenizer.get_vocab_size()
+
+        # Get the vocabulary from HuggingFace tokenizer
+        vocab = self._hf_tokenizer.get_vocab()
+        # Sort by token ID to get ordered list
+        tokens = sorted(vocab.keys(), key=lambda x: vocab[x])
+
+        # Initialize base class - pass a dummy oov that will be overridden
+        # Byte-level BPE never has OOV since it can represent any byte sequence
+        super().__init__(tokens, pad=pad, blank=blank, oov=BaseTokenizer.OOV, add_blank_at=add_blank_at)
+
+        # Disable OOV handling - byte-level BPE can encode any UTF-8 text
+        self.oov = None
+        self._util_ids = {self.pad, self.blank}  # Rebuild without oov
+
+        # Store special token IDs from HuggingFace tokenizer if they exist
+        hf_vocab = self._hf_tokenizer.get_vocab()
+        self._hf_pad_id = hf_vocab.get("<pad>")
+        self._hf_blank_id = hf_vocab.get("<blank>")
+
+    def encode(self, text: str) -> List[int]:
+        """Encode IPA text to token IDs using the BPE tokenizer.
+
+        Args:
+            text: IPA string to encode.
+
+        Returns:
+            List of token IDs.
+        """
+        if not text or not text.strip():
+            return []
+
+        # Use HuggingFace tokenizer to encode
+        encoding = self._hf_tokenizer.encode(text)
+        return encoding.ids
+
+    def decode(self, tokens: List[int]) -> str:
+        """Decode token IDs back to IPA text.
+
+        Args:
+            tokens: List of token IDs.
+
+        Returns:
+            Decoded IPA string.
+        """
+        if not tokens:
+            return ""
+
+        # Filter out utility tokens (pad, blank, oov) that were added by BaseTokenizer
+        filtered_tokens = [t for t in tokens if t not in self._util_ids]
+
+        # Use HuggingFace tokenizer to decode
+        return self._hf_tokenizer.decode(filtered_tokens)
+
+    @property
+    def vocab_size(self) -> int:
+        """Return the vocabulary size including special tokens."""
+        return len(self.tokens)
+
+    def text_to_tokens(self, text: str) -> List[str]:
+        """Convert text to list of token strings.
+
+        Args:
+            text: IPA string to tokenize.
+
+        Returns:
+            List of token strings.
+        """
+        if not text or not text.strip():
+            return []
+        encoding = self._hf_tokenizer.encode(text)
+        return encoding.tokens
+
+    def tokens_to_text(self, tokens_list: List[str]) -> str:
+        """Convert list of token strings back to text.
+
+        Args:
+            tokens_list: List of token strings.
+
+        Returns:
+            Decoded text string.
+        """
+        # Convert token strings to IDs and decode
+        # Filter out any tokens not in vocabulary (shouldn't happen with byte-level BPE)
+        ids = [self._token2id[t] for t in tokens_list if t in self._token2id]
+        return self.decode(ids)
+
+
 # TODO @xueyang: subclassing from `nemo/collections/common/tokenizers/tokenizer_spec.py::TokenizerSpec`, and/or
 #  adjust to reuse `nemo/collections/common/tokenizers/aggregate_tokenizer.py::AggregateTokenizer`
 class AggregatedTTSTokenizer:
