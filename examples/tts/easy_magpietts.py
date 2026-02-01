@@ -20,7 +20,6 @@ from nemo.collections.tts.models import EasyMagpieTTSModel
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
-import torch
 
 @hydra_runner(config_path="conf/magpietts", config_name="easy_magpietts")
 def main(cfg):
@@ -44,18 +43,6 @@ def main(cfg):
 
     model = EasyMagpieTTSModel(cfg=cfg.model, trainer=trainer)
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
-    # precision_to_dtype = {
-    #     'bf16': torch.bfloat16,
-    #     'bf16-mixed': torch.bfloat16,
-    #     '16': torch.float16,
-    #     '16-mixed': torch.float16,
-    #     'bf16-true': torch.bfloat16,
-    #     'fp16-true': torch.float16,
-    #     32: torch.float32,
-    #     '32': torch.float32,
-    #     '32-true': torch.float32,
-    # }
-    # model = model.to(precision_to_dtype.get(trainer.precision))
 
     if cfg.get('mode', 'train') == 'train':
         trainer.fit(model)
