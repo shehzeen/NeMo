@@ -1097,136 +1097,37 @@ class JapanesePhonemeTokenizer(BaseTokenizer):
         return [self._token2id[p] for p in ps]
 
 
-class IPABPETokenizer(BaseTokenizer):
-    """IPA BPE tokenizer using HuggingFace tokenizers library.
-
-    This tokenizer loads a pre-trained byte-level BPE tokenizer trained on IPA strings.
-    The tokenizer should be trained using the train_ipa_bpe_tokenizer.py script.
-
-    Note: Byte-level BPE tokenizers can represent any UTF-8 text by falling back to
-    individual bytes, so OOV tokens are not needed and not supported.
+class IPABPETokenizer:
+    """Simple IPA BPE tokenizer wrapper around HuggingFace tokenizers.
 
     Args:
-        tokenizer_path: Path to the tokenizer.json file (or directory containing vocab.json and merges.txt).
-        pad: Pad token as string.
-        blank: Blank token as string.
-        add_blank_at: Add blank to labels in the specified order ("last") or after tokens (any non None),
-            if None then no blank in labels.
+        tokenizer_path: Path to the tokenizer.json file (or directory containing it).
     """
 
-    def __init__(
-        self,
-        tokenizer_path: str,
-        pad: str = BaseTokenizer.PAD,
-        blank: str = BaseTokenizer.BLANK,
-        add_blank_at: Optional[str] = None,
-    ):
+    def __init__(self, tokenizer_path: str):
         import os
 
         from tokenizers import Tokenizer
 
-        # Load the HuggingFace tokenizer
         if os.path.isdir(tokenizer_path):
-            # If path is a directory, look for tokenizer.json
             tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
-            if not os.path.exists(tokenizer_file):
-                raise ValueError(
-                    f"tokenizer.json not found in {tokenizer_path}. "
-                    f"Please provide either a directory containing tokenizer.json or a direct path to tokenizer.json"
-                )
         else:
             tokenizer_file = tokenizer_path
 
         if not os.path.exists(tokenizer_file):
             raise ValueError(f"Tokenizer file not found: {tokenizer_file}")
 
-        self._hf_tokenizer = Tokenizer.from_file(tokenizer_file)
-        self._vocab_size = self._hf_tokenizer.get_vocab_size()
-
-        # Get the vocabulary from HuggingFace tokenizer
-        vocab = self._hf_tokenizer.get_vocab()
-        # Sort by token ID to get ordered list
-        tokens = sorted(vocab.keys(), key=lambda x: vocab[x])
-
-        # Initialize base class - pass a dummy oov that will be overridden
-        # Byte-level BPE never has OOV since it can represent any byte sequence
-        super().__init__(tokens, pad=pad, blank=blank, oov=BaseTokenizer.OOV, add_blank_at=add_blank_at)
-
-        # Disable OOV handling - byte-level BPE can encode any UTF-8 text
-        self.oov = None
-        self._util_ids = {self.pad, self.blank}  # Rebuild without oov
-
-        # Store special token IDs from HuggingFace tokenizer if they exist
-        hf_vocab = self._hf_tokenizer.get_vocab()
-        self._hf_pad_id = hf_vocab.get("<pad>")
-        self._hf_blank_id = hf_vocab.get("<blank>")
+        self._tokenizer = Tokenizer.from_file(tokenizer_file)
+        self.tokens = self._tokenizer.get_vocab()
+        self.pad = self.tokens.get("<pad>", None)
 
     def encode(self, text: str) -> List[int]:
-        """Encode IPA text to token IDs using the BPE tokenizer.
-
-        Args:
-            text: IPA string to encode.
-
-        Returns:
-            List of token IDs.
-        """
-        if not text or not text.strip():
-            return []
-
-        # Use HuggingFace tokenizer to encode
-        encoding = self._hf_tokenizer.encode(text)
-        return encoding.ids
+        """Encode IPA text to token IDs."""
+        return self._tokenizer.encode(text).ids
 
     def decode(self, tokens: List[int]) -> str:
-        """Decode token IDs back to IPA text.
-
-        Args:
-            tokens: List of token IDs.
-
-        Returns:
-            Decoded IPA string.
-        """
-        if not tokens:
-            return ""
-
-        # Filter out utility tokens (pad, blank, oov) that were added by BaseTokenizer
-        filtered_tokens = [t for t in tokens if t not in self._util_ids]
-
-        # Use HuggingFace tokenizer to decode
-        return self._hf_tokenizer.decode(filtered_tokens)
-
-    @property
-    def vocab_size(self) -> int:
-        """Return the vocabulary size including special tokens."""
-        return len(self.tokens)
-
-    def text_to_tokens(self, text: str) -> List[str]:
-        """Convert text to list of token strings.
-
-        Args:
-            text: IPA string to tokenize.
-
-        Returns:
-            List of token strings.
-        """
-        if not text or not text.strip():
-            return []
-        encoding = self._hf_tokenizer.encode(text)
-        return encoding.tokens
-
-    def tokens_to_text(self, tokens_list: List[str]) -> str:
-        """Convert list of token strings back to text.
-
-        Args:
-            tokens_list: List of token strings.
-
-        Returns:
-            Decoded text string.
-        """
-        # Convert token strings to IDs and decode
-        # Filter out any tokens not in vocabulary (shouldn't happen with byte-level BPE)
-        ids = [self._token2id[t] for t in tokens_list if t in self._token2id]
-        return self.decode(ids)
+        """Decode token IDs back to IPA text."""
+        return self._tokenizer.decode(tokens)
 
 
 # TODO @xueyang: subclassing from `nemo/collections/common/tokenizers/tokenizer_spec.py::TokenizerSpec`, and/or
@@ -1259,7 +1160,13 @@ class AggregatedTTSTokenizer:
                 _tokens = list(tokenizer.get_vocab().keys())
                 tokens.extend(_tokens)
                 num_tokens = len(_tokens)
-                tokenizer_pad_ids[tokenizer_name] = tokenizer.pad_token_id + tokenizer_offset
+                pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.unk_token_id
+                if pad_token_id is None:
+                    raise ValueError(
+                        f"Tokenizer '{tokenizer_name}' has no pad_token_id or unk_token_id. "
+                        "Please set one before using with AggregatedTTSTokenizer."
+                    )
+                tokenizer_pad_ids[tokenizer_name] = pad_token_id + tokenizer_offset
             else:
                 raise ValueError("Tokenizers must be either BaseTokenizer or HuggingFace PreTrainedTokenizerBase.")
             tokenizer_offset += num_tokens
@@ -1274,8 +1181,10 @@ class AggregatedTTSTokenizer:
         # Define aggregated token's pad value from the first tokenizer's pad value
         first_tokenizer = self.tokenizers[tokenizer_names[0]]
         self.first_tokenizer = first_tokenizer
-        if hasattr(first_tokenizer, "pad_token_id"):  # Defined in PreTrainedTokenizerBase subclasses
+        if hasattr(first_tokenizer, "pad_token_id") and first_tokenizer.pad_token_id is not None:
             self.pad = first_tokenizer.pad_token_id
+        elif hasattr(first_tokenizer, "unk_token_id") and first_tokenizer.unk_token_id is not None:
+            self.pad = first_tokenizer.unk_token_id
         elif hasattr(first_tokenizer, "pad"):  # Defined in BaseTokenizer subclasses
             self.pad = first_tokenizer.pad
         else:

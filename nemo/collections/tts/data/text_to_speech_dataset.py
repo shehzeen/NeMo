@@ -24,7 +24,7 @@ import numpy as np
 import torch.utils.data
 
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
-from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import BaseTokenizer
+from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import BaseTokenizer, IPABPETokenizer
 from nemo.collections.tts.parts.preprocessing.feature_processors import FeatureProcessor
 from nemo.collections.tts.parts.preprocessing.features import Featurizer
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
@@ -435,7 +435,17 @@ class MagpieTTSDataset(TextToSpeechDataset):
         }
 
         if self.phoneme_tokenizer is not None:
-            phoneme_tokens = self.phoneme_tokenizer.encode(data.text)
+            # Use IPA text for IPABPETokenizer (required), otherwise use regular text
+            if isinstance(self.phoneme_tokenizer, IPABPETokenizer):
+                if 'ipa' not in data.manifest_entry:
+                    raise ValueError(
+                        f"IPABPETokenizer requires 'ipa' field but it is not available in the manifest entry. "
+                        f"Text: {data.text}"
+                    )
+                phoneme_text = data.manifest_entry['ipa']
+            else:
+                phoneme_text = data.text
+            phoneme_tokens = self.phoneme_tokenizer.encode(phoneme_text)
             phoneme_tokens = (
                 [self.phoneme_tokenizer.bos_token_id] + phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
             )

@@ -1,0 +1,142 @@
+[INFO] Loaded config with languages: ['de', 'es', 'fr', 'hi', 'it', 'vi', 'zh', 'en']
+[INFO] Training languages: ['de', 'es', 'fr', 'hi', 'it', 'vi', 'zh', 'en']
+[INFO] Testing languages: ['de', 'es', 'fr', 'hi', 'it', 'vi', 'zh', 'en']
+[INFO] Samples per language for testing: 1000
+[INFO] Max samples per language for training: auto (min across langs)
+[INFO] Vocab sizes: [512, 1024, 2048, 4096]
+
+============================================================
+STEP 1: Creating balanced IPA corpus
+============================================================
+[INFO] Using existing corpus file: /home/shehzeenh/Code/DecoderNeMo/TokenizerExperiments2/ipa_corpus_balanced.txt
+[INFO] Corpus contains 398976 IPA strings
+
+============================================================
+STEP 2: Training IPA BPE tokenizers
+============================================================
+
+[INFO] Training tokenizer with vocab_size=512
+[INFO] Loading existing tokenizer from /home/shehzeenh/Code/DecoderNeMo/TokenizerExperiments2/ipa_bpe_v512/tokenizer.json
+
+[INFO] Training tokenizer with vocab_size=1024
+[INFO] Loading existing tokenizer from /home/shehzeenh/Code/DecoderNeMo/TokenizerExperiments2/ipa_bpe_v1024/tokenizer.json
+
+[INFO] Training tokenizer with vocab_size=2048
+[INFO] Loading existing tokenizer from /home/shehzeenh/Code/DecoderNeMo/TokenizerExperiments2/ipa_bpe_v2048/tokenizer.json
+
+[INFO] Training tokenizer with vocab_size=4096
+[INFO] Loading existing tokenizer from /home/shehzeenh/Code/DecoderNeMo/TokenizerExperiments2/ipa_bpe_v4096/tokenizer.json
+
+============================================================
+STEP 3: Loading Qwen and Nemotron tokenizers
+============================================================
+[INFO] Loading Qwen/Qwen2.5-1.5B-Instruct tokenizer...
+[INFO] Qwen tokenizer vocab size: 151643
+[INFO] Loading nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 tokenizer...
+The repository nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 contains custom code which must be executed to correctly load the model. You can inspect the repository content at https://hf.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 .
+ You can inspect the repository content at https://hf.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.
+You can avoid this prompt in future by passing the argument `trust_remote_code=True`.
+
+Do you wish to run the custom code? [y/N] [INFO] Nemotron tokenizer vocab size: 131072
+
+============================================================
+STEP 4: Sampling and analyzing (test languages)
+============================================================
+
+[INFO] Processing language: de
+[INFO] Sampled 1000 text pairs for de
+[INFO] de: duration=8402.35s, Qwen=3.99 tok/s, Nemotron=3.43 tok/s
+       IPA-512=8.64 tok/s
+       IPA-1024=7.05 tok/s
+       IPA-2048=5.94 tok/s
+       IPA-4096=4.98 tok/s
+
+[INFO] Processing language: es
+[INFO] Sampled 1000 text pairs for es
+[INFO] es: duration=8930.34s, Qwen=3.96 tok/s, Nemotron=3.51 tok/s
+       IPA-512=8.36 tok/s
+       IPA-1024=6.91 tok/s
+       IPA-2048=6.07 tok/s
+       IPA-4096=5.18 tok/s
+
+[INFO] Processing language: fr
+[INFO] Sampled 1000 text pairs for fr
+[INFO] fr: duration=8607.37s, Qwen=3.85 tok/s, Nemotron=3.29 tok/s
+       IPA-512=7.97 tok/s
+       IPA-1024=6.97 tok/s
+       IPA-2048=6.15 tok/s
+       IPA-4096=5.48 tok/s
+
+[INFO] Processing language: hi
+[INFO] Sampled 1000 text pairs for hi
+[INFO] hi: duration=10746.98s, Qwen=14.90 tok/s, Nemotron=6.14 tok/s
+       IPA-512=11.39 tok/s
+       IPA-1024=9.31 tok/s
+       IPA-2048=7.64 tok/s
+       IPA-4096=6.49 tok/s
+
+[INFO] Processing language: it
+[INFO] Sampled 1000 text pairs for it
+[INFO] it: duration=7809.11s, Qwen=4.85 tok/s, Nemotron=4.31 tok/s
+       IPA-512=9.79 tok/s
+       IPA-1024=8.10 tok/s
+       IPA-2048=6.78 tok/s
+       IPA-4096=5.75 tok/s
+
+[INFO] Processing language: vi
+[INFO] Sampled 1000 text pairs for vi
+[INFO] vi: duration=4595.96s, Qwen=5.21 tok/s, Nemotron=5.46 tok/s
+       IPA-512=14.48 tok/s
+       IPA-1024=12.90 tok/s
+       IPA-2048=11.42 tok/s
+       IPA-4096=10.35 tok/s
+
+[INFO] Processing language: zh
+[INFO] Sampled 1000 text pairs for zh
+[INFO] zh: duration=5606.61s, Qwen=2.70 tok/s, Nemotron=4.16 tok/s
+       IPA-512=12.09 tok/s
+       IPA-1024=10.79 tok/s
+       IPA-2048=9.92 tok/s
+       IPA-4096=9.53 tok/s
+
+[INFO] Processing language: en
+[INFO] Sampled 1000 text pairs for en
+[INFO] en: duration=10010.73s, Qwen=3.32 tok/s, Nemotron=3.36 tok/s
+       IPA-512=8.75 tok/s
+       IPA-1024=7.42 tok/s
+       IPA-2048=6.00 tok/s
+       IPA-4096=5.07 tok/s
+
+============================================================
+STEP 5: Results
+============================================================
+
+========================================================================================================================
+TOKENS PER SECOND: Qwen2.5-1.5B-Instruct & Nemotron Nano 30B (raw text) vs IPA BPE (phonemized)
+========================================================================================================================
+Lang    Samples  Duration(s)   Qwen tok/s   Nemo tok/s    IPA-512   IPA-1024   IPA-2048   IPA-4096
+------------------------------------------------------------------------------------------------------------------------
+de         1000      8402.35         3.99         3.43       8.64       7.05       5.94       4.98
+es         1000      8930.34         3.96         3.51       8.36       6.91       6.07       5.18
+fr         1000      8607.37         3.85         3.29       7.97       6.97       6.15       5.48
+hi         1000     10746.98        14.90         6.14      11.39       9.31       7.64       6.49
+it         1000      7809.11         4.85         4.31       9.79       8.10       6.78       5.75
+vi         1000      4595.96         5.21         5.46      14.48      12.90      11.42      10.35
+zh         1000      5606.61         2.70         4.16      12.09      10.79       9.92       9.53
+en         1000     10010.73         3.32         3.36       8.75       7.42       6.00       5.07
+------------------------------------------------------------------------------------------------------------------------
+TOTAL      8000     64709.45         5.75         4.17       9.84       8.32       7.11       6.21
+========================================================================================================================
+
+SUMMARY:
+  - Total samples analyzed: 8000
+  - Total audio duration: 64709.45 seconds (17.97 hours)
+  - Qwen tokens/second: 5.75
+  - Nemotron tokens/second: 4.17
+  - IPA-512 tokens/second: 9.84
+  - IPA-1024 tokens/second: 8.32
+  - IPA-2048 tokens/second: 7.11
+  - IPA-4096 tokens/second: 6.21
+
+[INFO] Saved results to /home/shehzeenh/Code/DecoderNeMo/TokenizerExperiments2/tokenization_comparison.json
+[INFO] Done!

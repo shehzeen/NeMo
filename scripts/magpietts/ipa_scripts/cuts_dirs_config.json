@@ -1,0 +1,45 @@
+{
+    "de": ["/Data/tts_lhotse_datasets/speech_data/de/cmltts_de_train/cuts"],
+    "es": [
+        "/Data/tts_lhotse_datasets/speech_data/es/cmltts_es_train/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/es/riva_ES_RubbyCarlos/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/es/riva_ES_RubbyCarlos/cuts_textContext"
+    ],
+    "fr": [
+        "/Data/tts_lhotse_datasets/speech_data/fr/cmltts_fr_train/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/fr/riva_FR_VirginieSamy/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/fr/riva_FR_VirginieSamy/cuts_textContext"
+    ],
+    "hi": [
+        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi/filter_1/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi/filter_2/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi_2/filter_1/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi_2/filter_2/cuts"
+    ],
+    "it": ["/Data/tts_lhotse_datasets/speech_data/it/cmltts_it_train/cuts"],
+    "vi": [
+        "/Data/tts_lhotse_datasets/speech_data/vi/Infore1_2_lsvsc/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/vi/Long_ContextAudio/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/vi/Long_ContextAudio/cuts_textContext",
+        "/Data/tts_lhotse_datasets/speech_data/vi/NorthFemale/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/vi/nvyt_vi/nvyt_yt2025/cuts"
+    ],
+    "zh": [
+        "/Data/tts_lhotse_datasets/speech_data/zh/riva_ZH_SiweiHouZhen/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/zh/riva_ZH_SiweiHouZhen/cuts_textContext",
+        "/Data/tts_lhotse_datasets/speech_data/zh/nvyt_zh/filter_1/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/zh/nvyt_zh/filter_2/cuts"
+    ],
+    "en": [
+        "/Data/tts_lhotse_datasets/speech_data/en/nvyt2505/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/hifitts/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/hifitts2/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/jhsdGtc20Amp20Keynote/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/libritts/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/rivaLindyRodney/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/rivaLindyRodney/lhotse_shar_shuffle_shardSize256/cuts_textContext",
+        "/Data/tts_lhotse_datasets/speech_data/en/rivaEmmaMeganSeanTom/lhotse_shar_shuffle_shardSize256/cuts",
+        "/Data/tts_lhotse_datasets/speech_data/en/rivaEmmaMeganSeanTom/lhotse_shar_shuffle_shardSize256/cuts_textContext",
+        "/Data/tts_lhotse_datasets/speech_data/en/jhsdGtc20Amp20Keynote/lhotse_shar_shuffle_shardSize256/cuts_textContext"
+    ]
+}

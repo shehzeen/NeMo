@@ -17,7 +17,7 @@ LOG_DIR="/home/shehzeenh/Code/DecoderNeMo/LhotseLogs"
 
 # Languages to process (in order)
 # LANGUAGES=("de" "es" "fr" "hi" "it" "vi" "zh" "en")
-LANGUAGES=("vi" "zh" "en")
+LANGUAGES=("hi")
 
 # Create log directory if it doesn't exist
 mkdir -p "${LOG_DIR}"

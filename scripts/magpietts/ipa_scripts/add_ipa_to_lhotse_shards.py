@@ -37,55 +37,20 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # USER CONFIG
 # -------------------------
 
-CUTS_DIRS_BY_LANG: Dict[str, List[str]] = {
-    "de": ["/Data/tts_lhotse_datasets/speech_data/de/cmltts_de_train/cuts"],
-    "es": [
-        "/Data/tts_lhotse_datasets/speech_data/es/cmltts_es_train/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/es/riva_ES_RubbyCarlos/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/es/riva_ES_RubbyCarlos/cuts_textContext",
-    ],
-    "fr": [
-        "/Data/tts_lhotse_datasets/speech_data/fr/cmltts_fr_train/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/fr/riva_FR_VirginieSamy/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/fr/riva_FR_VirginieSamy/cuts_textContext",
-    ],
-    "hi": [
-        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi/filter_1/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi/filter_2/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi_2/filter_1/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/hi/nvyt_hi_2/filter_2/cuts",
-    ],
-    "it": ["/Data/tts_lhotse_datasets/speech_data/it/cmltts_it_train/cuts"],
-    "vi": [
-        "/Data/tts_lhotse_datasets/speech_data/vi/Infore1_2_lsvsc/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/vi/Long_ContextAudio/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/vi/Long_ContextAudio/cuts_textContext",
-        # "/Data/tts_lhotse_datasets/speech_data/vi/Long_IPA/cuts_textContext",
-        # "/Data/tts_lhotse_datasets/speech_data/vi/Long_IPA/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/vi/NorthFemale/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/vi/NorthFemale/cuts_textContext",
-        "/Data/tts_lhotse_datasets/speech_data/vi/nvyt_vi/nvyt_yt12k/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/vi/nvyt_vi/nvyt_yt2025/cuts",
-    ],
-    "zh": [
-        "/Data/tts_lhotse_datasets/speech_data/zh/riva_ZH_SiweiHouZhen/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/zh/riva_ZH_SiweiHouZhen/cuts_textContext",
-        "/Data/tts_lhotse_datasets/speech_data/zh/nvyt_zh/filter_1/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/zh/nvyt_zh/filter_2/cuts",
-    ],
-    "en": [
-        "/Data/tts_lhotse_datasets/speech_data/en/nvyt2505/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/hifitts/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/hifitts2/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/jhsdGtc20Amp20Keynote/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/libritts/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/rivaLindyRodney/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/rivaLindyRodney/lhotse_shar_shuffle_shardSize256/cuts_textContext",
-        "/Data/tts_lhotse_datasets/speech_data/en/rivaEmmaMeganSeanTom/lhotse_shar_shuffle_shardSize256/cuts",
-        "/Data/tts_lhotse_datasets/speech_data/en/rivaEmmaMeganSeanTom/lhotse_shar_shuffle_shardSize256/cuts_textContext",
-        "/Data/tts_lhotse_datasets/speech_data/en/jhsdGtc20Amp20Keynote/lhotse_shar_shuffle_shardSize256/cuts_textContext",
-    ],
-}
+# Default config file path (same directory as this script)
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_dirs_config.json"
+
+
+def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[str]]:
+    """Load CUTS_DIRS_BY_LANG from a JSON config file."""
+    if config_path is None:
+        config_path = DEFAULT_CONFIG_PATH
+    
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 # Map your dataset language keys to espeak voice codes (adjust as needed).
 # For German, espeak-ng uses "de" typically.
@@ -229,17 +194,26 @@ def add_ipa_to_cut(
     """
     Adds IPA to each supervision custom field: custom["ipa"].
     Uses supervision["custom"]["normalized_text"] if available, otherwise supervision["text"] as source text.
+    For Vietnamese (vi), uses original_text and updates text/normalized_text fields.
     """
     sups = cut.get("supervisions") or []
+    is_vietnamese = espeak.voice == "vi"
     for sup in sups:
-        text = sup.get("custom", {}).get("normalized_text") or sup.get("text")
-        if not text:
-            continue
-
         custom = sup.get("custom")
         if custom is None:
             custom = {}
             sup["custom"] = custom
+
+        # For Vietnamese, use original_text and fix the text fields
+        if is_vietnamese and custom.get("original_text"):
+            text = custom["original_text"]
+            sup["text"] = text
+            custom["normalized_text"] = text
+        else:
+            text = custom.get("normalized_text") or sup.get("text")
+        
+        if not text:
+            continue
 
         # If already has IPA, keep it
         if "ipa" in custom and isinstance(custom["ipa"], str) and custom["ipa"].strip():
@@ -338,22 +312,22 @@ def _process_shard_worker(shard: Path, out_shard: Path, exe: str, voice: str) ->
     return process_shard(shard, out_shard, espeak)
 
 
-def get_available_languages() -> List[str]:
+def get_available_languages(cuts_dirs: Dict[str, List[str]]) -> List[str]:
     """Return list of all available language codes."""
-    return list(CUTS_DIRS_BY_LANG.keys())
+    return list(cuts_dirs.keys())
 
 
-def process_language(lang: str) -> bool:
+def process_language(lang: str, cuts_dirs: Dict[str, List[str]]) -> bool:
     """
     Process all directories for a given language.
     Returns True if successful, False if there was an issue.
     """
-    if lang not in CUTS_DIRS_BY_LANG:
+    if lang not in cuts_dirs:
         print(f"[ERROR] Unknown language: {lang}", file=sys.stderr)
-        print(f"[ERROR] Available languages: {get_available_languages()}", file=sys.stderr)
+        print(f"[ERROR] Available languages: {get_available_languages(cuts_dirs)}", file=sys.stderr)
         return False
 
-    dirs = CUTS_DIRS_BY_LANG[lang]
+    dirs = cuts_dirs[lang]
     for d in dirs:
         cuts_dir = Path(d)
         if not cuts_dir.exists():
@@ -372,20 +346,30 @@ def main() -> None:
         "--lang",
         type=str,
         required=True,
-        help=f"Language code to process (e.g., 'de', 'en', 'fr') or 'all' for all languages. "
-             f"Available: {get_available_languages()}"
+        help="Language code to process (e.g., 'de', 'en', 'fr') or 'all' for all languages."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=f"Path to JSON config file with cuts directories. Default: {DEFAULT_CONFIG_PATH}"
     )
     args = parser.parse_args()
 
+    # Load config
+    config_path = Path(args.config) if args.config else None
+    cuts_dirs = load_cuts_dirs_config(config_path)
+    print(f"[INFO] Loaded config with languages: {get_available_languages(cuts_dirs)}")
+
     if args.lang == "all":
         # Process all languages
-        for lang in CUTS_DIRS_BY_LANG.keys():
+        for lang in cuts_dirs.keys():
             print(f"\n{'='*60}")
             print(f"[INFO] Processing language: {lang}")
             print(f"{'='*60}")
-            process_language(lang)
+            process_language(lang, cuts_dirs)
     else:
-        success = process_language(args.lang)
+        success = process_language(args.lang, cuts_dirs)
         if not success:
             sys.exit(1)
 
