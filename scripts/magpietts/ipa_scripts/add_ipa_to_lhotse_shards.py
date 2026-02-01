@@ -45,12 +45,13 @@ def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[
     """Load CUTS_DIRS_BY_LANG from a JSON config file."""
     if config_path is None:
         config_path = DEFAULT_CONFIG_PATH
-    
+
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    
+
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
 
 # Map your dataset language keys to espeak voice codes (adjust as needed).
 # For German, espeak-ng uses "de" typically.
@@ -100,8 +101,7 @@ def _find_espeak_binary() -> str:
         if shutil.which(exe):
             return exe
     raise RuntimeError(
-        "Neither 'espeak-ng' nor 'espeak' was found on PATH. "
-        "Install espeak-ng (recommended) or espeak."
+        "Neither 'espeak-ng' nor 'espeak' was found on PATH. " "Install espeak-ng (recommended) or espeak."
     )
 
 
@@ -204,7 +204,7 @@ def add_ipa_to_cut(
             custom["normalized_text"] = text
         else:
             text = custom.get("normalized_text") or sup.get("text")
-        
+
         if not text:
             continue
 
@@ -234,9 +234,10 @@ def process_shard(
     cache = IPACache()
     n = 0
 
-    with gzip.open(shard_path, "rt", encoding="utf-8") as fin, gzip.open(
-        out_shard_path, "wt", encoding="utf-8"
-    ) as fout:
+    with (
+        gzip.open(shard_path, "rt", encoding="utf-8") as fin,
+        gzip.open(out_shard_path, "wt", encoding="utf-8") as fout,
+    ):
         for line in fin:
             line = line.strip()
             if not line:
@@ -315,25 +316,23 @@ def process_language(lang: str, cuts_dirs: Dict[str, List[str]]) -> bool:
             print(f"[WARN] missing dir: {cuts_dir}", file=sys.stderr)
             continue
         process_cuts_dir(lang, cuts_dir)
-    
+
     return True
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Add IPA strings to Lhotse cuts jsonl.gz shards."
-    )
+    parser = argparse.ArgumentParser(description="Add IPA strings to Lhotse cuts jsonl.gz shards.")
     parser.add_argument(
         "--lang",
         type=str,
         required=True,
-        help="Language code to process (e.g., 'de', 'en', 'fr') or 'all' for all languages."
+        help="Language code to process (e.g., 'de', 'en', 'fr') or 'all' for all languages.",
     )
     parser.add_argument(
         "--config",
         type=str,
         default=None,
-        help=f"Path to JSON config file with cuts directories. Default: {DEFAULT_CONFIG_PATH}"
+        help=f"Path to JSON config file with cuts directories. Default: {DEFAULT_CONFIG_PATH}",
     )
     args = parser.parse_args()
 

@@ -64,12 +64,13 @@ def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[
     """Load CUTS_DIRS_BY_LANG from a JSON config file."""
     if config_path is None:
         config_path = DEFAULT_CONFIG_PATH
-    
+
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    
+
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
 
 OUTPUT_SUFFIX = "_with_ipa"
 SHARD_GLOB = "cuts.*.jsonl.gz"
@@ -78,6 +79,7 @@ SHARD_GLOB = "cuts.*.jsonl.gz"
 @dataclass
 class TextPair:
     """A pair of raw text and its IPA phonemization with audio duration."""
+
     raw_text: str
     ipa_text: str
     lang: str
@@ -87,6 +89,7 @@ class TextPair:
 @dataclass
 class TokenizationStats:
     """Statistics for tokenization comparison (tokens per second)."""
+
     lang: str
     num_samples: int
     total_duration: float  # sum of all durations in seconds
@@ -113,7 +116,7 @@ def iter_shards(ipa_dir: Path) -> List[Path]:
 def extract_text_pairs_from_shard(shard_path: Path, lang: str) -> Generator[TextPair, None, None]:
     """
     Extract text pairs (raw text + IPA) from a single shard file.
-    
+
     Yields:
         TextPair objects with raw_text, ipa_text, and duration
     """
@@ -132,7 +135,7 @@ def extract_text_pairs_from_shard(shard_path: Path, lang: str) -> Generator[Text
                     ipa = custom.get("ipa")
                     # Get raw text - prefer normalized_text, fallback to text
                     raw_text = custom.get("normalized_text") or sup.get("text")
-                    
+
                     if ipa and raw_text and isinstance(ipa, str) and isinstance(raw_text, str):
                         ipa = ipa.strip()
                         raw_text = raw_text.strip()
@@ -150,31 +153,31 @@ def sample_text_pairs(
 ) -> List[TextPair]:
     """
     Sample text pairs from a language's cuts_with_ipa directories.
-    
+
     Args:
         lang: Language code
         cuts_dirs: Dictionary mapping language codes to lists of cuts directories
         num_samples: Number of samples to collect
         seed: Random seed for reproducibility
-    
+
     Returns:
         List of TextPair objects
     """
     random.seed(seed)
-    
+
     if lang not in cuts_dirs:
         raise ValueError(f"Unknown language: {lang}")
-    
+
     # Collect all text pairs from all directories
     all_pairs = []
     for cuts_dir_str in cuts_dirs[lang]:
         cuts_dir = Path(cuts_dir_str)
         ipa_dir = get_ipa_dir(cuts_dir)
-        
+
         if not ipa_dir.exists():
             print(f"[WARN] IPA directory does not exist: {ipa_dir}", file=sys.stderr)
             continue
-        
+
         shards = iter_shards(ipa_dir)
         for shard in shards:
             for pair in extract_text_pairs_from_shard(shard, lang):
@@ -186,12 +189,12 @@ def sample_text_pairs(
                 break
         if len(all_pairs) >= num_samples * 10:
             break
-    
+
     # Sample
     if len(all_pairs) <= num_samples:
         print(f"[INFO] {lang}: Only found {len(all_pairs)} pairs, using all")
         return all_pairs
-    
+
     return random.sample(all_pairs, num_samples)
 
 
@@ -202,14 +205,14 @@ def iter_ipa_strings_for_lang(
     """Iterate over all IPA strings for a single language (memory-efficient)."""
     if lang not in cuts_dirs:
         return
-    
+
     for cuts_dir_str in cuts_dirs[lang]:
         cuts_dir = Path(cuts_dir_str)
         ipa_dir = get_ipa_dir(cuts_dir)
-        
+
         if not ipa_dir.exists():
             continue
-        
+
         shards = iter_shards(ipa_dir)
         for shard in shards:
             with gzip.open(shard, "rt", encoding="utf-8") as f:
@@ -246,31 +249,31 @@ def simple_sample_ipa_strings(
 ) -> List[str]:
     """
     Simple sampling: collect up to max_collect IPA strings, then randomly sample k.
-    
+
     This avoids reading through all data like reservoir sampling does.
-    
+
     Args:
         lang: Language code
         cuts_dirs: Dictionary mapping language codes to lists of cuts directories
         k: Number of samples to select
         max_collect: Maximum number of strings to collect before sampling
         seed: Random seed for reproducibility
-    
+
     Returns:
         List of up to k sampled IPA strings
     """
     rng = random.Random(seed)
     collected: List[str] = []
-    
+
     for ipa in iter_ipa_strings_for_lang(lang, cuts_dirs):
         collected.append(ipa)
         if len(collected) >= max_collect:
             break
-    
+
     # If we have fewer than k, return all
     if len(collected) <= k:
         return collected
-    
+
     # Otherwise, randomly sample k
     return rng.sample(collected, k)
 
@@ -285,11 +288,11 @@ def create_balanced_corpus(
 ) -> Tuple[str, Dict[str, int]]:
     """
     Create a balanced IPA corpus file with equal samples from each language.
-    
+
     Uses a memory-efficient two-pass approach:
     1. First pass: Count sentences per language (up to max_count_per_lang)
     2. Second pass: Use simple sampling to select samples
-    
+
     Args:
         train_langs: List of language codes to include
         cuts_dirs: Dictionary mapping language codes to lists of cuts directories
@@ -297,14 +300,14 @@ def create_balanced_corpus(
         max_samples_per_lang: Optional cap on samples per language
         max_count_per_lang: Max count per language when counting IPA strings
         seed: Random seed for reproducibility
-    
+
     Returns:
         Tuple of (corpus_file_path, dict of lang -> actual_count)
     """
     # First pass: Count sentences per language
     print("[INFO] Pass 1: Counting IPA strings per language...")
     lang_counts: Dict[str, int] = {}
-    
+
     for lang in train_langs:
         if lang not in cuts_dirs:
             print(f"[WARN] Language {lang} not in config, skipping")
@@ -313,42 +316,42 @@ def create_balanced_corpus(
         count = count_ipa_strings_for_lang(lang, cuts_dirs, max_count_per_lang)
         lang_counts[lang] = count
         print(f"{count} IPA strings")
-    
+
     if not lang_counts:
         raise ValueError("No IPA strings found for any language")
-    
+
     # Find minimum count across languages
     min_count = min(lang_counts.values())
     print(f"[INFO] Minimum count across languages: {min_count}")
-    
+
     # Apply max_samples_per_lang cap if specified
     samples_per_lang = min_count
     if max_samples_per_lang is not None and max_samples_per_lang < min_count:
         samples_per_lang = max_samples_per_lang
         print(f"[INFO] Using max_samples_per_lang cap: {samples_per_lang}")
-    
+
     # Second pass: Sample from each language using simple sampling
     print(f"[INFO] Pass 2: Sampling {samples_per_lang} strings per language...")
     actual_counts: Dict[str, int] = {}
     total_written = 0
-    
+
     with open(output_file, "w", encoding="utf-8") as f:
         for lang in lang_counts.keys():
             print(f"[INFO] Sampling from {lang}...", end=" ", flush=True)
             # Use different seed per language for variety, but reproducible
             lang_seed = seed + hash(lang) % 10000
             sampled = simple_sample_ipa_strings(lang, cuts_dirs, samples_per_lang, max_count_per_lang, lang_seed)
-            
+
             for ipa in sampled:
                 f.write(ipa + "\n")
                 total_written += 1
-            
+
             actual_counts[lang] = len(sampled)
             print(f"sampled {len(sampled)} strings")
-    
+
     print(f"[INFO] Total IPA strings written to corpus: {total_written}")
     print(f"[INFO] Balanced corpus saved to: {output_file}")
-    
+
     return output_file, actual_counts
 
 
@@ -360,48 +363,48 @@ def train_ipa_bpe_tokenizer(
 ) -> Tokenizer:
     """
     Train a byte-level BPE tokenizer on IPA strings from a pre-built corpus file.
-    
+
     Args:
         output_dir: Directory to save tokenizer files
         vocab_size: Target vocabulary size
         corpus_file: Path to the IPA corpus file (one IPA string per line)
         min_frequency: Minimum frequency for a token to be included
-    
+
     Returns:
         Trained Tokenizer object
     """
     tokenizer_dir = os.path.join(output_dir, f"ipa_bpe_v{vocab_size}")
     os.makedirs(tokenizer_dir, exist_ok=True)
-    
+
     tokenizer_file = os.path.join(tokenizer_dir, "tokenizer.json")
-    
+
     # Check if already trained
     if os.path.exists(tokenizer_file):
         print(f"[INFO] Loading existing tokenizer from {tokenizer_file}")
         return Tokenizer.from_file(tokenizer_file)
-    
+
     # Initialize tokenizer
     tokenizer = Tokenizer(BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
-    
+
     special_tokens = ["<pad>", "<blank>", "<unk>"]
-    
+
     trainer = BpeTrainer(
         vocab_size=vocab_size,
         min_frequency=min_frequency,
         special_tokens=special_tokens,
         show_progress=True,
     )
-    
+
     print(f"[INFO] Training BPE tokenizer with vocab_size={vocab_size}...")
     tokenizer.train(files=[corpus_file], trainer=trainer)
-    
+
     # Save
     tokenizer.save(tokenizer_file)
     tokenizer.model.save(tokenizer_dir)
-    
+
     print(f"[INFO] Saved tokenizer to {tokenizer_dir}")
-    
+
     return tokenizer
 
 
@@ -418,35 +421,35 @@ def compute_stats(
     qwen_counts = []
     nemotron_counts = []
     ipa_counts = {vs: [] for vs in ipa_tokenizers.keys()}
-    
+
     for pair in text_pairs:
         # Qwen tokenizer on raw text
         qwen_tokens = qwen_tokenizer.encode(pair.raw_text)
         qwen_counts.append(len(qwen_tokens))
-        
+
         # Nemotron tokenizer on raw text
         nemotron_tokens = nemotron_tokenizer.encode(pair.raw_text)
         nemotron_counts.append(len(nemotron_tokens))
-        
+
         # IPA tokenizers on IPA text
         for vocab_size, tokenizer in ipa_tokenizers.items():
             ipa_tokens = tokenizer.encode(pair.ipa_text)
             ipa_counts[vocab_size].append(len(ipa_tokens.ids))
-    
+
     # Calculate total duration and token counts
     total_duration = sum(pair.duration for pair in text_pairs)
     qwen_total = sum(qwen_counts)
     nemotron_total = sum(nemotron_counts)
-    
+
     # Compute tokens per second
     qwen_tps = qwen_total / total_duration if total_duration > 0 else 0.0
     nemotron_tps = nemotron_total / total_duration if total_duration > 0 else 0.0
-    
+
     ipa_tps = {}
     for vocab_size in ipa_tokenizers.keys():
         ipa_total = sum(ipa_counts[vocab_size])
         ipa_tps[vocab_size] = ipa_total / total_duration if total_duration > 0 else 0.0
-    
+
     return TokenizationStats(
         lang=lang,
         num_samples=len(text_pairs),
@@ -462,32 +465,32 @@ def print_stats_table(all_stats: List[TokenizationStats], vocab_sizes: List[int]
     print("\n" + "=" * 120)
     print("TOKENS PER SECOND: Qwen2.5-1.5B-Instruct & Nemotron Nano 30B (raw text) vs IPA BPE (phonemized)")
     print("=" * 120)
-    
+
     # Header
     header = f"{'Lang':<6} {'Samples':>8} {'Duration(s)':>12} {'Qwen tok/s':>12} {'Nemo tok/s':>12}"
     for vs in vocab_sizes:
         header += f" {'IPA-' + str(vs):>10}"
     print(header)
     print("-" * 120)
-    
+
     # Data rows
     for stats in all_stats:
         row = f"{stats.lang:<6} {stats.num_samples:>8} {stats.total_duration:>12.2f} {stats.qwen_tokens_per_second:>12.2f} {stats.nemotron_tokens_per_second:>12.2f}"
         for vs in vocab_sizes:
             row += f" {stats.ipa_tokens_per_second[vs]:>10.2f}"
         print(row)
-    
+
     # Aggregated stats
     print("-" * 120)
     total_samples = sum(s.num_samples for s in all_stats)
     total_duration = sum(s.total_duration for s in all_stats)
-    
+
     # Compute overall tokens per second (weighted by duration)
     total_qwen_tokens = sum(s.qwen_tokens_per_second * s.total_duration for s in all_stats)
     total_nemotron_tokens = sum(s.nemotron_tokens_per_second * s.total_duration for s in all_stats)
     overall_qwen_tps = total_qwen_tokens / total_duration if total_duration > 0 else 0
     overall_nemotron_tps = total_nemotron_tokens / total_duration if total_duration > 0 else 0
-    
+
     agg_row = f"{'TOTAL':<6} {total_samples:>8} {total_duration:>12.2f} {overall_qwen_tps:>12.2f} {overall_nemotron_tps:>12.2f}"
     for vs in vocab_sizes:
         total_ipa_tokens = sum(s.ipa_tokens_per_second[vs] * s.total_duration for s in all_stats)
@@ -495,7 +498,7 @@ def print_stats_table(all_stats: List[TokenizationStats], vocab_sizes: List[int]
         agg_row += f" {overall_ipa_tps:>10.2f}"
     print(agg_row)
     print("=" * 120)
-    
+
     # Summary
     print("\nSUMMARY:")
     print(f"  - Total samples analyzed: {total_samples}")
@@ -523,20 +526,21 @@ def save_results_json(
         },
         "results": [],
     }
-    
+
     for stats in all_stats:
-        output["results"].append({
-            "lang": stats.lang,
-            "num_samples": stats.num_samples,
-            "total_duration_seconds": stats.total_duration,
-            "qwen_tokens_per_second": stats.qwen_tokens_per_second,
-            "nemotron_tokens_per_second": stats.nemotron_tokens_per_second,
-            "ipa_tokens_per_second": {
-                str(vs): stats.ipa_tokens_per_second[vs]
-                for vs in stats.ipa_tokens_per_second.keys()
+        output["results"].append(
+            {
+                "lang": stats.lang,
+                "num_samples": stats.num_samples,
+                "total_duration_seconds": stats.total_duration,
+                "qwen_tokens_per_second": stats.qwen_tokens_per_second,
+                "nemotron_tokens_per_second": stats.nemotron_tokens_per_second,
+                "ipa_tokens_per_second": {
+                    str(vs): stats.ipa_tokens_per_second[vs] for vs in stats.ipa_tokens_per_second.keys()
+                },
             }
-        })
-    
+        )
+
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
     print(f"[INFO] Saved results to {output_path}")
@@ -555,9 +559,7 @@ def parse_lang_arg(arg: str, available_langs: List[str]) -> List[str]:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Compare tokenization between Qwen and IPA BPE tokenizers."
-    )
+    parser = argparse.ArgumentParser(description="Compare tokenization between Qwen and IPA BPE tokenizers.")
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -598,7 +600,7 @@ def main():
         "--config",
         type=str,
         default=None,
-        help=f"Path to JSON config file with cuts directories. Default: {DEFAULT_CONFIG_PATH}"
+        help=f"Path to JSON config file with cuts directories. Default: {DEFAULT_CONFIG_PATH}",
     )
     parser.add_argument(
         "--max_count_per_lang",
@@ -607,15 +609,15 @@ def main():
         help="Max count per language when counting IPA strings (default: 100000)",
     )
     args = parser.parse_args()
-    
+
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     # Load config
     config_path = Path(args.config) if args.config else None
     cuts_dirs = load_cuts_dirs_config(config_path)
     available_langs = list(cuts_dirs.keys())
     print(f"[INFO] Loaded config with languages: {available_langs}")
-    
+
     # Parse train and test languages
     try:
         train_langs = parse_lang_arg(args.train_langs, available_langs)
@@ -623,20 +625,20 @@ def main():
     except ValueError as e:
         print(f"[ERROR] {e}")
         sys.exit(1)
-    
+
     print(f"[INFO] Training languages: {train_langs}")
     print(f"[INFO] Testing languages: {test_langs}")
     print(f"[INFO] Samples per language for testing: {args.samples_per_lang}")
     print(f"[INFO] Max samples per language for training: {args.max_samples_per_lang or 'auto (min across langs)'}")
     print(f"[INFO] Vocab sizes: {VOCAB_SIZES}")
-    
+
     # Step 1: Create balanced IPA corpus once
     print("\n" + "=" * 60)
     print("STEP 1: Creating balanced IPA corpus")
     print("=" * 60)
-    
+
     corpus_file = os.path.join(args.output_dir, "ipa_corpus_balanced.txt")
-    
+
     # Check if corpus already exists
     if os.path.exists(corpus_file):
         print(f"[INFO] Using existing corpus file: {corpus_file}")
@@ -652,12 +654,12 @@ def main():
             max_count_per_lang=args.max_count_per_lang,
             seed=args.seed,
         )
-    
+
     # Step 2: Train IPA BPE tokenizers at different vocab sizes (reusing corpus)
     print("\n" + "=" * 60)
     print("STEP 2: Training IPA BPE tokenizers")
     print("=" * 60)
-    
+
     ipa_tokenizers = {}
     for vocab_size in VOCAB_SIZES:
         print(f"\n[INFO] Training tokenizer with vocab_size={vocab_size}")
@@ -667,60 +669,64 @@ def main():
             corpus_file=corpus_file,
             min_frequency=2,
         )
-    
+
     # Step 3: Load Qwen and Nemotron tokenizers
     print("\n" + "=" * 60)
     print("STEP 3: Loading Qwen and Nemotron tokenizers")
     print("=" * 60)
-    
+
     print("[INFO] Loading Qwen/Qwen2.5-1.5B-Instruct tokenizer...")
     qwen_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
     print(f"[INFO] Qwen tokenizer vocab size: {qwen_tokenizer.vocab_size}")
-    
+
     print("[INFO] Loading nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 tokenizer...")
-    
-    nemotron_tokenizer =  AutoTokenizer.from_pretrained("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", trust_remote_code=True)
-    
+
+    nemotron_tokenizer = AutoTokenizer.from_pretrained(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", trust_remote_code=True
+    )
+
     print(f"[INFO] Nemotron tokenizer vocab size: {nemotron_tokenizer.vocab_size}")
-    
+
     # Step 4: Sample text pairs and compute statistics (on test languages)
     print("\n" + "=" * 60)
     print("STEP 4: Sampling and analyzing (test languages)")
     print("=" * 60)
-    
+
     all_stats = []
     for lang in test_langs:
         print(f"\n[INFO] Processing language: {lang}")
-        
+
         # Sample text pairs
         text_pairs = sample_text_pairs(lang, cuts_dirs, args.samples_per_lang, args.seed)
-        
+
         if not text_pairs:
             print(f"[WARN] No text pairs found for {lang}, skipping")
             continue
-        
+
         print(f"[INFO] Sampled {len(text_pairs)} text pairs for {lang}")
-        
+
         # Compute stats
         stats = compute_stats(text_pairs, qwen_tokenizer, nemotron_tokenizer, ipa_tokenizers, lang)
         all_stats.append(stats)
-        
+
         # Print intermediate results
-        print(f"[INFO] {lang}: duration={stats.total_duration:.2f}s, Qwen={stats.qwen_tokens_per_second:.2f} tok/s, Nemotron={stats.nemotron_tokens_per_second:.2f} tok/s")
+        print(
+            f"[INFO] {lang}: duration={stats.total_duration:.2f}s, Qwen={stats.qwen_tokens_per_second:.2f} tok/s, Nemotron={stats.nemotron_tokens_per_second:.2f} tok/s"
+        )
         for vs in VOCAB_SIZES:
             print(f"       IPA-{vs}={stats.ipa_tokens_per_second[vs]:.2f} tok/s")
-    
+
     # Step 5: Print and save results
     print("\n" + "=" * 60)
     print("STEP 5: Results")
     print("=" * 60)
-    
+
     print_stats_table(all_stats, VOCAB_SIZES)
-    
+
     # Save to JSON with metadata
     results_path = os.path.join(args.output_dir, "tokenization_comparison.json")
     save_results_json(all_stats, results_path, train_langs, test_langs)
-    
+
     print("[INFO] Done!")
 
 

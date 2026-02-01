@@ -352,7 +352,8 @@ class EasyMagpieTTSModel(ModelPT):
             self.audio_out_projection = nn.Identity()
 
         self.final_proj = nn.Linear(
-            self.audio_embedding_dim, self.num_audio_codebooks * self.num_all_tokens_per_codebook * self.frame_stacking_factor
+            self.audio_embedding_dim,
+            self.num_audio_codebooks * self.num_all_tokens_per_codebook * self.frame_stacking_factor,
         )
         self.cross_entropy_loss = nn.CrossEntropyLoss(reduction='none')
 
@@ -376,7 +377,9 @@ class EasyMagpieTTSModel(ModelPT):
             )
             # Projection from local_transformer_hidden_dim to audio_embedding_dim (Identity if same)
             if self.audio_embedding_dim != local_transformer_hidden_dim:
-                self.local_transformer_audio_out_projection = nn.Linear(local_transformer_hidden_dim, self.audio_embedding_dim)
+                self.local_transformer_audio_out_projection = nn.Linear(
+                    local_transformer_hidden_dim, self.audio_embedding_dim
+                )
             else:
                 self.local_transformer_audio_out_projection = nn.Identity()
             local_transformer_out_projections = []
@@ -1365,7 +1368,7 @@ class EasyMagpieTTSModel(ModelPT):
         # Text dropout: randomly drop text input to encourage the model to rely on other signals
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
         dropout_phoneme_input = (random.random() < self.dropout_phoneme_input_prob) if mode == 'train' else False
-        if (dropout_phoneme_input and dropout_text_input):
+        if dropout_phoneme_input and dropout_text_input:
             # Only one of the two can be True, so choose randomly
             dropout_phoneme_input = random.random() < 0.5
             dropout_text_input = not dropout_phoneme_input
@@ -1462,7 +1465,9 @@ class EasyMagpieTTSModel(ModelPT):
                 remaining_text_embedded = torch.cat([remaining_text_embedded, padding_tensor], dim=1)
             else:
                 # Log Warning
-                print(f"Warning: Remaining text length {remaining_text_embedded.size(1)} is greater than audio codes input length {audio_codes_input_embedded.size(1)}")
+                print(
+                    f"Warning: Remaining text length {remaining_text_embedded.size(1)} is greater than audio codes input length {audio_codes_input_embedded.size(1)}"
+                )
                 remaining_text_embedded = remaining_text_embedded[:, : audio_codes_input_embedded.size(1), :]
             # Add text information to audio embeddings (element-wise addition)
             audio_codes_input_embedded = audio_codes_input_embedded + remaining_text_embedded
@@ -2035,9 +2040,7 @@ class EasyMagpieTTSModel(ModelPT):
 
                 # Project from hidden_dim to audio_embedding_dim, then to logits
                 last_hidden_audio = self.audio_out_projection(last_hidden[:, -1, :])
-                all_code_logits_t = self.final_proj(
-                    last_hidden_audio
-                )  # (B, num_codebooks * num_tokens_per_codebook)
+                all_code_logits_t = self.final_proj(last_hidden_audio)  # (B, num_codebooks * num_tokens_per_codebook)
 
                 if self.phoneme_tokenizer is not None:
                     all_code_logits_t_phoneme = self.phoneme_final_proj(
