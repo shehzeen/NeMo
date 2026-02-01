@@ -51,6 +51,7 @@ model:
   frame_stacking_factor: 2
   phoneme_stacking_factor: 1
   dropout_text_input_prob: 0.3
+  dropout_phoneme_input_prob: 0.3
 
   phoneme_tokenizer:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPABPETokenizer

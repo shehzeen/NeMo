@@ -1364,13 +1364,11 @@ class EasyMagpieTTSModel(ModelPT):
         # Determine whether to apply text/phoneme dropout for regularization during training
         # Text dropout: randomly drop text input to encourage the model to rely on other signals
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
-        # Phoneme dropout: randomly drop phoneme input, but only if text is not already dropped
-        # This ensures we don't drop both simultaneously
-        dropout_phoneme_input = (
-            ((random.random() < self.dropout_phoneme_input_prob) and (not dropout_text_input))
-            if mode == 'train'
-            else False
-        )
+        dropout_phoneme_input = (random.random() < self.dropout_phoneme_input_prob) if mode == 'train' else False
+        if (dropout_phoneme_input and dropout_text_input):
+            # Only one of the two can be True, so choose randomly
+            dropout_phoneme_input = random.random() < 0.5
+            dropout_text_input = not dropout_phoneme_input
 
         # Prepare context tensors by combining text and audio context information
         context_tensors = self.prepare_context_tensors(
