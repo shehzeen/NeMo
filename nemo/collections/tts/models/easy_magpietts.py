@@ -1452,13 +1452,18 @@ class EasyMagpieTTSModel(ModelPT):
         if remaining_text_embedded is not None:
             # Pad remaining text to match audio sequence length by adding zeros on the right
             padding_len = audio_codes_input_embedded.size(1) - remaining_text_embedded.size(1)
-            padding_tensor = torch.zeros(
-                remaining_text_embedded.size(0),
-                padding_len,
-                remaining_text_embedded.size(2),
-                device=remaining_text_embedded.device,
-            )
-            remaining_text_embedded = torch.cat([remaining_text_embedded, padding_tensor], dim=1)
+            if padding_len > 0:
+                padding_tensor = torch.zeros(
+                    remaining_text_embedded.size(0),
+                    padding_len,
+                    remaining_text_embedded.size(2),
+                    device=remaining_text_embedded.device,
+                )
+                remaining_text_embedded = torch.cat([remaining_text_embedded, padding_tensor], dim=1)
+            else:
+                # Log Warning
+                print(f"Warning: Remaining text length {remaining_text_embedded.size(1)} is greater than audio codes input length {audio_codes_input_embedded.size(1)}")
+                remaining_text_embedded = remaining_text_embedded[:, : audio_codes_input_embedded.size(1), :]
             # Add text information to audio embeddings (element-wise addition)
             audio_codes_input_embedded = audio_codes_input_embedded + remaining_text_embedded
 
