@@ -24,7 +24,7 @@ from lhotse.dataset.collation import collate_matrices, collate_vectors
 from omegaconf import DictConfig
 from transformers import AutoTokenizer, T5Tokenizer
 
-from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer
+from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPABPETokenizer
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     beta_binomial_prior_distribution,
     normalize_volume,
@@ -41,7 +41,7 @@ def setup_tokenizers(all_tokenizers_config, mode='train'):
     for tokenizer_name in all_tokenizers_config:
         tokenizer_config = all_tokenizers_config[tokenizer_name]
         if tokenizer_config._target_ == 'AutoTokenizer':
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.pretrained_model)
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.pretrained_model, trust_remote_code=True)
         elif tokenizer_config._target_ == 'T5Tokenizer':
             tokenizer = T5Tokenizer.from_pretrained(tokenizer_config.pretrained_model)
         else:
@@ -411,7 +411,17 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
             token_len_list.append(text_len)
 
             if self.phoneme_tokenizer is not None:
-                phoneme_tokens = self.phoneme_tokenizer.encode(text_str)
+                # Use IPA text for IPABPETokenizer (required), otherwise use regular text_str
+                if isinstance(self.phoneme_tokenizer, IPABPETokenizer):
+                    if not cut.supervisions[0].has_custom("ipa"):
+                        raise ValueError(
+                            f"IPABPETokenizer requires 'ipa' field but it is not available in the cut. "
+                            f"Cut ID: {cut.id}, Text: {text_str}"
+                        )
+                    phoneme_text = cut.supervisions[0].ipa
+                else:
+                    phoneme_text = text_str
+                phoneme_tokens = self.phoneme_tokenizer.encode(phoneme_text)
                 phoneme_tokens = (
                     [self.phoneme_tokenizer.bos_token_id] + phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
                 )
