@@ -82,13 +82,6 @@ MAX_WORKERS = max(1, (os.cpu_count() or 4) - 1)
 
 # If True, skip writing if output shard exists (basic resume)
 SKIP_EXISTING_OUTPUT_SHARDS = False
-
-# Where to store IPA inside each cut:
-#   - supervision custom: recommended
-WRITE_TO_SUP_CUSTOM = True
-#   - optionally also store at cut["custom"]["ipa"] (commented code below)
-WRITE_TO_CUT_CUSTOM = False
-
 # -------------------------
 # IMPLEMENTATION
 # -------------------------
@@ -224,19 +217,7 @@ def add_ipa_to_cut(
             cached = espeak.text_to_ipa(text)
             cache.set(espeak.voice, text, cached)
 
-        if WRITE_TO_SUP_CUSTOM:
-            custom["ipa"] = cached
-
-    if WRITE_TO_CUT_CUSTOM:
-        # Optional: store IPA at cut-level too, e.g. first supervision's IPA
-        # (Uncomment if you really want it.)
-        cut_custom = cut.get("custom")
-        if cut_custom is None:
-            cut_custom = {}
-            cut["custom"] = cut_custom
-        if "ipa" not in cut_custom:
-            if sups and sups[0].get("custom", {}).get("ipa"):
-                cut_custom["ipa"] = sups[0]["custom"]["ipa"]
+        custom["ipa"] = cached
 
     return cut
 
