@@ -1097,6 +1097,39 @@ class JapanesePhonemeTokenizer(BaseTokenizer):
         return [self._token2id[p] for p in ps]
 
 
+class IPABPETokenizer:
+    """Simple IPA BPE tokenizer wrapper around HuggingFace tokenizers.
+
+    Args:
+        tokenizer_path: Path to the tokenizer.json file (or directory containing it).
+    """
+
+    def __init__(self, tokenizer_path: str):
+        import os
+
+        from tokenizers import Tokenizer
+
+        if os.path.isdir(tokenizer_path):
+            tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        else:
+            tokenizer_file = tokenizer_path
+
+        if not os.path.exists(tokenizer_file):
+            raise ValueError(f"Tokenizer file not found: {tokenizer_file}")
+
+        self._tokenizer = Tokenizer.from_file(tokenizer_file)
+        self.tokens = self._tokenizer.get_vocab()
+        self.pad = self.tokens.get("<pad>", None)
+
+    def encode(self, text: str) -> List[int]:
+        """Encode IPA text to token IDs."""
+        return self._tokenizer.encode(text).ids
+
+    def decode(self, tokens: List[int]) -> str:
+        """Decode token IDs back to IPA text."""
+        return self._tokenizer.decode(tokens)
+
+
 # TODO @xueyang: subclassing from `nemo/collections/common/tokenizers/tokenizer_spec.py::TokenizerSpec`, and/or
 #  adjust to reuse `nemo/collections/common/tokenizers/aggregate_tokenizer.py::AggregateTokenizer`
 class AggregatedTTSTokenizer:
@@ -1127,7 +1160,13 @@ class AggregatedTTSTokenizer:
                 _tokens = list(tokenizer.get_vocab().keys())
                 tokens.extend(_tokens)
                 num_tokens = len(_tokens)
-                tokenizer_pad_ids[tokenizer_name] = tokenizer.pad_token_id + tokenizer_offset
+                pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.unk_token_id
+                if pad_token_id is None:
+                    raise ValueError(
+                        f"Tokenizer '{tokenizer_name}' has no pad_token_id or unk_token_id. "
+                        "Please set one before using with AggregatedTTSTokenizer."
+                    )
+                tokenizer_pad_ids[tokenizer_name] = pad_token_id + tokenizer_offset
             else:
                 raise ValueError("Tokenizers must be either BaseTokenizer or HuggingFace PreTrainedTokenizerBase.")
             tokenizer_offset += num_tokens
@@ -1142,8 +1181,10 @@ class AggregatedTTSTokenizer:
         # Define aggregated token's pad value from the first tokenizer's pad value
         first_tokenizer = self.tokenizers[tokenizer_names[0]]
         self.first_tokenizer = first_tokenizer
-        if hasattr(first_tokenizer, "pad_token_id"):  # Defined in PreTrainedTokenizerBase subclasses
+        if hasattr(first_tokenizer, "pad_token_id") and first_tokenizer.pad_token_id is not None:
             self.pad = first_tokenizer.pad_token_id
+        elif hasattr(first_tokenizer, "unk_token_id") and first_tokenizer.unk_token_id is not None:
+            self.pad = first_tokenizer.unk_token_id
         elif hasattr(first_tokenizer, "pad"):  # Defined in BaseTokenizer subclasses
             self.pad = first_tokenizer.pad
         else:

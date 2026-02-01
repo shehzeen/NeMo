@@ -280,10 +280,19 @@ class EasyMagpieTTSModel(ModelPT):
         self._codec_model.freeze()  # Lightning does requires_grad = False and self.eval()
         self._codec_converter = codec_converter
 
+        # Audio embedding dimension - can be smaller than hidden_dim to reduce parameters
+        self.audio_embedding_dim = cfg.get('audio_embedding_dim', cfg.hidden_dim)
+
         audio_embeddings = []
         for _ in range(self.num_audio_codebooks * self.frame_stacking_factor):
-            audio_embeddings.append(nn.Embedding(self.num_all_tokens_per_codebook, cfg.embedding_dim))
+            audio_embeddings.append(nn.Embedding(self.num_all_tokens_per_codebook, self.audio_embedding_dim))
         self.audio_embeddings = nn.ModuleList(audio_embeddings)
+
+        # Projection from audio_embedding_dim to embedding_dim (Identity if same)
+        if self.audio_embedding_dim != cfg.embedding_dim:
+            self.audio_in_projection = nn.Linear(self.audio_embedding_dim, cfg.embedding_dim)
+        else:
+            self.audio_in_projection = nn.Identity()
 
         if self.phoneme_tokenizer is not None:
             phoneme_embeddings = []
@@ -299,6 +308,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
         self.decoder = hf_transformer.model
+        # self.decoder.to(torch.float32)
         self.lm_text_head = hf_transformer.lm_head
 
         self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
@@ -335,8 +345,14 @@ class EasyMagpieTTSModel(ModelPT):
                 special_vocab=special_vocab,
             )
 
+        # Projection from hidden_dim to audio_embedding_dim before final_proj (Identity if same)
+        if self.audio_embedding_dim != cfg.hidden_dim:
+            self.audio_out_projection = nn.Linear(cfg.hidden_dim, self.audio_embedding_dim)
+        else:
+            self.audio_out_projection = nn.Identity()
+
         self.final_proj = nn.Linear(
-            cfg.hidden_dim, self.num_audio_codebooks * self.num_all_tokens_per_codebook * self.frame_stacking_factor
+            self.audio_embedding_dim, self.num_audio_codebooks * self.num_all_tokens_per_codebook * self.frame_stacking_factor
         )
         self.cross_entropy_loss = nn.CrossEntropyLoss(reduction='none')
 
@@ -358,11 +374,16 @@ class EasyMagpieTTSModel(ModelPT):
                 max_length_causal_mask=self.num_audio_codebooks * self.frame_stacking_factor + 2,
                 use_learnable_pos_emb=True,
             )
+            # Projection from local_transformer_hidden_dim to audio_embedding_dim (Identity if same)
+            if self.audio_embedding_dim != local_transformer_hidden_dim:
+                self.local_transformer_audio_out_projection = nn.Linear(local_transformer_hidden_dim, self.audio_embedding_dim)
+            else:
+                self.local_transformer_audio_out_projection = nn.Identity()
             local_transformer_out_projections = []
             for _ in range(self.num_audio_codebooks * self.frame_stacking_factor):
                 # Have a separate projection layer for each codebook, to distinguish between them
                 local_transformer_out_projections.append(
-                    nn.Linear(local_transformer_hidden_dim, self.num_all_tokens_per_codebook)
+                    nn.Linear(self.audio_embedding_dim, self.num_all_tokens_per_codebook)
                 )
             self.local_transformer_out_projections = nn.ModuleList(local_transformer_out_projections)
 
@@ -496,6 +517,8 @@ class EasyMagpieTTSModel(ModelPT):
             else:
                 audio_embedding = audio_embedding + embedding
         audio_embedding = audio_embedding / audio_tokens.size(1)
+        # Project from audio_embedding_dim to embedding_dim
+        audio_embedding = self.audio_in_projection(audio_embedding)
         return audio_embedding
 
     def embed_phoneme_tokens(self, phoneme_tokens):
@@ -532,12 +555,14 @@ class EasyMagpieTTSModel(ModelPT):
         targets_offset_by_one: bool, if False, the target for index 0 is codebook 0, for index 1 is codebook 1, etc. (autoregressive)
                                      if True,  the target for index 1 is codebook 0, for index 2 is codebook 1, etc. (MaskGit)
         """
-        dec_out_all = dec_out.reshape(-1, dec_out.size(-1))  # (B*T', E)
+        dec_out_all = dec_out.reshape(-1, dec_out.size(-1))  # (B*T', hidden_dim)
         local_transformer_input = [dec_out_all]
         for codebook_num in range(audio_codes_target.size(1)):
             codes = audio_codes_target[:, codebook_num]  # (B, T')
             codes = codes.reshape(-1)  # (B*T',)
-            codebook_embedding = self.audio_embeddings[codebook_num](codes)  # (B*T', E)
+            codebook_embedding = self.audio_embeddings[codebook_num](codes)  # (B*T', audio_embedding_dim)
+            # Project from audio_embedding_dim to embedding_dim
+            codebook_embedding = self.audio_in_projection(codebook_embedding)
             local_transformer_input.append(codebook_embedding)
 
         local_transformer_input = torch.stack(local_transformer_input, dim=1)  # (B*T', C+1, E)
@@ -552,6 +577,8 @@ class EasyMagpieTTSModel(ModelPT):
         else:
             # for MaskGit the target for index **1** is codebook 0, for index 2 is codebook 1, etc.
             local_transformer_output = local_transformer_output[:, 1:, :]  # (B*T', C, E)
+        # Project from local_transformer_hidden_dim to audio_embedding_dim
+        local_transformer_output = self.local_transformer_audio_out_projection(local_transformer_output)
         all_code_logits = []
         for codebook_num in range(audio_codes_target.size(1)):
             # Using a separate projection layer for each codebook (to distinguish between them)
@@ -666,8 +693,12 @@ class EasyMagpieTTSModel(ModelPT):
                 local_transformer_input.size(0), local_transformer_input.size(1), device=local_transformer_input.device
             )
             local_transformer_output = self.local_transformer(local_transformer_input, _mask)['output']  # (B, T, 128)
-            codebook_logits = self.local_transformer_out_projections[codebook_num](
+            # Project from local_transformer_hidden_dim to audio_embedding_dim
+            local_transformer_output_projected = self.local_transformer_audio_out_projection(
                 local_transformer_output[:, -1, :]
+            )
+            codebook_logits = self.local_transformer_out_projections[codebook_num](
+                local_transformer_output_projected
             )  # (B, num_all_tokens_per_codebook)
             if use_cfg:
                 actual_batch_size = codebook_logits.size(0) // 2
@@ -697,13 +728,15 @@ class EasyMagpieTTSModel(ModelPT):
             all_preds.append(codebook_preds)
             next_local_transformer_input = self.audio_embeddings[codebook_num](codebook_preds.squeeze(-1)).unsqueeze(
                 1
-            )  # (B, 1, 128)
+            )  # (B, 1, audio_embedding_dim)
+            # Project from audio_embedding_dim to embedding_dim, then to local_transformer_hidden_dim
+            next_local_transformer_input = self.audio_in_projection(next_local_transformer_input)
             next_local_transformer_input = self.local_transformer_in_projection(
                 next_local_transformer_input
-            )  # (B, 1, 128)
+            )  # (B, 1, local_transformer_hidden_dim)
             local_transformer_input = torch.cat(
                 [local_transformer_input, next_local_transformer_input], dim=1
-            )  # (B, T+1, 128)
+            )  # (B, T+1, local_transformer_hidden_dim)
 
         all_preds = torch.cat(all_preds, dim=1).long()  # (B, num_codebooks)
         if use_cfg:
@@ -897,7 +930,8 @@ class EasyMagpieTTSModel(ModelPT):
             dest_cols = offset.unsqueeze(1) + t_idx  # (B,Ti)
 
             # Assign embedding_i to the correct positions in joined
-            joined[batch_rows.expand_as(mask)[mask], dest_cols[mask]] = embedding_i[mask]
+            # Ensure dtype matches to avoid errors during mixed-precision training
+            joined[batch_rows.expand_as(mask)[mask], dest_cols[mask]] = embedding_i[mask].to(joined.dtype)
 
             # move cursor past this segment
             offset += len_i
@@ -1330,13 +1364,11 @@ class EasyMagpieTTSModel(ModelPT):
         # Determine whether to apply text/phoneme dropout for regularization during training
         # Text dropout: randomly drop text input to encourage the model to rely on other signals
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
-        # Phoneme dropout: randomly drop phoneme input, but only if text is not already dropped
-        # This ensures we don't drop both simultaneously
-        dropout_phoneme_input = (
-            ((random.random() < self.dropout_phoneme_input_prob) and (not dropout_text_input))
-            if mode == 'train'
-            else False
-        )
+        dropout_phoneme_input = (random.random() < self.dropout_phoneme_input_prob) if mode == 'train' else False
+        if (dropout_phoneme_input and dropout_text_input):
+            # Only one of the two can be True, so choose randomly
+            dropout_phoneme_input = random.random() < 0.5
+            dropout_text_input = not dropout_phoneme_input
 
         # Prepare context tensors by combining text and audio context information
         context_tensors = self.prepare_context_tensors(
@@ -1420,13 +1452,18 @@ class EasyMagpieTTSModel(ModelPT):
         if remaining_text_embedded is not None:
             # Pad remaining text to match audio sequence length by adding zeros on the right
             padding_len = audio_codes_input_embedded.size(1) - remaining_text_embedded.size(1)
-            padding_tensor = torch.zeros(
-                remaining_text_embedded.size(0),
-                padding_len,
-                remaining_text_embedded.size(2),
-                device=remaining_text_embedded.device,
-            )
-            remaining_text_embedded = torch.cat([remaining_text_embedded, padding_tensor], dim=1)
+            if padding_len > 0:
+                padding_tensor = torch.zeros(
+                    remaining_text_embedded.size(0),
+                    padding_len,
+                    remaining_text_embedded.size(2),
+                    device=remaining_text_embedded.device,
+                )
+                remaining_text_embedded = torch.cat([remaining_text_embedded, padding_tensor], dim=1)
+            else:
+                # Log Warning
+                print(f"Warning: Remaining text length {remaining_text_embedded.size(1)} is greater than audio codes input length {audio_codes_input_embedded.size(1)}")
+                remaining_text_embedded = remaining_text_embedded[:, : audio_codes_input_embedded.size(1), :]
             # Add text information to audio embeddings (element-wise addition)
             audio_codes_input_embedded = audio_codes_input_embedded + remaining_text_embedded
 
@@ -1487,7 +1524,9 @@ class EasyMagpieTTSModel(ModelPT):
         )
 
         # Project embeddings to logits for each codebook
-        logits = self.final_proj(pred_embeddings)  # (B, T', num_codebooks * num_tokens_per_codebook)
+        # First project from hidden_dim to audio_embedding_dim, then to logits
+        pred_embeddings_audio = self.audio_out_projection(pred_embeddings)
+        logits = self.final_proj(pred_embeddings_audio)  # (B, T', num_codebooks * num_tokens_per_codebook)
 
         # Compute the main codebook prediction loss
         codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
@@ -1553,6 +1592,7 @@ class EasyMagpieTTSModel(ModelPT):
 
     def training_step(self, batch, batch_idx):
         # Extract inputs from batch and pass explicitly to process_batch
+        # import ipdb; ipdb.set_trace()
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
@@ -1993,8 +2033,10 @@ class EasyMagpieTTSModel(ModelPT):
                 if idx % 20 == 0:
                     print(f"Decoding timestep {idx}")
 
+                # Project from hidden_dim to audio_embedding_dim, then to logits
+                last_hidden_audio = self.audio_out_projection(last_hidden[:, -1, :])
                 all_code_logits_t = self.final_proj(
-                    last_hidden[:, -1, :]
+                    last_hidden_audio
                 )  # (B, num_codebooks * num_tokens_per_codebook)
 
                 if self.phoneme_tokenizer is not None:
