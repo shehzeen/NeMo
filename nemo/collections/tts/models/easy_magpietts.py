@@ -328,7 +328,9 @@ class EasyMagpieTTSModel(ModelPT):
             nemotron_model = NemotronHForCausalLM(nemotron_config)
             self.decoder = nemotron_model.backbone
             self.lm_text_head = nemotron_model.lm_head
-            logging.info(f"NemotronH config: {nemotron_config.num_hidden_layers} layers, pattern={nemotron_config.hybrid_override_pattern[:20]}...")
+            logging.info(
+                f"NemotronH config: {nemotron_config.num_hidden_layers} layers, pattern={nemotron_config.hybrid_override_pattern[:20]}..."
+            )
 
         else:
             raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Supported: 'huggingface', 'nemotron_h'")
@@ -2031,10 +2033,10 @@ class EasyMagpieTTSModel(ModelPT):
                 ]  # (2B, T_min, E)
             else:
                 first_inference_input = context_plus_audio_embedded[:, :min_context_len, :]  # (B, T_min, E)
-            
+
             # Initialize cache_position for tracking sequence position (needed for NemotronH)
             cache_position = torch.arange(min_context_len, device=context_embedding.device)
-            
+
             # First forward pass to get the initial hidden state and past key values
             transformer_out = self.forward(
                 inputs_embeds=first_inference_input,
@@ -2047,7 +2049,7 @@ class EasyMagpieTTSModel(ModelPT):
             time_to_first_prediction = time.time() - start_time
             last_hidden = transformer_out.last_hidden_state  # (B, T_total, E)
             past_kv = transformer_out.past_key_values
-            
+
             # Track the current sequence length for cache_position updates
             current_cache_seq_len = min_context_len
 
@@ -2244,7 +2246,7 @@ class EasyMagpieTTSModel(ModelPT):
 
                 # Update cache_position for current step (needed for NemotronH cached forward)
                 cache_position = torch.tensor([current_cache_seq_len], device=context_embedding.device)
-                
+
                 transformer_out = self.forward(
                     inputs_embeds=next_input,
                     attention_mask=None,
@@ -2254,7 +2256,7 @@ class EasyMagpieTTSModel(ModelPT):
                 )
                 last_hidden = transformer_out.last_hidden_state
                 past_kv = transformer_out.past_key_values
-                
+
                 # Increment sequence length for next iteration
                 current_cache_seq_len += 1
                 if len(end_indices) == audio_codes_next.size(0):
