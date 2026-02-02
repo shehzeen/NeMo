@@ -15,3 +15,13 @@
 import nemo.collections.tts.modules.adapters
 import nemo.collections.tts.modules.ffn_modules
 import nemo.collections.tts.modules.moe_modules
+from nemo.collections.tts.modules.nemotron_h_decoder import (
+    HybridMambaAttentionDynamicCache,
+    NemotronHConfig,
+    NemotronHForCausalLM,
+    NemotronHModel,
+)
+from nemo.collections.tts.modules.tacotron2 import Decoder as Taco2Decoder
+from nemo.collections.tts.modules.tacotron2 import Encoder as Taco2Encoder
+from nemo.collections.tts.modules.tacotron2 import Postnet as Taco2Postnet
+from nemo.collections.tts.modules.waveglow import WaveGlowModule

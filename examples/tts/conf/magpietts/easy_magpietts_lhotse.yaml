@@ -11,7 +11,47 @@ quadratic_duration: 20
 
 model:
   use_lhotse: true
+  
+  # Decoder backend selection
+  # Options: "huggingface" (default), "nemotron_h"
+  decoder_type: "huggingface"
+  
+  # HuggingFace backend config (used when decoder_type: "huggingface")
   transformer_hf_backend: "Qwen/Qwen2.5-1.5B"
+  
+  # NemotronH config (used when decoder_type: "nemotron_h")
+  # This is a hybrid Mamba2/Attention model. Layer types are specified via hybrid_override_pattern:
+  # 'M' = Mamba2 layer, '*' = Attention layer, '-' = MLP layer, 'E' = MoE layer
+  nemotron_h_config:
+    hidden_size: 1536  # Should match embedding_dim
+    num_hidden_layers: 24
+    vocab_size: 131072
+    # Attention config
+    num_attention_heads: 12
+    num_key_value_heads: 4
+    attention_dropout: 0.0
+    attention_bias: false
+    max_position_embeddings: 8192
+    # Mamba config
+    mamba_num_heads: 64
+    mamba_head_dim: 24
+    ssm_state_size: 128
+    conv_kernel: 4
+    n_groups: 8
+    chunk_size: 256
+    mamba_hidden_act: "silu"
+    use_conv_bias: true
+    use_bias: false
+    # MLP config
+    intermediate_size: 4096
+    mlp_hidden_act: "silu"
+    mlp_bias: false
+    # Layer pattern: alternating Mamba and Attention
+    hybrid_override_pattern: "M*M*M*M*M*M*M*M*M*M*M*M*"
+    # Normalization
+    layer_norm_epsilon: 1e-5
+    residual_in_fp32: true
+  
   use_text_conditioning_encoder: true # If true, distilbert will be used to encode context_text if provided.
   context_duration_min: 5.0
   context_duration_max: 5.0
