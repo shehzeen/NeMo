@@ -13,6 +13,12 @@
 # limitations under the License.
 
 import nemo.collections.tts.modules.adapters
+from nemo.collections.tts.modules.nemotron_h_decoder import (
+    HybridMambaAttentionDynamicCache,
+    NemotronHConfig,
+    NemotronHForCausalLM,
+    NemotronHModel,
+)
 from nemo.collections.tts.modules.tacotron2 import Decoder as Taco2Decoder
 from nemo.collections.tts.modules.tacotron2 import Encoder as Taco2Encoder
 from nemo.collections.tts.modules.tacotron2 import Postnet as Taco2Postnet

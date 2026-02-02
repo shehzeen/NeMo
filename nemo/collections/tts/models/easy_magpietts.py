@@ -301,15 +301,37 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_embeddings = nn.ModuleList(phoneme_embeddings)
             self.phoneme_final_proj = nn.Linear(cfg.hidden_dim, self.phoneme_vocab_size * self.phoneme_stacking_factor)
 
-        self.transformer_backend_config = AutoConfig.from_pretrained(
-            cfg.transformer_hf_backend,
-            trust_remote_code=True,
-        )
+        # Decoder backend selection - supports HuggingFace models or NemotronH
+        self.decoder_type = cfg.get('decoder_type', 'huggingface')  # backward compatible default
+        logging.info(f"Using decoder type: {self.decoder_type}")
 
-        hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
-        self.decoder = hf_transformer.model
-        # self.decoder.to(torch.float32)
-        self.lm_text_head = hf_transformer.lm_head
+        if self.decoder_type == 'huggingface':
+            # Existing HuggingFace path
+            self.transformer_backend_config = AutoConfig.from_pretrained(
+                cfg.transformer_hf_backend,
+                trust_remote_code=True,
+            )
+            hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
+            self.decoder = hf_transformer.model
+            self.lm_text_head = hf_transformer.lm_head
+
+        elif self.decoder_type == 'nemotron_h':
+            # NemotronH hybrid Mamba2/Attention backend
+            from nemo.collections.tts.modules.nemotron_h_decoder import NemotronHConfig, NemotronHForCausalLM
+
+            # Build config from YAML parameters
+            nemotron_h_config_dict = dict(cfg.get('nemotron_h_config', {}))
+            # Ensure hidden_size matches embedding_dim for compatibility
+            if 'hidden_size' not in nemotron_h_config_dict:
+                nemotron_h_config_dict['hidden_size'] = cfg.embedding_dim
+            nemotron_config = NemotronHConfig(**nemotron_h_config_dict)
+            nemotron_model = NemotronHForCausalLM(nemotron_config)
+            self.decoder = nemotron_model.backbone
+            self.lm_text_head = nemotron_model.lm_head
+            logging.info(f"NemotronH config: {nemotron_config.num_hidden_layers} layers, pattern={nemotron_config.hybrid_override_pattern[:20]}...")
+
+        else:
+            raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Supported: 'huggingface', 'nemotron_h'")
 
         self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
         self.decoder.set_input_embeddings(self.text_embedding)
@@ -647,13 +669,23 @@ class EasyMagpieTTSModel(ModelPT):
         total_phoneme_loss = total_phoneme_loss / self.phoneme_stacking_factor
         return total_phoneme_loss, loss_mask
 
-    def forward(self, inputs_embeds, attention_mask, use_cache=False, past_key_values=None):
-        backend_out = self.decoder(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            use_cache=use_cache,
-            past_key_values=past_key_values,
-        )
+    def forward(self, inputs_embeds, attention_mask, use_cache=False, past_key_values=None, cache_position=None):
+        # Only pass cache_position for NemotronH (HF transformers may not accept it)
+        if self.decoder_type == 'nemotron_h':
+            backend_out = self.decoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+            )
+        else:
+            backend_out = self.decoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+                past_key_values=past_key_values,
+            )
         # hidden_states = backend_out.last_hidden_state  # (B, T_total, H)
         return backend_out
 
@@ -1999,17 +2031,25 @@ class EasyMagpieTTSModel(ModelPT):
                 ]  # (2B, T_min, E)
             else:
                 first_inference_input = context_plus_audio_embedded[:, :min_context_len, :]  # (B, T_min, E)
+            
+            # Initialize cache_position for tracking sequence position (needed for NemotronH)
+            cache_position = torch.arange(min_context_len, device=context_embedding.device)
+            
             # First forward pass to get the initial hidden state and past key values
             transformer_out = self.forward(
                 inputs_embeds=first_inference_input,
                 attention_mask=None,
                 use_cache=True,
                 past_key_values=None,  # No past key values for the first step
+                cache_position=cache_position,
             )
 
             time_to_first_prediction = time.time() - start_time
             last_hidden = transformer_out.last_hidden_state  # (B, T_total, E)
             past_kv = transformer_out.past_key_values
+            
+            # Track the current sequence length for cache_position updates
+            current_cache_seq_len = min_context_len
 
             all_predictions = []
             end_indices = {}
@@ -2034,7 +2074,7 @@ class EasyMagpieTTSModel(ModelPT):
                 current_text_positions += 1
                 if self.phoneme_tokenizer is not None:
                     current_phoneme_positions += 1
-                    print("current_phoneme_positions", current_phoneme_positions)
+                    # print("current_phoneme_positions", current_phoneme_positions)
                 if idx % 20 == 0:
                     print(f"Decoding timestep {idx}")
 
@@ -2098,15 +2138,15 @@ class EasyMagpieTTSModel(ModelPT):
                         device=context_embedding.device,
                     ).long()  # (B, phoneme_stacking_factor)
                     use_bos_phoneme = (current_phoneme_positions == 0).unsqueeze(1).long()
-                    print("use_bos_phoneme", use_bos_phoneme)
+                    # print("use_bos_phoneme", use_bos_phoneme)
                     pred_phoneme_tokens = (
                         use_bos_phoneme * phoneme_bos_tensor + (1 - use_bos_phoneme) * pred_phoneme_tokens
                     ).long()  # (B, phoneme_stacking_factor)
 
-                    print("pred_phoneme_tokens", pred_phoneme_tokens)
+                    # print("pred_phoneme_tokens", pred_phoneme_tokens)
                     gt_phoneme_idx = min(idx, gt_phoneme_tokens.size(2) - 1)
                     gt_phoneme_tokens_current = gt_phoneme_tokens[:, :, gt_phoneme_idx]  # (B, phoneme_stacking_factor)
-                    print("gt_phoneme_tokens_current", gt_phoneme_tokens_current)
+                    # print("gt_phoneme_tokens_current", gt_phoneme_tokens_current)
 
                     input_phoneme_tokens_current = (
                         gt_phoneme_tokens_current if phoneme_input_type == 'gt' else pred_phoneme_tokens
@@ -2126,7 +2166,7 @@ class EasyMagpieTTSModel(ModelPT):
                     phoneme_channel_input_t = (
                         use_phoneme_input * input_phoneme_embedding + (1 - use_phoneme_input) * zero_phoneme_embedding
                     )
-                    print("use_phoneme_input", use_phoneme_input)
+                    # print("use_phoneme_input", use_phoneme_input)
                     for item_idx in range(actual_batch_size):
                         if use_phoneme_input[item_idx, 0, 0] > 0:
                             for phoneme_channel_idx in range(self.phoneme_stacking_factor):
@@ -2202,14 +2242,21 @@ class EasyMagpieTTSModel(ModelPT):
                     if use_cfg:
                         next_input = torch.cat([next_input, new_emb_unconditional], dim=0)  # (2B, 1, E)
 
+                # Update cache_position for current step (needed for NemotronH cached forward)
+                cache_position = torch.tensor([current_cache_seq_len], device=context_embedding.device)
+                
                 transformer_out = self.forward(
                     inputs_embeds=next_input,
                     attention_mask=None,
                     use_cache=True,
                     past_key_values=past_kv,
+                    cache_position=cache_position,
                 )
                 last_hidden = transformer_out.last_hidden_state
                 past_kv = transformer_out.past_key_values
+                
+                # Increment sequence length for next iteration
+                current_cache_seq_len += 1
                 if len(end_indices) == audio_codes_next.size(0):
                     print("All items finished at timestep {}".format(idx))
                     break
