@@ -110,7 +110,7 @@ class AudioCodecModel(ModelPT):
         self.audio_decoder = instantiate(cfg.audio_decoder)
 
         # Discriminator setup
-        # self.discriminator = instantiate(cfg.discriminator)
+        self.discriminator = instantiate(cfg.discriminator)
 
         # Mel loss setup
         loss_resolutions = cfg.loss_resolutions
@@ -182,16 +182,10 @@ class AudioCodecModel(ModelPT):
             self.speaker_encoder = ResNetSpeakerEncoder()
             # load pretrained model
             # self.speaker_encoder.load_checkpoint("https://github.com/coqui-ai/TTS/releases/download/speaker_encoder_model/model_se.pth.tar")
-            import os
-
-            # TODO: revert this
-            if os.path.exists("/gitrepos/checkpoints/pytorch_model.bin"):
-                self.speaker_encoder.load_checkpoint("/gitrepos/checkpoints/pytorch_model.bin", strict=False)
-            else:
-                self.speaker_encoder.load_checkpoint(
-                    "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/pytorch_model.bin",
-                    strict=False,
-                )
+            self.speaker_encoder.load_checkpoint(
+                "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/pytorch_model.bin",
+                strict=False,
+            )
             # freeze the pretrained speaker encoder
             self.speaker_encoder.freeze()
             logging.info("Speaker encoder loaded and frozen !!")
