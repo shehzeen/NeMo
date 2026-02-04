@@ -1950,7 +1950,7 @@ class EasyMagpieTTSModel(ModelPT):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sample audio codes from logits using either local transformer or parallel sampling.
-        
+
         Returns:
             audio_codes_next: Sampled codes with temperature/topk (B, num_codebooks)
             all_codes_next_argmax: Argmax sampled codes for EOS detection (B, num_codebooks)
@@ -1972,9 +1972,7 @@ class EasyMagpieTTSModel(ModelPT):
             all_codes_next_argmax = audio_codes_next
         else:
             # Parallel sampling from all codebook logits
-            audio_codes_next = self.sample_codes_from_logits(
-                all_code_logits_t, temperature=temperature, topk=topk
-            )
+            audio_codes_next = self.sample_codes_from_logits(all_code_logits_t, temperature=temperature, topk=topk)
             # Argmax sampling for reliable EOS detection
             all_codes_next_argmax = self.sample_codes_from_logits(all_code_logits_t, temperature=0.01)
 
@@ -1995,7 +1993,7 @@ class EasyMagpieTTSModel(ModelPT):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Process phoneme predictions for the current timestep.
-        
+
         Returns:
             pred_phoneme_tokens: Predicted phoneme tokens (B, phoneme_stacking_factor)
             gt_phoneme_tokens_current: GT phoneme tokens for current timestep (B, phoneme_stacking_factor)
@@ -2034,9 +2032,7 @@ class EasyMagpieTTSModel(ModelPT):
         gt_phoneme_tokens_current = gt_phoneme_tokens[:, :, gt_phoneme_idx]
 
         # Select input tokens (GT or predicted) and embed
-        input_phoneme_tokens_current = (
-            gt_phoneme_tokens_current if phoneme_input_type == 'gt' else pred_phoneme_tokens
-        )
+        input_phoneme_tokens_current = gt_phoneme_tokens_current if phoneme_input_type == 'gt' else pred_phoneme_tokens
         input_phoneme_embedding = self.embed_phoneme_tokens(input_phoneme_tokens_current.unsqueeze(2))
 
         return pred_phoneme_tokens, gt_phoneme_tokens_current, input_phoneme_tokens_current, input_phoneme_embedding
@@ -2051,7 +2047,7 @@ class EasyMagpieTTSModel(ModelPT):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the phoneme channel input embedding with masking.
-        
+
         Returns:
             phoneme_channel_input_t: Masked phoneme embedding (B, 1, E)
             use_phoneme_input: Mask indicating which items should use phoneme input (B, 1, 1)
@@ -2061,9 +2057,7 @@ class EasyMagpieTTSModel(ModelPT):
         use_phoneme_input = use_phoneme_input.unsqueeze(1).unsqueeze(2).float()
 
         # Create zero embedding for items not using phoneme input
-        zero_phoneme_embedding = torch.zeros(
-            actual_batch_size, 1, self.cfg.embedding_dim, device=device
-        )
+        zero_phoneme_embedding = torch.zeros(actual_batch_size, 1, self.cfg.embedding_dim, device=device)
 
         # Combine: use phoneme embedding where active, zero otherwise
         phoneme_channel_input_t = (
@@ -2088,7 +2082,7 @@ class EasyMagpieTTSModel(ModelPT):
     ) -> torch.Tensor:
         """
         Prepare the input embedding for the next decoder step.
-        
+
         Handles:
         - Mixing context embeddings with generated audio embeddings based on context completeness
         - Adding streaming text embeddings if in streaming mode
@@ -2487,9 +2481,7 @@ class EasyMagpieTTSModel(ModelPT):
 
             # Calculate predicted lengths, accounting for context offset
             pred_codes_start_indices = context_plus_audio_lens - min_context_len
-            predicted_lens = [
-                end_indices.get(i, max_decoder_steps) for i in range(actual_batch_size)
-            ]
+            predicted_lens = [end_indices.get(i, max_decoder_steps) for i in range(actual_batch_size)]
             predicted_codes_lens = torch.tensor(predicted_lens, device=device).long()
             predicted_codes_lens = predicted_codes_lens - pred_codes_start_indices
 
