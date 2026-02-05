@@ -319,21 +319,24 @@ class MagpieInferenceRunner:
 
         for batch_idx, batch in enumerate(dataloader):
             logging.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
-            batch_cuda = self._batch_to_cuda(batch)
-
-            predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens, rtf_metrics = self.model.infer_batch(
-                batch_cuda,
+            batch = self._batch_to_cuda(batch)
+            output = self.model.infer_batch(
+                batch,
                 max_decoder_steps=self.config.model_inference_parameters.max_decoder_steps,
                 temperature=self.config.model_inference_parameters.temperature,
                 topk=self.config.model_inference_parameters.topk,
-                use_local_transformer_for_inference=self.config.use_local_transformer,
-                maskgit_n_steps=self.config.maskgit_n_steps,
                 use_cfg=self.config.use_cfg,
                 cfg_scale=self.config.model_inference_parameters.cfg_scale,
+                use_local_transformer_for_inference=self.config.use_local_transformer,
                 phoneme_input_type=self.config.phoneme_input_type,
                 phoneme_sampling_method=phoneme_sampling_method,
-                dropout_text_input=self.config.dropout_text_input,
+                force_dropout_text=self.config.dropout_text_input,
             )
+            predicted_audio = output.predicted_audio
+            predicted_audio_lens = output.predicted_audio_lens
+            predicted_codes = output.predicted_codes
+            predicted_codes_lens = output.predicted_codes_lens
+            rtf_metrics = output.rtf_metrics
 
             all_rtf_metrics.append(rtf_metrics)
             logging.info(f"Output shape: {predicted_audio.size()}")
@@ -342,7 +345,8 @@ class MagpieInferenceRunner:
                 audio_len = predicted_audio_lens[idx].item()
                 audio_np = predicted_audio[idx].float().detach().cpu().numpy()[:audio_len]
                 audio_path = os.path.join(output_dir, f"predicted_audio_{item_idx}.wav")
-                sf.write(audio_path, audio_np, self.model.sample_rate)
+                sample_rate = getattr(self.model, "output_sample_rate", self.model.sample_rate)
+                sf.write(audio_path, audio_np, sample_rate)
                 generated_audio_paths.append(audio_path)
 
                 if save_context_audio and item_idx < len(manifest_records):
