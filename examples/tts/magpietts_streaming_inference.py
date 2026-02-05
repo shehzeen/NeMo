@@ -141,6 +141,7 @@ def load_audio(audio_path: str, target_sample_rate: int) -> torch.Tensor:
     # Resample if needed
     if sr != target_sample_rate:
         import librosa
+
         audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sample_rate)
 
     return torch.from_numpy(audio).unsqueeze(0)  # (1, num_samples)
@@ -241,9 +242,7 @@ def run_streaming_inference(
     context_audio_lens = context_audio_lens.to(device)
 
     with torch.inference_mode():
-        context_audio_codes, context_audio_codes_lens = model.audio_to_codes(
-            context_audio, context_audio_lens
-        )
+        context_audio_codes, context_audio_codes_lens = model.audio_to_codes(context_audio, context_audio_lens)
 
     # Tokenize context text
     # Use the text conditioning tokenizer
@@ -357,8 +356,10 @@ def run_streaming_inference(
                 num_phoneme_frames += 1
 
         if verbose and (i + 1) % 10 == 0:
-            phase = "prompt" if audio_codes is None and phoneme_tokens is None else (
-                "phoneme-only" if audio_codes is None else "audio"
+            phase = (
+                "prompt"
+                if audio_codes is None and phoneme_tokens is None
+                else ("phoneme-only" if audio_codes is None else "audio")
             )
             logging.info(
                 f"Processed {i + 1}/{len(text_tokens)} text tokens (phase: {phase}), "
@@ -373,7 +374,9 @@ def run_streaming_inference(
     # Continue generating until finished (text has ended)
     continuation_steps = 0
     while not state.finished and continuation_steps < max_steps:
-        state, audio_codes, phoneme_tokens = model.streaming_step(state, text_tokens=None, force_dropout_text=force_dropout_text)
+        state, audio_codes, phoneme_tokens = model.streaming_step(
+            state, text_tokens=None, force_dropout_text=force_dropout_text
+        )
 
         if audio_codes is not None:
             num_audio_frames += 1
@@ -494,7 +497,7 @@ def run_batched_streaming_inference(
     for i in range(batch_size):
         codes = context_audio_codes_list[i]
         codes_len = context_audio_codes_lens_list[i]
-        context_audio_codes[i, :, :codes.size(-1)] = codes[0]
+        context_audio_codes[i, :, : codes.size(-1)] = codes[0]
         context_audio_codes_lens[i] = codes_len[0]
 
     # Tokenize context texts
@@ -510,7 +513,7 @@ def run_batched_streaming_inference(
     context_text_tokens_lens = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     for i, tokens in enumerate(context_text_tokens_list):
-        context_text_tokens[i, :len(tokens)] = torch.tensor(tokens, dtype=torch.long, device=device)
+        context_text_tokens[i, : len(tokens)] = torch.tensor(tokens, dtype=torch.long, device=device)
         context_text_tokens_lens[i] = len(tokens)
 
     # Tokenize main texts
@@ -543,7 +546,7 @@ def run_batched_streaming_inference(
         gt_phoneme_tokens = torch.zeros(batch_size, max_phoneme_len, dtype=torch.long, device=device)
         gt_phoneme_tokens_lens = torch.zeros(batch_size, dtype=torch.long, device=device)
         for i, tokens in enumerate(phoneme_tokens_lists):
-            gt_phoneme_tokens[i, :len(tokens)] = torch.tensor(tokens, dtype=torch.long, device=device)
+            gt_phoneme_tokens[i, : len(tokens)] = torch.tensor(tokens, dtype=torch.long, device=device)
             gt_phoneme_tokens_lens[i] = len(tokens)
 
     phoneme_input_type = 'gt' if use_gt_phonemes else 'pred'
@@ -625,9 +628,13 @@ def run_batched_streaming_inference(
         all_text_done = text_finished_mask.all() and not in_context_phase.any()
 
         if all_text_done:
-            state, audio_codes, phoneme_tokens = model.streaming_step(state, text_tokens=None, force_dropout_text=force_dropout_text)
+            state, audio_codes, phoneme_tokens = model.streaming_step(
+                state, text_tokens=None, force_dropout_text=force_dropout_text
+            )
         else:
-            state, audio_codes, phoneme_tokens = model.streaming_step(state, text_tokens=text_tokens_batch, force_dropout_text=force_dropout_text)
+            state, audio_codes, phoneme_tokens = model.streaming_step(
+                state, text_tokens=text_tokens_batch, force_dropout_text=force_dropout_text
+            )
 
         if audio_codes is not None:
             num_audio_frames += 1
@@ -712,8 +719,7 @@ def main():
         type=str,
         nargs='+',
         required=True,
-        help='Path(s) to context audio file(s) for speaker cloning. '
-             'Multiple files enable batched inference.',
+        help='Path(s) to context audio file(s) for speaker cloning. ' 'Multiple files enable batched inference.',
     )
     input_group.add_argument(
         '--context_text',
@@ -721,7 +727,7 @@ def main():
         nargs='+',
         default=["[NO TEXT CONTEXT]"],
         help='Context text(s) for speaker conditioning. Provide one per context audio, '
-             'or a single value to use for all. (default: "[NO TEXT CONTEXT]")',
+        'or a single value to use for all. (default: "[NO TEXT CONTEXT]")',
     )
     input_group.add_argument(
         '--context_duration',
@@ -729,8 +735,8 @@ def main():
         nargs='+',
         default=[5.0],
         help='Target duration(s) for context audio in seconds. Provide one per context audio, '
-             'or a single value to use for all. If audio is longer, '
-             'first N seconds are used. If shorter, audio is repeated. (default: 5.0)',
+        'or a single value to use for all. If audio is longer, '
+        'first N seconds are used. If shorter, audio is repeated. (default: 5.0)',
     )
     input_group.add_argument(
         '--text',
@@ -745,13 +751,13 @@ def main():
         nargs='+',
         default=None,
         help='Phoneme text(s) for GT phoneme conditioning. If not provided, uses --text. '
-             'Provide one per context audio for batched inference.',
+        'Provide one per context audio for batched inference.',
     )
     input_group.add_argument(
         '--use_gt_phonemes',
         action='store_true',
         help='Use ground-truth phonemes as decoder input (teacher forcing). '
-             'If not set, uses model-predicted phonemes.',
+        'If not set, uses model-predicted phonemes.',
     )
 
     # Output arguments
@@ -851,13 +857,17 @@ def main():
     if len(context_texts) == 1 and batch_size > 1:
         context_texts = context_texts * batch_size
     elif len(context_texts) != batch_size:
-        parser.error(f"Number of context_texts ({len(context_texts)}) must match number of context_audios ({batch_size}) or be 1")
+        parser.error(
+            f"Number of context_texts ({len(context_texts)}) must match number of context_audios ({batch_size}) or be 1"
+        )
 
     context_durations = args.context_duration
     if len(context_durations) == 1 and batch_size > 1:
         context_durations = context_durations * batch_size
     elif len(context_durations) != batch_size:
-        parser.error(f"Number of context_durations ({len(context_durations)}) must match number of context_audios ({batch_size}) or be 1")
+        parser.error(
+            f"Number of context_durations ({len(context_durations)}) must match number of context_audios ({batch_size}) or be 1"
+        )
 
     texts = args.text
     if len(texts) == 1 and batch_size > 1:
@@ -872,7 +882,9 @@ def main():
     elif len(phoneme_texts) == 1 and batch_size > 1:
         phoneme_texts = phoneme_texts * batch_size
     elif len(phoneme_texts) != batch_size:
-        parser.error(f"Number of phoneme_texts ({len(phoneme_texts)}) must match number of context_audios ({batch_size}) or be 1")
+        parser.error(
+            f"Number of phoneme_texts ({len(phoneme_texts)}) must match number of context_audios ({batch_size}) or be 1"
+        )
 
     # Load and process context audios
     context_audios = []
@@ -925,14 +937,14 @@ def main():
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        audio_np = output.audio[0, :output.audio_len[0].item()].cpu().numpy()
+        audio_np = output.audio[0, : output.audio_len[0].item()].cpu().numpy()
         sf.write(args.output_path, audio_np, model.output_sample_rate)
         logging.info(f"Output saved to: {args.output_path}")
 
         # Save decoded context audio for sanity check
         output_base, output_ext = os.path.splitext(args.output_path)
         context_output_path = f"{output_base}_context_decoded{output_ext}"
-        context_audio_np = context_audio_decoded[0, :context_audio_decoded_lens[0].item()].cpu().numpy()
+        context_audio_np = context_audio_decoded[0, : context_audio_decoded_lens[0].item()].cpu().numpy()
         sf.write(context_output_path, context_audio_np, model.output_sample_rate)
 
         logging.info(f"Context audio (decoded from codes) saved to: {context_output_path}")
@@ -989,7 +1001,7 @@ def main():
 
         for i in range(batch_size):
             output_path_i = f"{output_base}_{i}{output_ext}"
-            audio_np = output.audio[i, :output.audio_len[i].item()].cpu().numpy()
+            audio_np = output.audio[i, : output.audio_len[i].item()].cpu().numpy()
             sf.write(output_path_i, audio_np, model.output_sample_rate)
             audio_duration_i = output.audio_len[i].item() / model.output_sample_rate
             logging.info(f"Output {i+1}/{batch_size} saved to: {output_path_i} (duration: {audio_duration_i:.2f}s)")
