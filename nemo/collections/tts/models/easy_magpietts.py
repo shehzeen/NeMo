@@ -15,7 +15,7 @@ import random
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import wandb
@@ -69,38 +69,6 @@ class TrainingMode:
 
 
 @dataclass
-class ContextTensors:
-    """
-    Output dataclass from prepare_context_tensors containing all context-related tensors.
-
-    Attributes:
-        context_embedding: Combined context embedding tensor (B, T_total, E)
-        context_lens: Length of context for each batch item (B,)
-        context_audio_codes: Audio codes for context audio (B, C, T')
-        context_audio_embedded: Embedded context audio codes (B, T', E)
-        context_audio_codes_lens: Length of context audio codes (B,)
-        text_embedded: Embedded text tokens (B, L, E)
-        text_lens: Length of text for each batch item (B,)
-        context_text_tokens: Context text token IDs (B, L)
-        context_text_lens: Length of context text (B,)
-        remaining_text_embedded: Embedded remaining text for streaming mode, None otherwise (B, T, E)
-        remaining_text_lens: Length of remaining text for streaming mode, None otherwise (B,)
-    """
-
-    context_embedding: torch.Tensor
-    context_lens: torch.Tensor
-    context_audio_codes: torch.Tensor
-    context_audio_embedded: torch.Tensor
-    context_audio_codes_lens: torch.Tensor
-    text_embedded: torch.Tensor
-    text_lens: torch.Tensor
-    context_text_tokens: torch.Tensor
-    context_text_lens: torch.Tensor
-    remaining_text_embedded: Optional[torch.Tensor]
-    remaining_text_lens: Optional[torch.Tensor]
-
-
-@dataclass
 class ProcessBatchOutput:
     """
     Output dataclass from process_batch containing loss values and model predictions.
@@ -130,6 +98,120 @@ class ProcessBatchOutput:
     context_audio_codes: torch.Tensor
     context_audio_codes_lens: torch.Tensor
     selected_training_mode: Optional[str] = None
+
+
+@dataclass
+class StreamingState:
+    """
+    State for streaming TTS inference with batch support.
+
+    This dataclass maintains all the necessary state for autoregressive streaming
+    generation, allowing text tokens to be fed incrementally. Supports arbitrary
+    batch sizes where each batch item can have different context lengths and be
+    in different phases.
+
+    The streaming operates in four phases (per batch item):
+    1. Context phase (context_position < full_context_lens): Processing remaining context
+    2. Prompt phase (text_tokens_seen < phoneme_delay): Only text, no predictions
+    3. Phoneme-only phase (phoneme_delay <= text_tokens_seen < speech_delay): Phoneme predictions only
+    4. Audio phase (text_tokens_seen >= speech_delay): Both phoneme and audio predictions
+
+    Attributes:
+        batch_size: Number of items in the batch.
+        past_key_values: KV cache from the transformer for efficient autoregressive decoding.
+        cache_seq_len: Current sequence length in the cache.
+        all_predictions: List of predicted audio codes at each timestep, each tensor is (B, C, S) unstacked.
+        all_phoneme_predictions: List of predicted phoneme tokens at each timestep, each tensor is (B, phoneme_stacking_factor).
+        context_audio_codes: Processed context audio codes with special tokens.
+        context_audio_codes_lens: Length of context audio codes.
+        context_lens: Total context length (task_embedding + context_audio + context_text).
+        full_context_embedding: Full context embedding for each batch item (B, T_max_context, E).
+        full_context_lens: Full context length for each batch item (B,).
+        context_position: How much context has been processed per batch item (B,).
+        text_tokens_seen: Number of text tokens processed so far per batch item (B,).
+        phoneme_steps: Number of phoneme prediction steps taken per batch item (B,).
+        audio_steps: Number of audio prediction steps taken per batch item (B,).
+        phoneme_stream_ended: Whether the phoneme stream has ended per batch item (B,) bool tensor.
+        finished: Whether generation is complete per batch item (B,) bool tensor.
+        device: Device tensors are on.
+        training_mode: The training mode being used for inference.
+        use_cfg: Whether classifier-free guidance is enabled.
+        cfg_scale: CFG scale factor.
+        use_local_transformer: Whether to use local transformer for inference.
+        temperature: Sampling temperature.
+        topk: Top-k sampling parameter.
+        dummy_context_embedding_unconditional: Unconditional embedding for CFG (if enabled).
+        last_hidden: Last hidden state from transformer.
+        text_finished: Whether text input has finished per batch item (B,) bool tensor.
+        phoneme_input_type: 'gt' or 'pred' for phoneme tokens.
+        phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
+        last_phoneme_tokens: Last predicted phoneme tokens (B, phoneme_stacking_factor).
+        last_audio_codes: Last predicted audio codes (B, num_codebooks).
+        audio_prediction_start_idx: Global frame index where audio predictions start per batch item (B,).
+        audio_prediction_end_idx: Global frame index where audio predictions end per batch item (B,), -1 if not ended.
+        phoneme_prediction_start_idx: Global step index where phoneme predictions start per batch item (B,).
+        phoneme_prediction_end_idx: Global step index where phoneme predictions end per batch item (B,), -1 if not ended.
+    """
+
+    batch_size: int
+    past_key_values: Optional[Tuple]
+    cache_seq_len: int
+    all_predictions: List[torch.Tensor]
+    all_phoneme_predictions: List[torch.Tensor]
+    context_audio_codes: torch.Tensor
+    context_audio_codes_lens: torch.Tensor
+    context_lens: torch.Tensor
+    full_context_embedding: torch.Tensor
+    full_context_lens: torch.Tensor
+    context_position: torch.Tensor
+    text_tokens_seen: torch.Tensor
+    phoneme_steps: torch.Tensor
+    audio_steps: torch.Tensor
+    phoneme_stream_ended: torch.Tensor
+    finished: torch.Tensor
+    device: torch.device
+    training_mode: TrainingMode
+    use_cfg: bool
+    cfg_scale: float
+    use_local_transformer: bool
+    temperature: float
+    topk: int
+    dummy_context_embedding_unconditional: Optional[torch.Tensor]
+    last_hidden: torch.Tensor
+    text_finished: torch.Tensor
+    phoneme_input_type: str
+    phoneme_sampling_method: str
+    last_phoneme_tokens: Optional[torch.Tensor]
+    last_audio_codes: Optional[torch.Tensor]
+    audio_prediction_start_idx: torch.Tensor
+    audio_prediction_end_idx: torch.Tensor
+    phoneme_prediction_start_idx: torch.Tensor
+    phoneme_prediction_end_idx: torch.Tensor
+    gt_phoneme_embeddings: Optional[torch.Tensor] = None  # (B, T', E) pre-computed GT embeddings
+    gt_phoneme_lens: Optional[torch.Tensor] = None  # (B,) lengths after stacking
+
+
+@dataclass
+class StreamingFinalizeOutput:
+    """Output from streaming_finalize containing audio and phoneme predictions."""
+
+    audio: torch.Tensor  # (B, max_audio_len) generated audio waveform
+    audio_len: torch.Tensor  # (B,) length of audio per batch item
+    audio_codes: torch.Tensor  # (B, num_codebooks, T) generated audio codes
+    audio_codes_len: torch.Tensor  # (B,) length of codes per batch item
+    phoneme_tokens: List[List[int]]  # List of phoneme token sequences per batch item
+    phoneme_text: List[str]  # Decoded phoneme strings per batch item
+
+
+@dataclass
+class InferBatchOutput:
+    """Output dataclass for EasyMagpieTTS infer_batch method."""
+
+    predicted_audio: torch.Tensor  # (B, T_audio)
+    predicted_audio_lens: torch.Tensor  # (B,)
+    predicted_codes: torch.Tensor  # (B, num_codebooks, T_frames)
+    predicted_codes_lens: torch.Tensor  # (B,)
+    rtf_metrics: Dict[str, Any]
 
 
 def worker_init_fn(worker_id):
@@ -885,13 +967,13 @@ class EasyMagpieTTSModel(ModelPT):
                     wandb_audio_log[f"Audio/Example_{idx}"] = list()
                     if context_audio_np is not None:
                         wandb_audio_log[f"Audio/Example_{idx}"].append(
-                            wandb.Audio(context_audio_np, sample_rate=self.sample_rate, caption="context")
+                            wandb.Audio(context_audio_np, sample_rate=self.output_sample_rate, caption="context")
                         )
                     wandb_audio_log[f"Audio/Example_{idx}"].append(
-                        wandb.Audio(pred_audio_np, sample_rate=self.sample_rate, caption="prediction")
+                        wandb.Audio(pred_audio_np, sample_rate=self.output_sample_rate, caption="prediction")
                     )
                     wandb_audio_log[f"Audio/Example_{idx}"].append(
-                        wandb.Audio(target_audio_np, sample_rate=self.sample_rate, caption="target")
+                        wandb.Audio(target_audio_np, sample_rate=self.output_sample_rate, caption="target")
                     )
 
                 if is_tb:
@@ -900,19 +982,19 @@ class EasyMagpieTTSModel(ModelPT):
                             f'Example_{idx}/context',
                             context_audio_np,
                             global_step=self.global_step,
-                            sample_rate=self.sample_rate,
+                            sample_rate=self.output_sample_rate,
                         )
                     logger.experiment.add_audio(
                         f'Example_{idx}/prediction',
                         pred_audio_np,
                         global_step=self.global_step,
-                        sample_rate=self.sample_rate,
+                        sample_rate=self.output_sample_rate,
                     )
                     logger.experiment.add_audio(
                         f'Example_{idx}/target',
                         target_audio_np,
                         global_step=self.global_step,
-                        sample_rate=self.sample_rate,
+                        sample_rate=self.output_sample_rate,
                     )
 
         return wandb_audio_log
@@ -977,27 +1059,21 @@ class EasyMagpieTTSModel(ModelPT):
 
     def prepare_context_tensors(
         self,
-        text: torch.Tensor,
-        text_lens: torch.Tensor,
         context_text_tokens: torch.Tensor,
         context_text_tokens_lens: torch.Tensor,
         context_audio_codes: Optional[torch.Tensor] = None,
         context_audio_codes_lens: Optional[torch.Tensor] = None,
         context_audio: Optional[torch.Tensor] = None,
         context_audio_lens: Optional[torch.Tensor] = None,
-        dropout_text_input: bool = False,
         training_mode: Optional[TrainingMode] = None,
-    ) -> ContextTensors:
+        dropout_conditional_input: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Prepare context tensors for the EasyMagpieTTS model.
+        Prepare context tensors (without text) for the simplified process_batch.
 
-        This function processes the input text, context audio, and context text to create
-        the combined context embedding that will be fed to the transformer decoder. It handles
-        both 'full' and 'streaming' text input modes.
-
+        This function processes context audio and context text to create the combined
+        context embedding.
         Args:
-            text: Input text token IDs (B, L)
-            text_lens: Length of text for each batch item (B,)
             context_text_tokens: Context text token IDs for speaker/style conditioning (B, L)
             context_text_tokens_lens: Length of context text for each batch item (B,)
             context_audio_codes: Pre-computed audio codes for context audio (B, C, T').
@@ -1008,57 +1084,24 @@ class EasyMagpieTTSModel(ModelPT):
                 Used to compute context_audio_codes if not provided.
             context_audio_lens: Length of context audio (B,).
                 Required if context_audio is provided.
-            dropout_text_input: If True, zero out the text embedding for classifier-free guidance.
             training_mode: Optional TrainingMode object specifying the mode to use.
                 If None, uses the first mode from training_modes as default.
+            dropout_conditional_input: If True, replace context with CFG unconditional token.
 
         Returns:
-            ContextTensors: A dataclass containing all prepared context tensors including:
-                - context_embedding: Combined context embedding (B, T_total, E)
+            Tuple of:
+                - context_embedding: Combined context embedding (B, T_context, E)
                 - context_lens: Total context length per batch item (B,)
                 - context_audio_codes: Processed audio codes with special tokens (B, C, T')
-                - context_audio_embedded: Embedded context audio (B, T', E)
                 - context_audio_codes_lens: Length of processed context audio codes (B,)
-                - text_embedded: Embedded text tokens (B, L, E)
-                - text_lens: Text length per batch item (B,)
-                - context_text_tokens: Context text token IDs (B, L)
-                - context_text_lens: Context text length per batch item (B,)
-                - remaining_text_embedded: For streaming mode, embedded remaining text (B, T, E)
-                - remaining_text_lens: For streaming mode, remaining text length (B,)
-
-        Raises:
-            ValueError: If neither context_audio_codes nor context_audio is provided.
-            ValueError: If text_input_mode is not 'full' or 'streaming'.
         """
         # Determine the mode parameters to use
-        # If no mode is specified, use the first (default) mode
         if training_mode is None:
             training_mode = self.training_modes[0]
 
-        current_text_input_mode = training_mode.text_input_mode
-        current_streaming_speech_delay = training_mode.streaming_speech_delay
-        current_streaming_phonemes_delay = training_mode.streaming_phonemes_delay
         current_mode_idx = training_mode.mode_idx
-
-        text_embedded = self.decoder.get_input_embeddings()(text)
-        if self.use_bpe_char_tokenizer:
-            text_mask = get_mask_from_lengths(text_lens)
-            cas_embedding = self.cas_encoder(text, subword_mask=text_mask)  # (B, L, E)
-            text_embedded = text_embedded + cas_embedding
-
-        if text_embedded.shape[1] < current_streaming_speech_delay + 1:
-            # If text is too short, pad it with zeros
-            padding_tensor = torch.zeros(
-                text_embedded.shape[0],
-                current_streaming_speech_delay + 1 - text_embedded.shape[1],
-                text_embedded.shape[2],
-                device=text_embedded.device,
-            )
-            text_embedded = torch.cat([text_embedded, padding_tensor], dim=1)
-
-        if dropout_text_input:
-            # Make text embedding all zeros
-            text_embedded = text_embedded * 0.0
+        batch_size = context_text_tokens.size(0)
+        device = context_text_tokens.device
 
         # Context Audio
         if context_audio_codes is None:
@@ -1093,62 +1136,236 @@ class EasyMagpieTTSModel(ModelPT):
         context_text_embedded = self.decoder.get_input_embeddings()(context_text_tokens)  # (B, L, E)
 
         # Prepare task embedding for multi-mode training
-        # Only use task embedding if there are multiple modes (task_embedding is not None)
         task_embedding = None
         task_embedding_lens = None
         if self.task_embedding is not None and current_mode_idx is not None:
-            batch_size = text.size(0)
-            mode_idx_tensor = torch.full((batch_size,), current_mode_idx, dtype=torch.long, device=text.device)
+            mode_idx_tensor = torch.full((batch_size,), current_mode_idx, dtype=torch.long, device=device)
             task_embedding = self.task_embedding(mode_idx_tensor).unsqueeze(1)  # (B, 1, E)
-            task_embedding_lens = torch.ones(batch_size, dtype=torch.long, device=text.device)  # (B,)
+            task_embedding_lens = torch.ones(batch_size, dtype=torch.long, device=device)  # (B,)
 
-        remaining_text_embedded = None
-        remaining_text_lens = None
-        if current_text_input_mode == 'full':
-            if task_embedding is not None:
-                context_embedding, context_lens = self.join_embeddings_temporally(
-                    embeddings=[task_embedding, context_audio_embedded, context_text_embedded, text_embedded],
-                    lengths=[task_embedding_lens, context_audio_codes_lens, context_text_lens, text_lens],
-                )
-            else:
-                context_embedding, context_lens = self.join_embeddings_temporally(
-                    embeddings=[context_audio_embedded, context_text_embedded, text_embedded],
-                    lengths=[context_audio_codes_lens, context_text_lens, text_lens],
-                )
-        elif current_text_input_mode == 'streaming':
-            prompt_text_embedded = text_embedded[:, :current_streaming_speech_delay, :]
-            prompt_text_lens = torch.ones_like(text_lens) * current_streaming_speech_delay
-            if task_embedding is not None:
-                context_embedding, context_lens = self.join_embeddings_temporally(
-                    embeddings=[task_embedding, context_audio_embedded, context_text_embedded, prompt_text_embedded],
-                    lengths=[task_embedding_lens, context_audio_codes_lens, context_text_lens, prompt_text_lens],
-                )
-            else:
-                context_embedding, context_lens = self.join_embeddings_temporally(
-                    embeddings=[context_audio_embedded, context_text_embedded, prompt_text_embedded],
-                    lengths=[context_audio_codes_lens, context_text_lens, prompt_text_lens],
-                )
-            remaining_text_embedded = text_embedded[:, current_streaming_speech_delay:, :]
-            remaining_text_lens = text_lens - current_streaming_speech_delay
-            remaining_text_lens = remaining_text_lens.clamp(min=0)
-            remaining_text_mask = get_mask_from_lengths(remaining_text_lens)
-            remaining_text_embedded = remaining_text_embedded * remaining_text_mask.unsqueeze(2)  # (B, T, E)
+        # Combine context embeddings: [task_embedding | context_audio | context_text]
+        if task_embedding is not None:
+            context_embedding, context_lens = self.join_embeddings_temporally(
+                embeddings=[task_embedding, context_audio_embedded, context_text_embedded],
+                lengths=[task_embedding_lens, context_audio_codes_lens, context_text_lens],
+            )
         else:
-            raise ValueError(f"Invalid text input mode: {current_text_input_mode}")
+            context_embedding, context_lens = self.join_embeddings_temporally(
+                embeddings=[context_audio_embedded, context_text_embedded],
+                lengths=[context_audio_codes_lens, context_text_lens],
+            )
 
-        return ContextTensors(
-            context_embedding=context_embedding,
-            context_lens=context_lens,
-            context_audio_codes=context_audio_codes,
-            context_audio_embedded=context_audio_embedded,
-            context_audio_codes_lens=context_audio_codes_lens,
-            text_embedded=text_embedded,
-            text_lens=text_lens,
-            context_text_tokens=context_text_tokens,
-            context_text_lens=context_text_lens,
-            remaining_text_embedded=remaining_text_embedded,
-            remaining_text_lens=remaining_text_lens,
+        # Handle CFG unconditional dropout
+        if dropout_conditional_input:
+            cfg_token_id = self.cfg_unk_token_id
+            cfg_token_embedding = self.decoder.get_input_embeddings()(
+                torch.full((batch_size, 1), cfg_token_id, device=device)
+            )  # (B, 1, E)
+            # Expand CFG token to match context embedding size
+            context_embedding = cfg_token_embedding.expand(-1, context_embedding.size(1), -1)  # (B, T_context, E)
+
+        return context_embedding, context_lens, context_audio_codes, context_audio_codes_lens
+
+    def prepare_text_channel_embeddings(
+        self,
+        text: torch.Tensor,
+        text_lens: torch.Tensor,
+        delay: torch.Tensor,
+        dropout_text_input: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Prepare text embeddings as a channel input with delay handling.
+
+        This function embeds text tokens and prepends zero-padding based on the delay
+        parameter. The delay represents the number of zero positions to prepend before
+        the text embeddings, aligning the text channel with other channels.
+
+        Args:
+            text: Input text token IDs (B, L)
+            text_lens: Length of text for each batch item (B,)
+            delay: Number of zero positions to prepend for each batch item (B,).
+                   For text channel, this is typically just context_lens.
+            dropout_text_input: If True, return all zeros (for text dropout regularization).
+
+        Returns:
+            Tuple of:
+                - text_channel_embedding: Text embeddings with zero-padded delay (B, T_delay + T_text, E)
+                - text_channel_lens: Total length of text channel for each batch item (B,)
+        """
+        batch_size = text.size(0)
+        device = text.device
+
+        # Embed text tokens
+        text_embedded = self.decoder.get_input_embeddings()(text)  # (B, L, E)
+
+        # Apply CAS encoding if using BPE char tokenizer
+        if self.use_bpe_char_tokenizer:
+            text_mask = get_mask_from_lengths(text_lens)
+            cas_embedding = self.cas_encoder(text, subword_mask=text_mask)  # (B, L, E)
+            text_embedded = text_embedded + cas_embedding
+
+        # Handle text dropout - zero out the embeddings
+        if dropout_text_input:
+            text_embedded = text_embedded * 0.0
+
+        # Create zero tensor for delay padding
+        max_delay = delay.max().item()
+        zero_delay_tensor = torch.zeros(
+            batch_size, max_delay, self.cfg.embedding_dim, device=device
         )
+
+        # Join delay zeros with text embeddings
+        text_channel_embedding, text_channel_lens = self.join_embeddings_temporally(
+            embeddings=[zero_delay_tensor, text_embedded],
+            lengths=[delay, text_lens],
+        )
+
+        return text_channel_embedding, text_channel_lens
+
+    def prepare_phoneme_channel_embeddings(
+        self,
+        phoneme_tokens: torch.Tensor,
+        phoneme_tokens_lens: torch.Tensor,
+        delay: torch.Tensor,
+        dropout_phoneme_input: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Prepare phoneme embeddings as a channel input with delay handling.
+
+        This function stacks phoneme tokens (if configured), embeds them, and prepends
+        zero-padding based on the delay parameter. The delay represents the number of
+        zero positions to prepend before the phoneme embeddings.
+
+        Args:
+            phoneme_tokens: Phoneme token IDs (B, L)
+            phoneme_tokens_lens: Length of phoneme tokens for each batch item (B,)
+            delay: Number of zero positions to prepend for each batch item (B,).
+                   This is typically context_lens + phoneme_delay.
+            dropout_phoneme_input: If True, return all zeros (for phoneme dropout regularization).
+
+        Returns:
+            Tuple of:
+                - phoneme_channel_embedding: Phoneme embeddings with zero-padded delay (B, T_delay + T_phoneme, E)
+                - phoneme_channel_lens: Total length of phoneme channel for each batch item (B,)
+                - phoneme_tokens_stacked: Stacked phoneme tokens (B, S, T')
+                - phoneme_tokens_lens_stacked: Length of stacked phoneme tokens (B,)
+        """
+        batch_size = phoneme_tokens.size(0)
+        device = phoneme_tokens.device
+
+        # Stack phoneme tokens
+        phoneme_tokens_expanded = phoneme_tokens.unsqueeze(1)  # (B, 1, L)
+        phoneme_tokens_stacked, phoneme_tokens_lens_stacked = self.stack_codes(
+            phoneme_tokens_expanded,
+            phoneme_tokens_lens,
+            self.phoneme_tokenizer.bos_token_id,
+            self.phoneme_tokenizer.eos_token_id,
+            self.phoneme_stacking_factor,
+            1,
+        )
+
+        # Embed phoneme tokens
+        phoneme_embedded = self.embed_phoneme_tokens(phoneme_tokens_stacked)  # (B, T', E)
+
+        # Apply mask to zero out padding
+        phoneme_mask = get_mask_from_lengths(phoneme_tokens_lens_stacked)
+        phoneme_embedded = phoneme_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
+
+        # Handle phoneme dropout - zero out the embeddings
+        if dropout_phoneme_input:
+            phoneme_embedded = phoneme_embedded * 0.0
+
+        # Create zero tensor for delay padding
+        max_delay = delay.max().item()
+        zero_delay_tensor = torch.zeros(
+            batch_size, max_delay, self.cfg.embedding_dim, device=device
+        )
+
+        # Join delay zeros with phoneme embeddings
+        phoneme_channel_embedding, phoneme_channel_lens = self.join_embeddings_temporally(
+            embeddings=[zero_delay_tensor, phoneme_embedded],
+            lengths=[delay, phoneme_tokens_lens_stacked],
+        )
+
+        return phoneme_channel_embedding, phoneme_channel_lens, phoneme_tokens_stacked, phoneme_tokens_lens_stacked
+
+    def prepare_audio_channel_embeddings(
+        self,
+        audio_codes: torch.Tensor,
+        audio_codes_lens: torch.Tensor,
+        delay: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Prepare audio embeddings as a channel input with delay handling.
+
+        This function processes audio codes by adding special tokens, stacking them,
+        and embedding them. It prepends zero-padding based on the delay parameter.
+        Also prepares input/target split for autoregressive training.
+
+        Args:
+            audio_codes: Audio codes (B, C, T) - raw codes without special tokens
+            audio_codes_lens: Length of audio codes for each batch item (B,)
+            delay: Number of zero positions to prepend for each batch item (B,).
+                   In full mode: context_lens + text_lens + speech_delay
+                   In streaming mode: context_lens + speech_delay
+
+        Returns:
+            Tuple of:
+                - audio_channel_embedding: Audio embeddings with zero-padded delay (B, T_delay + T_audio, E)
+                - audio_channel_lens: Total length of audio channel for each batch item (B,)
+                - audio_codes_target: Target audio codes for loss computation (B, C, T'-1)
+                - audio_codes_lens_target: Length of target audio codes (B,)
+        """
+        batch_size = audio_codes.size(0)
+        device = audio_codes.device
+
+        # Apply codec conversion if configured
+        if self._codec_converter is not None:
+            audio_codes = self._codec_converter.convert_original_to_new(
+                audio_tokens=audio_codes, audio_lens=audio_codes_lens
+            ).long()
+
+        # Add BOS and EOS tokens
+        audio_codes, audio_codes_lens = self.add_special_tokens(
+            codes=audio_codes,
+            codes_len=audio_codes_lens,
+            bos_id=self.audio_bos_id,
+            eos_id=self.audio_eos_id,
+        )
+
+        # Stack audio codes across codebooks
+        audio_codes, audio_codes_lens = self.stack_codes(
+            audio_codes,
+            audio_codes_lens,
+            self.audio_bos_id,
+            self.audio_eos_id,
+            self.frame_stacking_factor,
+            self.num_audio_codebooks,
+        )
+
+        # Prepare input and target for autoregressive training
+        # Input: all tokens except the last (teacher forcing)
+        # Target: all tokens except the first (shifted by one)
+        audio_codes_lens_target = audio_codes_lens - 1
+        audio_codes_target = audio_codes[:, :, 1:]  # (B, C, T'-1)
+        audio_codes_input = audio_codes[:, :, :-1]  # (B, C, T'-1)
+
+        # Embed audio tokens
+        audio_embedded = self.embed_audio_tokens(audio_codes_input)  # (B, T'-1, E)
+
+        # Create zero tensor for delay padding
+        max_delay = delay.max().item()
+        zero_delay_tensor = torch.zeros(
+            batch_size, max_delay, self.cfg.embedding_dim, device=device
+        )
+
+        # Join delay zeros with audio embeddings
+        audio_channel_embedding, audio_channel_lens = self.join_embeddings_temporally(
+            embeddings=[zero_delay_tensor, audio_embedded],
+            lengths=[delay, audio_codes_lens_target],
+        )
+
+        return audio_channel_embedding, audio_channel_lens, audio_codes_target, audio_codes_lens_target
 
     def slice_pred_embeddings(self, transformer_out, context_lens, target_lens):
         """
@@ -1270,346 +1487,259 @@ class EasyMagpieTTSModel(ModelPT):
 
         return x, orig_lens
 
-    def prepare_phoneme_channel_input(self, phoneme_tokens, phoneme_tokens_lens, context_lens):
-        """
-        Prepare phoneme tokens as an auxiliary input channel for the decoder.
-
-        This function processes phoneme tokens by stacking them (if configured), embedding them,
-        and prepending a zero-padded context region. The resulting tensor can be used as an
-        additional input channel to provide phoneme conditioning to the audio decoder.
-
-        Args:
-            phoneme_tokens: Phoneme token IDs, shape (B, L) where B is batch size and
-                           L is the phoneme sequence length.
-            phoneme_tokens_lens: Length of valid phoneme tokens for each batch item, shape (B,).
-            context_lens: Length of the context region for each batch item, shape (B,).
-                         Used to prepend zero-padding to align with audio context.
-
-        Returns:
-            Tuple of:
-                - phoneme_channel_input: Embedded phoneme tokens with zero-padded context,
-                  shape (B, T_context + T_phoneme, E) where E is the embedding dimension.
-                - phoneme_channel_input_lens: Total length of phoneme channel input for each
-                  batch item (context_lens + phoneme_tokens_lens after stacking), shape (B,).
-                - phoneme_tokens: Stacked phoneme tokens, shape (B, phoneme_stacking_factor, T_stacked).
-                - phoneme_tokens_lens: Length of stacked phoneme tokens, shape (B,).
-        """
-        phoneme_tokens = phoneme_tokens.unsqueeze(1)  # (B, 1, L)
-        phoneme_tokens, phoneme_tokens_lens = self.stack_codes(
-            phoneme_tokens,
-            phoneme_tokens_lens,
-            self.phoneme_tokenizer.bos_token_id,
-            self.phoneme_tokenizer.eos_token_id,
-            self.phoneme_stacking_factor,
-            1,
-        )
-        # import ipdb; ipdb.set_trace()
-        phoneme_tokens_embedded = self.embed_phoneme_tokens(phoneme_tokens)  # (B, T', E)
-
-        phoneme_mask = get_mask_from_lengths(phoneme_tokens_lens)
-        phoneme_tokens_embedded = phoneme_tokens_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
-
-        zero_context_tensor = torch.zeros(
-            context_lens.size(0), context_lens.max().item(), self.cfg.embedding_dim, device=phoneme_tokens.device
-        )
-        phoneme_channel_input, phoneme_channel_input_lens = self.join_embeddings_temporally(
-            embeddings=[zero_context_tensor, phoneme_tokens_embedded],
-            lengths=[context_lens, phoneme_tokens_lens],
-        )
-        return phoneme_channel_input, phoneme_channel_input_lens, phoneme_tokens, phoneme_tokens_lens
-
     def process_batch(
         self,
         text: torch.Tensor,
         text_lens: torch.Tensor,
         context_text_tokens: torch.Tensor,
         context_text_tokens_lens: torch.Tensor,
-        audio: Optional[torch.Tensor] = None,
-        audio_lens: Optional[torch.Tensor] = None,
-        audio_codes: Optional[torch.Tensor] = None,
-        audio_codes_lens: Optional[torch.Tensor] = None,
-        context_audio: Optional[torch.Tensor] = None,
-        context_audio_lens: Optional[torch.Tensor] = None,
-        context_audio_codes: Optional[torch.Tensor] = None,
-        context_audio_codes_lens: Optional[torch.Tensor] = None,
+        audio_codes: torch.Tensor,
+        audio_codes_lens: torch.Tensor,
+        context_audio_codes: torch.Tensor,
+        context_audio_codes_lens: torch.Tensor,
         phoneme_tokens: Optional[torch.Tensor] = None,
         phoneme_tokens_lens: Optional[torch.Tensor] = None,
         mode: str = "train",
         training_mode: Optional[TrainingMode] = None,
     ) -> ProcessBatchOutput:
         """
-        Process a batch of inputs to compute model outputs and losses.
+        Simplified batch processing using channel-based embedding architecture.
 
-        This function performs the following steps:
-        1. Prepares context tensors from text and audio inputs
-        2. Optionally applies dropout to text/phoneme inputs for regularization
-        3. Optionally applies classifier-free guidance (CFG) unconditional training
-        4. Converts audio to codes if not already provided
-        5. Embeds audio codes and combines with context embeddings
-        6. Runs the transformer forward pass
-        7. Computes codebook loss, phoneme loss (if applicable), and local transformer loss (if applicable)
+        This function provides a cleaner implementation of process_batch where:
+        1. Context is prepared separately (without text)
+        2. Text, phoneme, and audio are each treated as channels with delay-based alignment
+        3. Channels are summed element-wise and joined temporally with context
+
+        The delay handling ensures proper temporal alignment:
+        - Text channel delay: context_lens (no additional delay)
+        - Phoneme channel delay: context_lens + phoneme_delay
+        - Audio channel delay: context_lens + text_lens + speech_delay (full mode)
+                              or context_lens + speech_delay (streaming mode)
 
         Args:
-            text: Input text token IDs, shape (B, L)
-            text_lens: Length of text for each batch item, shape (B,)
-            context_text_tokens: Context text token IDs for conditioning, shape (B, L_ctx)
-            context_text_tokens_lens: Length of context text for each batch item, shape (B,)
-            audio: Raw audio waveform (used if audio_codes not provided), shape (B, T_audio)
-            audio_lens: Length of audio for each batch item, shape (B,)
-            audio_codes: Pre-computed audio codes (optional, computed from audio if not provided), shape (B, C, T)
-            audio_codes_lens: Length of audio codes for each batch item, shape (B,)
-            context_audio: Raw context audio waveform (optional), shape (B, T_ctx_audio)
-            context_audio_lens: Length of context audio for each batch item, shape (B,)
-            context_audio_codes: Pre-computed context audio codes (optional), shape (B, C, T_ctx)
-            context_audio_codes_lens: Length of context audio codes for each batch item, shape (B,)
-            phoneme_tokens: Phoneme token IDs (required if phoneme_tokenizer is enabled), shape (B, L_phoneme)
-            phoneme_tokens_lens: Length of phoneme tokens for each batch item, shape (B,)
-            mode: Training mode, either "train" or "val". Affects dropout behavior.
-            training_mode: Optional TrainingMode object specifying which mode to use.
-                If None and multi_mode_training is enabled, a random mode is selected during training.
+            text: Input text token IDs (B, L)
+            text_lens: Length of text for each batch item (B,)
+            context_text_tokens: Context text token IDs for conditioning (B, L_ctx)
+            context_text_tokens_lens: Length of context text (B,)
+            audio_codes: Audio codes (B, C, T) - raw codes without special tokens
+            audio_codes_lens: Length of audio codes (B,)
+            context_audio_codes: Pre-computed context audio codes (B, C, T')
+            context_audio_codes_lens: Length of context audio codes (B,)
+            phoneme_tokens: Phoneme token IDs (optional) (B, L_phoneme)
+            phoneme_tokens_lens: Length of phoneme tokens (B,)
+            mode: Training mode, either "train" or "val"
+            training_mode: Optional TrainingMode object
 
         Returns:
-            ProcessBatchOutput: Dataclass containing:
-                - loss: Total combined loss
-                - codebook_loss: Loss for audio codebook prediction
-                - phoneme_loss: Loss for phoneme prediction (None if not using phonemes)
-                - local_transformer_loss: Loss from local transformer (None if not used)
-                - local_transformer_logits: Logits from local transformer
-                - logits: Predicted logits from the main decoder
-                - audio_codes_target: Target audio codes
-                - audio_codes_lens_target: Length of target audio codes
-                - context_audio_codes: Audio codes from context
-                - context_audio_codes_lens: Length of context audio codes
+            ProcessBatchOutput: Contains loss values and model predictions
         """
-        # Select training mode for multi-mode training
-        # During training, randomly select a mode if not specified
-        # During validation, use the first mode (default) if not specified
+        # Select training mode
         selected_training_mode = training_mode
         if selected_training_mode is None:
             if mode == 'train':
-                # Randomly select a mode during training
                 selected_training_mode = random.choice(self.training_modes)
             else:
-                # Use the first mode during validation
                 selected_training_mode = self.training_modes[0]
 
-        # Get the current mode's parameters
         current_text_input_mode = selected_training_mode.text_input_mode
         current_streaming_speech_delay = selected_training_mode.streaming_speech_delay
         current_streaming_phonemes_delay = selected_training_mode.streaming_phonemes_delay
 
-        # Determine whether to apply text/phoneme dropout for regularization during training
-        # Text dropout: randomly drop text input to encourage the model to rely on other signals
+        # Determine dropout flags
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
         dropout_phoneme_input = (random.random() < self.dropout_phoneme_input_prob) if mode == 'train' else False
         if dropout_phoneme_input and dropout_text_input:
-            # Only one of the two can be True, so choose randomly
             dropout_phoneme_input = random.random() < 0.5
             dropout_text_input = not dropout_phoneme_input
 
-        # Prepare context tensors by combining text and audio context information
-        context_tensors = self.prepare_context_tensors(
-            text=text,
-            text_lens=text_lens,
-            context_text_tokens=context_text_tokens,
-            context_text_tokens_lens=context_text_tokens_lens,
-            context_audio_codes=context_audio_codes,
-            context_audio_codes_lens=context_audio_codes_lens,
-            context_audio=context_audio,
-            context_audio_lens=context_audio_lens,
-            dropout_text_input=dropout_text_input,
-            training_mode=selected_training_mode,
-        )
-
-        # Extract context tensors for use in the forward pass
-        remaining_text_embedded = context_tensors.remaining_text_embedded
-        context_embedding = context_tensors.context_embedding
-        context_lens = context_tensors.context_lens
-
-        # Classifier-Free Guidance (CFG) unconditional training:
-        # With some probability, replace the context with a special unconditional token
-        # This allows the model to generate without conditioning during inference
+        # Determine CFG unconditional dropout
         dropout_conditional_input = False
         if mode == 'train' and self.cfg_unconditional_prob > 0.0:
             if torch.rand(1).item() < self.cfg_unconditional_prob:
                 dropout_conditional_input = True
-                # Get embedding of a special UNCONDITIONAL_TOKEN
-                cfg_token_id = self.cfg_unk_token_id  # int
-                cfg_token_embedding = self.decoder.get_input_embeddings()(
-                    torch.full((context_embedding.size(0), 1), cfg_token_id, device=context_embedding.device)
-                )  # (B, 1, E)
-                # Keeping the dummy context same size as the context embedding makes
-                # inference easier especially with KV caching and using a duplicated batch.
-                context_embedding = cfg_token_embedding.expand(-1, context_embedding.size(1), -1)  # (B, T_total, E)
-                # Make unconditional remaining text embedding all zeros. Simplifies the inference implementation.
-                if current_text_input_mode == 'streaming':
-                    remaining_text_embedded = torch.zeros_like(remaining_text_embedded)
 
-        # Convert raw audio to discrete codes if codes are not already provided
-        if audio_codes is None:
-            audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
-
-        # Apply codec conversion if a converter is configured (e.g., for different codec formats)
-        if self._codec_converter is not None:
-            audio_codes = self._codec_converter.convert_original_to_new(
-                audio_tokens=audio_codes, audio_lens=audio_codes_lens
-            ).long()
-
-        # Add BOS (beginning of sequence) and EOS (end of sequence) tokens to audio codes
-        audio_codes, audio_codes_lens = self.add_special_tokens(
-            codes=audio_codes,
-            codes_len=audio_codes_lens,
-            bos_id=self.audio_bos_id,
-            eos_id=self.audio_eos_id,
+        # 1. Prepare context tensors (without text)
+        context_embedding, context_lens, context_audio_codes_processed, context_audio_codes_lens_processed = (
+            self.prepare_context_tensors(
+                context_text_tokens=context_text_tokens,
+                context_text_tokens_lens=context_text_tokens_lens,
+                context_audio_codes=context_audio_codes,
+                context_audio_codes_lens=context_audio_codes_lens,
+                training_mode=selected_training_mode,
+                dropout_conditional_input=dropout_conditional_input,
+            )
         )
 
-        # Stack audio codes across codebooks for multi-codebook processing
-        # This reshapes codes for parallel prediction of multiple codebooks
-        audio_codes, audio_codes_lens = self.stack_codes(
-            audio_codes,
-            audio_codes_lens,
-            self.audio_bos_id,
-            self.audio_eos_id,
-            self.frame_stacking_factor,
-            self.num_audio_codebooks,
+        # 2. Compute delays for each channel based on mode
+        # Text channel delay: always context_lens
+        text_delay = context_lens.clone()
+
+        # Phoneme channel delay: context_lens + phoneme_delay (both modes)
+        phoneme_delay = context_lens + current_streaming_phonemes_delay
+
+        # Audio channel delay depends on mode
+        if current_text_input_mode == 'full':
+            # Full mode: context_lens + text_lens + speech_delay
+            audio_delay = context_lens + text_lens + current_streaming_speech_delay
+        else:
+            # Streaming mode: context_lens + speech_delay
+            audio_delay = context_lens + current_streaming_speech_delay
+
+        # 3. Prepare text channel embeddings
+        text_channel_embedding, text_channel_lens = self.prepare_text_channel_embeddings(
+            text=text,
+            text_lens=text_lens,
+            delay=text_delay,
+            dropout_text_input=dropout_text_input or dropout_conditional_input,
         )
 
-        # Prepare input and target sequences for autoregressive training
-        # Input: all tokens except the last (teacher forcing)
-        # Target: all tokens except the first (shifted by one position)
-        audio_codes_lens_input = audio_codes_lens_target = audio_codes_lens - 1
-        audio_codes_target = audio_codes[:, :, 1:]  # (B, C, T') Target for the decoder
-        audio_codes_input = audio_codes[:, :, :-1]  # (B, C, T') Input to the decoder
-
-        # Embed audio tokens to get continuous representations
-        audio_codes_input_embedded = self.embed_audio_tokens(audio_codes_input)  # (B, T, E)
-
-        # In streaming mode, add remaining text embeddings to audio embeddings
-        # This provides text information at each audio timestep
-        if remaining_text_embedded is not None:
-            # Pad remaining text to match audio sequence length by adding zeros on the right
-            padding_len = audio_codes_input_embedded.size(1) - remaining_text_embedded.size(1)
-            if padding_len > 0:
-                padding_tensor = torch.zeros(
-                    remaining_text_embedded.size(0),
-                    padding_len,
-                    remaining_text_embedded.size(2),
-                    device=remaining_text_embedded.device,
-                )
-                remaining_text_embedded = torch.cat([remaining_text_embedded, padding_tensor], dim=1)
-            else:
-                # Log Warning
-                print(
-                    f"Warning: Remaining text length {remaining_text_embedded.size(1)} is greater than audio codes input length {audio_codes_input_embedded.size(1)}"
-                )
-                remaining_text_embedded = remaining_text_embedded[:, : audio_codes_input_embedded.size(1), :]
-            # Add text information to audio embeddings (element-wise addition)
-            audio_codes_input_embedded = audio_codes_input_embedded + remaining_text_embedded
-
-        # Concatenate context embeddings with audio embeddings along the time dimension
-        # Result: [context_embedding | audio_codes_input_embedded]
-        context_plus_audio_embedded, context_plus_audio_lens = self.join_embeddings_temporally(
-            embeddings=[context_embedding, audio_codes_input_embedded],
-            lengths=[context_lens, audio_codes_lens_input],
-        )
-
-        # Process phoneme input if phoneme tokenizer is configured
-        if self.phoneme_tokenizer is not None:
-            # Compute context length offset for phoneme alignment
-            # This accounts for different delays in speech vs phoneme streams
-            # Use the selected mode's streaming delays
-            context_lens_for_phonemes = (
-                context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
+        # 4. Prepare phoneme channel embeddings (if phoneme tokenizer is configured)
+        phoneme_channel_embedding = None
+        phoneme_tokens_stacked = None
+        phoneme_tokens_lens_stacked = None
+        if self.phoneme_tokenizer is not None and phoneme_tokens is not None:
+            (
+                phoneme_channel_embedding,
+                phoneme_channel_lens,
+                phoneme_tokens_stacked,
+                phoneme_tokens_lens_stacked,
+            ) = self.prepare_phoneme_channel_embeddings(
+                phoneme_tokens=phoneme_tokens,
+                phoneme_tokens_lens=phoneme_tokens_lens,
+                delay=phoneme_delay,
+                dropout_phoneme_input=dropout_phoneme_input or dropout_conditional_input,
             )
 
-            # Prepare phoneme channel input with proper alignment
-            (
-                phoneme_channel_input,
-                phoneme_channel_input_lens,
-                phoneme_tokens_processed,
-                phoneme_tokens_lens_processed,
-            ) = self.prepare_phoneme_channel_input(phoneme_tokens, phoneme_tokens_lens, context_lens_for_phonemes)
+        # 5. Prepare audio channel embeddings
+        (
+            audio_channel_embedding,
+            audio_channel_lens,
+            audio_codes_target,
+            audio_codes_lens_target,
+        ) = self.prepare_audio_channel_embeddings(
+            audio_codes=audio_codes,
+            audio_codes_lens=audio_codes_lens,
+            delay=audio_delay,
+        )
 
-            # Align phoneme channel input to match the combined context+audio sequence length
-            if phoneme_channel_input.shape[1] < context_plus_audio_embedded.shape[1]:
-                # Pad phoneme channel with zeros if shorter than context+audio
-                padding_tensor = torch.zeros(
-                    phoneme_channel_input.shape[0],
-                    context_plus_audio_embedded.shape[1] - phoneme_channel_input.shape[1],
-                    phoneme_channel_input.shape[2],
-                    device=phoneme_channel_input.device,
+        # 6. Sum the channel embeddings element-wise
+        # First, align all channels to the same length (max of all channel lengths)
+        max_channel_len = max(
+            text_channel_embedding.size(1),
+            audio_channel_embedding.size(1),
+            phoneme_channel_embedding.size(1) if phoneme_channel_embedding is not None else 0,
+        )
+
+        # Pad text channel if needed
+        if text_channel_embedding.size(1) < max_channel_len:
+            padding = torch.zeros(
+                text_channel_embedding.size(0),
+                max_channel_len - text_channel_embedding.size(1),
+                text_channel_embedding.size(2),
+                device=text_channel_embedding.device,
+            )
+            text_channel_embedding = torch.cat([text_channel_embedding, padding], dim=1)
+
+        # Pad audio channel if needed
+        if audio_channel_embedding.size(1) < max_channel_len:
+            padding = torch.zeros(
+                audio_channel_embedding.size(0),
+                max_channel_len - audio_channel_embedding.size(1),
+                audio_channel_embedding.size(2),
+                device=audio_channel_embedding.device,
+            )
+            audio_channel_embedding = torch.cat([audio_channel_embedding, padding], dim=1)
+
+        # Sum channels
+        combined_channel_embedding = text_channel_embedding + audio_channel_embedding
+
+        # Add phoneme channel if available
+        if phoneme_channel_embedding is not None:
+            if phoneme_channel_embedding.size(1) < max_channel_len:
+                padding = torch.zeros(
+                    phoneme_channel_embedding.size(0),
+                    max_channel_len - phoneme_channel_embedding.size(1),
+                    phoneme_channel_embedding.size(2),
+                    device=phoneme_channel_embedding.device,
                 )
-                phoneme_channel_input = torch.cat([phoneme_channel_input, padding_tensor], dim=1)
-            else:
-                # Truncate phoneme channel if longer than context+audio
-                phoneme_channel_input = phoneme_channel_input[:, : context_plus_audio_embedded.shape[1], :]
+                phoneme_channel_embedding = torch.cat([phoneme_channel_embedding, padding], dim=1)
+            combined_channel_embedding = combined_channel_embedding + phoneme_channel_embedding
 
-            # Add phoneme information unless doing unconditional or phoneme dropout training
-            if (not dropout_conditional_input) and (not dropout_phoneme_input):
-                context_plus_audio_embedded = context_plus_audio_embedded + phoneme_channel_input
+        # 7. Join context with combined channel embeddings
+        # The combined_channel_lens is the max of all channel lens for each batch item
+        combined_channel_lens = torch.stack([
+            text_channel_lens,
+            audio_channel_lens,
+            phoneme_channel_lens if phoneme_channel_embedding is not None else audio_channel_lens,
+        ], dim=0).max(dim=0).values
 
-        # Run the transformer forward pass
+        
+
+        # Right pad context embedding
+        context_padding = torch.zeros(
+            context_embedding.size(0),
+            combined_channel_embedding.size(1) - context_embedding.size(1),
+            context_embedding.size(2),
+            device=context_embedding.device,
+        )
+        context_embedding_padded = torch.cat([context_embedding, context_padding], dim=1)
+
+        full_embedding = context_embedding_padded + combined_channel_embedding
+
+        # 8. Forward pass through transformer
         transformer_out = self.forward(
-            inputs_embeds=context_plus_audio_embedded,
-            attention_mask=get_mask_from_lengths(context_plus_audio_lens),
+            inputs_embeds=full_embedding,
+            attention_mask=get_mask_from_lengths(combined_channel_lens),
         )
         transformer_hidden_states = transformer_out.last_hidden_state  # (B, T_total, E)
 
-        # Extract prediction embeddings by slicing out the audio portion (excluding context)
+        # 9. Extract prediction embeddings and compute losses
+        # Audio predictions start at audio_delay
         pred_embeddings = self.slice_pred_embeddings(
             transformer_hidden_states,
-            context_lens=context_lens,
+            context_lens=audio_delay,
             target_lens=audio_codes_lens_target,
         )
 
-        # Project embeddings to logits for each codebook
-        # First project from hidden_dim to audio_embedding_dim, then to logits
+        # Project to audio logits
         pred_embeddings_audio = self.audio_out_projection(pred_embeddings)
-        logits = self.final_proj(pred_embeddings_audio)  # (B, T', num_codebooks * num_tokens_per_codebook)
+        logits = self.final_proj(pred_embeddings_audio)
 
-        # Compute the main codebook prediction loss
+        # Compute codebook loss
         codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
         loss = codebook_loss
 
-        # Compute local transformer loss if using local transformer architecture
+        # Compute local transformer loss if applicable
         local_transformer_loss = None
         local_transformer_logits = None
         if self.local_transformer_type != LocalTransformerType.NO_LT:
             assert self.local_transformer_type == LocalTransformerType.AR, "Unexpected local transformer type"
-            # Compute logits using the local (autoregressive) transformer
             local_transformer_logits = self.compute_local_transformer_logits(
                 pred_embeddings, audio_codes_target, targets_offset_by_one=False
             )
             local_transformer_loss, _ = self.compute_loss(
                 local_transformer_logits, audio_codes_target, audio_codes_lens_target
             )
-            # Scale and add local transformer loss to total loss
             local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
             loss = loss + local_transformer_loss_scale * local_transformer_loss
 
-        # Compute phoneme prediction loss if using phoneme tokenizer
+        # Compute phoneme loss if applicable
         phoneme_loss = None
-        if self.phoneme_tokenizer is not None:
-            # Extract phoneme prediction embeddings with proper alignment
+        if self.phoneme_tokenizer is not None and phoneme_tokens_stacked is not None:
+            # Phoneme predictions start at phoneme_delay
             pred_embeddings_phoneme = self.slice_pred_embeddings(
                 transformer_hidden_states,
-                context_lens=context_lens_for_phonemes,
-                target_lens=phoneme_tokens_lens_processed - 1,
+                context_lens=phoneme_delay,
+                target_lens=phoneme_tokens_lens_stacked - 1,
             )
-            # Project to phoneme logits
-            phoneme_logits = self.phoneme_final_proj(
-                pred_embeddings_phoneme
-            )  # (B, T', phoneme_stacking_factor * phoneme_vocab_size)
+            phoneme_logits = self.phoneme_final_proj(pred_embeddings_phoneme)
 
-            # Only compute phoneme loss if not doing any dropout
-            # (unconditional, text dropout, or phoneme dropout)
             if not (dropout_conditional_input or dropout_text_input or dropout_phoneme_input):
                 phoneme_loss, _ = self.compute_phoneme_loss(
-                    phoneme_logits, phoneme_tokens_processed[:, :, 1:].long(), phoneme_tokens_lens_processed - 1
+                    phoneme_logits, phoneme_tokens_stacked[:, :, 1:].long(), phoneme_tokens_lens_stacked - 1
                 )
                 print("No Dropout - phoneme loss:", phoneme_loss.item())
             else:
-                # Skip phoneme loss computation during dropout training
                 phoneme_loss = torch.tensor(0.0, device=logits.device)
                 print("Dropout - phoneme loss skipped", phoneme_loss.item())
 
@@ -1624,27 +1754,37 @@ class EasyMagpieTTSModel(ModelPT):
             logits=logits,
             audio_codes_target=audio_codes_target,
             audio_codes_lens_target=audio_codes_lens_target,
-            context_audio_codes=context_tensors.context_audio_codes,
-            context_audio_codes_lens=context_tensors.context_audio_codes_lens,
+            context_audio_codes=context_audio_codes_processed,
+            context_audio_codes_lens=context_audio_codes_lens_processed,
             selected_training_mode=selected_training_mode.name if selected_training_mode is not None else None,
         )
 
     def training_step(self, batch, batch_idx):
-        # Extract inputs from batch and pass explicitly to process_batch
-        # import ipdb; ipdb.set_trace()
+        if 'context_audio_codes' in batch:
+            context_audio_codes = batch['context_audio_codes']
+            context_audio_codes_lens = batch['context_audio_codes_lens']
+        else:
+            context_audio = batch['context_audio']
+            context_audio_lens = batch['context_audio_lens']
+            context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
+        
+        if 'audio_codes' in batch:
+            audio_codes = batch['audio_codes']
+            audio_codes_lens = batch['audio_codes_lens']
+        else:
+            audio = batch['audio']
+            audio_lens = batch['audio_lens']
+            audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
+
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
             context_text_tokens=batch['context_text_tokens'],
             context_text_tokens_lens=batch['context_text_tokens_lens'],
-            audio=batch.get('audio'),
-            audio_lens=batch.get('audio_lens'),
-            audio_codes=batch.get('audio_codes'),
-            audio_codes_lens=batch.get('audio_codes_lens'),
-            context_audio=batch.get('context_audio'),
-            context_audio_lens=batch.get('context_audio_lens'),
-            context_audio_codes=batch.get('context_audio_codes'),
-            context_audio_codes_lens=batch.get('context_audio_codes_lens'),
+            audio_codes=audio_codes,
+            audio_codes_lens=audio_codes_lens,
+            context_audio_codes=context_audio_codes,
+            context_audio_codes_lens=context_audio_codes_lens,
             phoneme_tokens=batch.get('phoneme_tokens'),
             phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
             mode="train",
@@ -1709,19 +1849,31 @@ class EasyMagpieTTSModel(ModelPT):
 
     def validation_step(self, batch, batch_idx):
         # Extract inputs from batch and pass explicitly to process_batch
+        if 'context_audio_codes' in batch:
+            context_audio_codes = batch['context_audio_codes']
+            context_audio_codes_lens = batch['context_audio_codes_lens']
+        else:
+            context_audio = batch['context_audio']
+            context_audio_lens = batch['context_audio_lens']
+            context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
+        
+        if 'audio_codes' in batch:
+            audio_codes = batch['audio_codes']
+            audio_codes_lens = batch['audio_codes_lens']
+        else:
+            audio = batch['audio']
+            audio_lens = batch['audio_lens']
+            audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
+        
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
             context_text_tokens=batch['context_text_tokens'],
             context_text_tokens_lens=batch['context_text_tokens_lens'],
-            audio=batch.get('audio'),
-            audio_lens=batch.get('audio_lens'),
-            audio_codes=batch.get('audio_codes'),
-            audio_codes_lens=batch.get('audio_codes_lens'),
-            context_audio=batch.get('context_audio'),
-            context_audio_lens=batch.get('context_audio_lens'),
-            context_audio_codes=batch.get('context_audio_codes'),
-            context_audio_codes_lens=batch.get('context_audio_codes_lens'),
+            audio_codes=audio_codes,
+            audio_codes_lens=audio_codes_lens,
+            context_audio_codes=context_audio_codes,
+            context_audio_codes_lens=context_audio_codes_lens,
             phoneme_tokens=batch.get('phoneme_tokens'),
             phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
             mode="val",
@@ -1897,47 +2049,7 @@ class EasyMagpieTTSModel(ModelPT):
     def setup_test_data(self, cfg):
         self._test_dl = self._setup_test_dataloader(cfg)
 
-    def _log_phoneme_predictions(
-        self,
-        pred_phoneme_token_lists: List[List[int]],
-        gt_phoneme_token_lists: List[List[int]],
-        batch_size: int,
-    ) -> None:
-        """Log predicted vs ground truth phoneme tokens for debugging."""
-        for item_idx in range(batch_size):
-            logging.info(f"Predicted phoneme tokens for item {item_idx}: {pred_phoneme_token_lists[item_idx]}")
-            logging.info(f"GT phoneme tokens for item {item_idx}: {gt_phoneme_token_lists[item_idx]}")
-            predicted_phoneme_text = self.phoneme_tokenizer.decode(pred_phoneme_token_lists[item_idx])
-            gt_phoneme_text = self.phoneme_tokenizer.decode(gt_phoneme_token_lists[item_idx])
-            logging.info(f"Predicted phoneme text for item {item_idx}: {predicted_phoneme_text}")
-            logging.info(f"GT phoneme text for item {item_idx}: {gt_phoneme_text}")
-
-    def _collect_phoneme_tokens_for_logging(
-        self,
-        pred_phoneme_tokens: torch.Tensor,
-        gt_phoneme_tokens_current: torch.Tensor,
-        use_phoneme_input: torch.Tensor,
-        pred_phoneme_token_lists: List[List[int]],
-        gt_phoneme_token_lists: List[List[int]],
-        batch_size: int,
-    ) -> None:
-        """Collect phoneme tokens into lists for later logging (does not print)."""
-        special_tokens = {
-            self.phoneme_tokenizer.eos_token_id,
-            self.phoneme_tokenizer.bos_token_id,
-            self.phoneme_tokenizer.pad,
-        }
-        for item_idx in range(batch_size):
-            if use_phoneme_input[item_idx, 0, 0] > 0:
-                for phoneme_channel_idx in range(self.phoneme_stacking_factor):
-                    pred_token = pred_phoneme_tokens[item_idx, phoneme_channel_idx].item()
-                    if pred_token not in special_tokens:
-                        pred_phoneme_token_lists[item_idx].append(pred_token)
-
-                    gt_token = gt_phoneme_tokens_current[item_idx, phoneme_channel_idx].item()
-                    if gt_token not in special_tokens:
-                        gt_phoneme_token_lists[item_idx].append(gt_token)
-
+    
     def _sample_audio_codes(
         self,
         last_hidden: torch.Tensor,
@@ -1978,235 +2090,67 @@ class EasyMagpieTTSModel(ModelPT):
 
         return audio_codes_next, all_codes_next_argmax
 
-    def _process_phoneme_predictions(
+    def streaming_init(
         self,
-        last_hidden: torch.Tensor,
-        actual_batch_size: int,
-        current_phoneme_positions: torch.Tensor,
-        gt_phoneme_tokens: torch.Tensor,
-        phoneme_input_type: str,
-        phoneme_sampling_method: str,
-        temperature: float,
-        topk: int,
-        timestep_idx: int,
-        device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Process phoneme predictions for the current timestep.
-
-        Returns:
-            pred_phoneme_tokens: Predicted phoneme tokens (B, phoneme_stacking_factor)
-            gt_phoneme_tokens_current: GT phoneme tokens for current timestep (B, phoneme_stacking_factor)
-            input_phoneme_tokens_current: Tokens to use as input (GT or predicted)
-            input_phoneme_embedding: Embedded phoneme tokens (B, phoneme_stacking_factor, E)
-        """
-        # Get phoneme logits and sample
-        all_code_logits_t_phoneme = self.phoneme_final_proj(last_hidden[:, -1, :])
-        all_code_logits_t_phoneme = all_code_logits_t_phoneme[:actual_batch_size]
-
-        all_codes_next_phoneme = self.sample_codes_from_logits_phoneme(
-            all_code_logits_t_phoneme, temperature=temperature, topk=topk
-        )
-        all_codes_next_phoneme_argmax = self.sample_codes_from_logits_phoneme(
-            all_code_logits_t_phoneme, temperature=0.01
-        )
-
-        # Select predicted tokens based on sampling method
-        pred_phoneme_tokens = (
-            all_codes_next_phoneme_argmax if phoneme_sampling_method == 'argmax' else all_codes_next_phoneme
-        )
-
-        # Handle BOS token at position 0
-        phoneme_bos_tensor = torch.full(
-            (actual_batch_size, self.phoneme_stacking_factor),
-            self.phoneme_tokenizer.bos_token_id,
-            device=device,
-        ).long()
-        use_bos_phoneme = (current_phoneme_positions == 0).unsqueeze(1).long()
-        pred_phoneme_tokens = (
-            use_bos_phoneme * phoneme_bos_tensor + (1 - use_bos_phoneme) * pred_phoneme_tokens
-        ).long()
-
-        # Get ground truth phoneme tokens for current timestep
-        gt_phoneme_idx = min(timestep_idx, gt_phoneme_tokens.size(2) - 1)
-        gt_phoneme_tokens_current = gt_phoneme_tokens[:, :, gt_phoneme_idx]
-
-        # Select input tokens (GT or predicted) and embed
-        input_phoneme_tokens_current = gt_phoneme_tokens_current if phoneme_input_type == 'gt' else pred_phoneme_tokens
-        input_phoneme_embedding = self.embed_phoneme_tokens(input_phoneme_tokens_current.unsqueeze(2))
-
-        return pred_phoneme_tokens, gt_phoneme_tokens_current, input_phoneme_tokens_current, input_phoneme_embedding
-
-    def _compute_phoneme_channel_input(
-        self,
-        input_phoneme_embedding: torch.Tensor,
-        current_phoneme_positions: torch.Tensor,
-        phoneme_stream_ended: torch.Tensor,
-        actual_batch_size: int,
-        device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute the phoneme channel input embedding with masking.
-
-        Returns:
-            phoneme_channel_input_t: Masked phoneme embedding (B, 1, E)
-            use_phoneme_input: Mask indicating which items should use phoneme input (B, 1, 1)
-        """
-        # Determine which items should use phoneme input
-        use_phoneme_input = (current_phoneme_positions >= 0) & (~phoneme_stream_ended)
-        use_phoneme_input = use_phoneme_input.unsqueeze(1).unsqueeze(2).float()
-
-        # Create zero embedding for items not using phoneme input
-        zero_phoneme_embedding = torch.zeros(actual_batch_size, 1, self.cfg.embedding_dim, device=device)
-
-        # Combine: use phoneme embedding where active, zero otherwise
-        phoneme_channel_input_t = (
-            use_phoneme_input * input_phoneme_embedding + (1 - use_phoneme_input) * zero_phoneme_embedding
-        )
-
-        return phoneme_channel_input_t, use_phoneme_input
-
-    def _prepare_next_decoder_input(
-        self,
-        audio_codes_next: torch.Tensor,
-        context_plus_audio_embedded: torch.Tensor,
-        context_plus_audio_lens: torch.Tensor,
-        min_context_len: int,
-        idx: int,
-        current_text_input_mode: str,
-        remaining_text_embedded: Optional[torch.Tensor],
-        current_text_positions: torch.Tensor,
-        phoneme_channel_input_t: Optional[torch.Tensor],
-        use_cfg: bool,
-        dummy_context_embedding_unconditional: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """
-        Prepare the input embedding for the next decoder step.
-
-        Handles:
-        - Mixing context embeddings with generated audio embeddings based on context completeness
-        - Adding streaming text embeddings if in streaming mode
-        - Adding phoneme channel input if available
-        - Duplicating for CFG if enabled
-        """
-        batch_size = audio_codes_next.size(0)
-        device = audio_codes_next.device
-
-        # Embed the newly generated audio codes
-        new_emb = self.embed_audio_tokens(audio_codes_next.unsqueeze(2))  # (B, 1, E)
-        new_emb_unconditional = new_emb.clone()
-
-        # Add streaming text embeddings if in streaming mode
-        if current_text_input_mode == 'streaming':
-            remaining_text_idx = current_text_positions.clamp(min=0)
-            remaining_text_embedded_current = remaining_text_embedded[
-                torch.arange(batch_size, device=device), remaining_text_idx, :
-            ].unsqueeze(1)
-            new_emb = new_emb + remaining_text_embedded_current
-
-        # Check which items still have context to process
-        context_incomplete_mask = context_plus_audio_lens > idx + min_context_len
-
-        if context_incomplete_mask.any():
-            # Some items still processing context - blend context with generated embeddings
-            context_incomplete_mask = context_incomplete_mask.unsqueeze(1).unsqueeze(2).float()
-            context_embedding_slice = context_plus_audio_embedded[
-                :, min_context_len + idx : min_context_len + idx + 1, :
-            ]
-            next_input = context_incomplete_mask * context_embedding_slice + (1 - context_incomplete_mask) * new_emb
-
-            if phoneme_channel_input_t is not None:
-                next_input = next_input + phoneme_channel_input_t
-
-            if use_cfg:
-                next_input_unconditional = (
-                    context_incomplete_mask * dummy_context_embedding_unconditional
-                    + (1 - context_incomplete_mask) * new_emb_unconditional
-                )
-                next_input = torch.cat([next_input, next_input_unconditional], dim=0)
-        else:
-            # All items finished context - use generated embeddings
-            next_input = new_emb
-            if phoneme_channel_input_t is not None:
-                next_input = next_input + phoneme_channel_input_t
-
-            if use_cfg:
-                next_input = torch.cat([next_input, new_emb_unconditional], dim=0)
-
-        return next_input
-
-    def _check_eos_and_update_end_indices(
-        self,
-        all_codes_next_argmax: torch.Tensor,
-        audio_codes_next: torch.Tensor,
-        end_indices: Dict[int, int],
-        context_plus_audio_lens: torch.Tensor,
-        min_context_len: int,
-        idx: int,
-        verbose: bool = False,
-    ) -> None:
-        """Check for EOS tokens and update end indices for completed items."""
-        for item_idx in range(all_codes_next_argmax.size(0)):
-            # Only check items that haven't ended and have passed their context
-            if item_idx not in end_indices and idx + min_context_len > context_plus_audio_lens[item_idx]:
-                pred_tokens = all_codes_next_argmax[item_idx]
-                pred_tokens_multinomial = audio_codes_next[item_idx]
-
-                if torch.any(pred_tokens == self.audio_eos_id) or torch.any(
-                    pred_tokens_multinomial == self.audio_eos_id
-                ):
-                    if verbose:
-                        logging.info(f"EOS detected for item {item_idx} at timestep {idx}")
-                    end_indices[item_idx] = idx
-
-    def infer_batch(
-        self,
-        batch,
-        max_decoder_steps=500,
-        temperature=0.7,
-        topk=80,
-        use_local_transformer_for_inference=False,
-        maskgit_n_steps=3,
-        use_cfg=False,
-        cfg_scale=1.0,
-        phoneme_input_type='gt',
-        phoneme_sampling_method='argmax',
-        dropout_text_input=False,
+        context_audio_codes: torch.Tensor,
+        context_audio_codes_lens: torch.Tensor,
+        context_text_tokens: torch.Tensor,
+        context_text_tokens_lens: torch.Tensor,
         inference_mode: Optional[str] = None,
-        verbose: bool = False,
-    ):
+        use_cfg: bool = False,
+        cfg_scale: float = 1.0,
+        use_local_transformer: bool = False,
+        temperature: float = 0.7,
+        topk: int = 80,
+        phoneme_input_type: str = 'predicted',
+        phoneme_sampling_method: str = 'argmax',
+        gt_phoneme_tokens: Optional[torch.Tensor] = None,
+        gt_phoneme_tokens_lens: Optional[torch.Tensor] = None,
+    ) -> StreamingState:
         """
-        Run inference on a batch of inputs to generate audio from text.
+        Initialize streaming TTS inference state.
+
+        This prepares the model for streaming inference by processing the context
+        (audio + context text) and returning a StreamingState that can be used
+        with streaming_step() to incrementally generate audio.
+
+        Note: This function does NOT take the main text input. Text tokens are
+        provided incrementally via streaming_step().
+
+        For batched inference, each batch item can have a different context length.
+        This function processes only up to the minimum context length across the batch,
+        storing the remaining context to be processed in streaming_step's context phase.
+
+        The streaming inference follows phases (per batch item):
+        1. Context phase: Processing remaining context (if any) for items with longer context.
+        2. Prompt phase: First `streaming_speech_delay` text tokens are processed
+           without generating audio (building up context).
+        3. Generation phase: Audio BOS is added and audio codes are generated
+           autoregressively, with remaining text tokens added to audio embeddings.
 
         Args:
-            batch: Input batch containing:
-                - text, text_lens: Input text tokens and lengths
-                - context_text_tokens, context_text_tokens_lens: Context text for speaker/style
-                - context_audio_codes/context_audio (optional): Audio context for speaker cloning
-            max_decoder_steps: Maximum number of decoding steps.
-            temperature: Sampling temperature for audio codes.
-            topk: Top-k sampling parameter.
-            use_local_transformer_for_inference: Whether to use local transformer for AR sampling.
-            maskgit_n_steps: Number of MaskGit steps (unused in AR mode).
+            context_audio_codes: Pre-computed audio codes for context audio (B, C, T').
+            context_audio_codes_lens: Length of context audio codes (B,).
+            context_text_tokens: Context text token IDs for speaker/style conditioning (B, L).
+            context_text_tokens_lens: Length of context text (B,).
+            inference_mode: Name of the inference mode to use (e.g., "streaming_4_8").
+                If None, uses the default inference mode.
             use_cfg: Whether to use classifier-free guidance.
             cfg_scale: CFG scale factor (higher = stronger conditioning).
-            phoneme_input_type: 'gt' for ground truth or 'pred' for predicted phonemes.
+            use_local_transformer: Whether to use local transformer for AR sampling.
+            temperature: Sampling temperature for audio codes.
+            topk: Top-k sampling parameter.
+            phoneme_input_type: 'gt' or 'predicted' for phoneme tokens (use 'predicted' for streaming).
             phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
-            dropout_text_input: Whether to dropout text input for CFG training.
-            inference_mode: Name of the inference mode to use (e.g., "full", "streaming_4_8").
-                If None, uses the default inference mode.
-            verbose: If True, enables detailed logging of decoding progress, EOS detection,
-                and phoneme predictions. Default False for cleaner output.
+            gt_phoneme_tokens: Optional GT phoneme tokens (B, L) with BOS/EOS for teacher forcing.
+            gt_phoneme_tokens_lens: Lengths of GT phoneme tokens (B,).
 
         Returns:
-            predicted_audio: Generated audio waveforms (B, max_audio_len)
-            predicted_audio_lens: Lengths of generated audio (B,)
-            predicted_codes: Generated audio codes (B, num_codebooks, T)
-            predicted_codes_lens: Lengths of generated codes (B,)
-            rtf_metrics: Dictionary with timing metrics (rtf, time_to_first_prediction, etc.)
+            StreamingState: Initial state for streaming inference.
         """
         with torch.inference_mode():
-            start_time = time.time()
+            batch_size = context_audio_codes.size(0)
+            device = context_audio_codes.device
 
             # Resolve inference mode
             mode_name = inference_mode if inference_mode is not None else self.default_inference_mode
@@ -2215,306 +2159,775 @@ class EasyMagpieTTSModel(ModelPT):
                 raise ValueError(f"Unknown inference mode '{mode_name}'. Available modes: {available_modes}")
 
             selected_training_mode = self.mode_name_to_mode[mode_name]
-            if verbose:
-                logging.info(f"Using inference mode: {selected_training_mode.name}")
 
-            current_text_input_mode = selected_training_mode.text_input_mode
-            current_streaming_speech_delay = selected_training_mode.streaming_speech_delay
-            current_streaming_phonemes_delay = selected_training_mode.streaming_phonemes_delay
-
-            # Prepare context embeddings (text + audio context)
-            context_tensors = self.prepare_context_tensors(
-                text=batch['text'],
-                text_lens=batch['text_lens'],
-                context_text_tokens=batch['context_text_tokens'],
-                context_text_tokens_lens=batch['context_text_tokens_lens'],
-                context_audio_codes=batch.get('context_audio_codes'),
-                context_audio_codes_lens=batch.get('context_audio_codes_lens'),
-                context_audio=batch.get('context_audio'),
-                context_audio_lens=batch.get('context_audio_lens'),
-                dropout_text_input=dropout_text_input,
+            # Prepare context embedding using shared helper
+            context_embedding, context_lens, context_audio_codes, context_audio_codes_lens = self.prepare_context_tensors(
+                context_text_tokens=context_text_tokens,
+                context_text_tokens_lens=context_text_tokens_lens,
+                context_audio_codes=context_audio_codes,
+                context_audio_codes_lens=context_audio_codes_lens,
                 training_mode=selected_training_mode,
+                dropout_conditional_input=False,
             )
-            context_embedding = context_tensors.context_embedding  # (B, T_total, E)
-            context_lens = context_tensors.context_lens  # (B,)
-            remaining_text_embedded = context_tensors.remaining_text_embedded
-            remaining_text_lens = context_tensors.remaining_text_lens
 
-            actual_batch_size = context_embedding.size(0)
-            device = context_embedding.device
+            # Store full context embedding and lens before any CFG manipulation
+            full_context_embedding = context_embedding.clone()  # (B, T_max, E)
+            full_context_lens = context_lens.clone()  # (B,)
 
-            # Prepare phoneme channel input if phoneme tokenizer is available
-            gt_phoneme_tokens = None
-            if self.phoneme_tokenizer is not None:
-                context_lens_for_phonemes = (
-                    context_lens - current_streaming_speech_delay + current_streaming_phonemes_delay
-                )
-                _, _, gt_phoneme_tokens, _ = self.prepare_phoneme_channel_input(
-                    batch['phoneme_tokens'], batch['phoneme_tokens_lens'], context_lens_for_phonemes
-                )
-
-            # Initialize audio codes with BOS token
-            audio_codes_bos = torch.full(
-                (actual_batch_size, self.num_audio_codebooks * self.frame_stacking_factor, 1),
-                self.audio_bos_id,
-                device=device,
-            ).long()
-            audio_codes_lens = torch.ones(actual_batch_size, device=device).long()
-
-            audio_codes_input_embedded = self.embed_audio_tokens(audio_codes_bos)  # (B, 1, E)
-
-            # For streaming mode, add text embeddings to audio BOS
-            if current_text_input_mode == 'streaming':
-                remaining_text_pad_length = max_decoder_steps - remaining_text_lens.max().item() + 1
-                remaining_text_pad_tensor = torch.zeros(
-                    actual_batch_size, remaining_text_pad_length, remaining_text_embedded.size(2), device=device
-                )
-                remaining_text_embedded = torch.cat([remaining_text_embedded, remaining_text_pad_tensor], dim=1)
-                audio_codes_input_embedded = audio_codes_input_embedded + remaining_text_embedded[:, :1, :]
-
-            # Combine context and audio embeddings
-            context_plus_audio_embedded, context_plus_audio_lens = self.join_embeddings_temporally(
-                embeddings=[context_embedding, audio_codes_input_embedded],
-                lengths=[context_lens, audio_codes_lens],
-            )
-            min_context_len = context_plus_audio_lens.min().item()
-
-            # Adjust min_context_len for phoneme delay if using phoneme tokenizer
-            if self.phoneme_tokenizer is not None:
-                min_context_len = (
-                    min_context_len - current_streaming_speech_delay + current_streaming_phonemes_delay - 1
-                )
+            # Compute min context length - we only process up to this in init
+            min_context_len = context_lens.min().item()
 
             # Setup classifier-free guidance if enabled
             dummy_context_embedding_unconditional = None
             if use_cfg:
-                # Create unconditional context embedding (all UNK tokens)
                 dummy_context_embedding_unconditional = self.decoder.get_input_embeddings()(
-                    torch.full((actual_batch_size, 1), self.cfg_unk_token_id, device=device)
+                    torch.full((1, 1), self.cfg_unk_token_id, device=device)
                 )
-                dummy_context_embedding_unconditional_expanded = dummy_context_embedding_unconditional.expand(
-                    -1, context_embedding.size(1), -1
+                # Create unconditional context (same length as conditional)
+                dummy_context_expanded = dummy_context_embedding_unconditional.expand(
+                    batch_size, context_embedding.size(1), -1
                 )
+                # Concatenate conditional and unconditional: (2*B, T, E)
+                context_embedding = torch.cat([context_embedding, dummy_context_expanded], dim=0)
 
-                dummy_context_plus_audio_embedded, _ = self.join_embeddings_temporally(
-                    embeddings=[dummy_context_embedding_unconditional_expanded, audio_codes_input_embedded],
-                    lengths=[context_lens, audio_codes_lens],
-                )
-                # Concatenate conditional and unconditional inputs: (2B, T_min, E)
-                first_inference_input = torch.cat(
-                    [context_plus_audio_embedded, dummy_context_plus_audio_embedded], dim=0
-                )[:, :min_context_len, :]
-            else:
-                first_inference_input = context_plus_audio_embedded[:, :min_context_len, :]
-
-            # First forward pass to process all context at once
+            # First forward pass to process context - only up to min_context_len
             cache_position = torch.arange(min_context_len, device=device)
             transformer_out = self.forward(
-                inputs_embeds=first_inference_input,
+                inputs_embeds=context_embedding[:, :min_context_len, :],
                 attention_mask=None,
                 use_cache=True,
                 past_key_values=None,
                 cache_position=cache_position,
             )
 
-            time_to_first_prediction = time.time() - start_time
             last_hidden = transformer_out.last_hidden_state
             past_kv = transformer_out.past_key_values
             current_cache_seq_len = min_context_len
 
-            # Initialize decoding state
-            all_predictions = []
-            end_indices = {}  # Maps item_idx -> timestep when EOS was detected
+            # Process GT phoneme tokens if provided (for teacher forcing)
+            gt_phoneme_embeddings = None
+            gt_phoneme_lens = None
+            if gt_phoneme_tokens is not None and gt_phoneme_tokens_lens is not None:
+                gt_phoneme_expanded = gt_phoneme_tokens.unsqueeze(1)  # (B, 1, L)
+                gt_phoneme_stacked, gt_phoneme_lens = self.stack_codes(
+                    gt_phoneme_expanded,
+                    gt_phoneme_tokens_lens,
+                    self.phoneme_tokenizer.bos_token_id,
+                    self.phoneme_tokenizer.eos_token_id,
+                    self.phoneme_stacking_factor,
+                    1,
+                )
+                gt_phoneme_embeddings = self.embed_phoneme_tokens(gt_phoneme_stacked)  # (B, T', E)
 
-            # Track text position for each item in batch
-            # Negative values indicate we haven't started reading remaining text yet
-            current_text_positions = torch.tensor(
-                [min_context_len - context_plus_audio_lens[i] for i in range(actual_batch_size)],
+            # Initialize streaming state with batch support
+            state = StreamingState(
+                batch_size=batch_size,
+                past_key_values=past_kv,
+                cache_seq_len=current_cache_seq_len,
+                all_predictions=[],
+                all_phoneme_predictions=[],
+                context_audio_codes=context_audio_codes,
+                context_audio_codes_lens=context_audio_codes_lens,
+                context_lens=context_lens,
+                full_context_embedding=full_context_embedding,
+                full_context_lens=full_context_lens,
+                context_position=torch.full((batch_size,), min_context_len, dtype=torch.long, device=device),
+                text_tokens_seen=torch.zeros(batch_size, dtype=torch.long, device=device),
+                phoneme_steps=torch.zeros(batch_size, dtype=torch.long, device=device),
+                audio_steps=torch.zeros(batch_size, dtype=torch.long, device=device),
+                phoneme_stream_ended=torch.zeros(batch_size, dtype=torch.bool, device=device),
+                finished=torch.zeros(batch_size, dtype=torch.bool, device=device),
                 device=device,
-            ).long()
-
-            # Initialize phoneme tracking state
-            current_phoneme_positions = None
-            pred_phoneme_token_lists = [[] for _ in range(actual_batch_size)]
-            gt_phoneme_token_lists = [[] for _ in range(actual_batch_size)]
-            phoneme_stream_ended = torch.zeros(actual_batch_size, device=device).bool()
-
-            if self.phoneme_tokenizer is not None:
-                current_phoneme_positions = current_text_positions - current_text_positions.max() - 1
-
-            # Main autoregressive decoding loop
-            for idx in range(max_decoder_steps):
-                # Update position trackers
-                current_text_positions += 1
-                if self.phoneme_tokenizer is not None:
-                    current_phoneme_positions += 1
-
-                if verbose and idx % 20 == 0:
-                    logging.info(f"Decoding timestep {idx}")
-
-                # Compute audio logits from last hidden state
-                last_hidden_audio = self.audio_out_projection(last_hidden[:, -1, :])
-                all_code_logits_t = self.final_proj(last_hidden_audio)
-
-                # Apply CFG to logits if enabled
-                if use_cfg:
-                    conditional_logits = all_code_logits_t[:actual_batch_size]
-                    unconditional_logits = all_code_logits_t[actual_batch_size:]
-                    all_code_logits_t = cfg_scale * conditional_logits + (1.0 - cfg_scale) * unconditional_logits
-
-                # Sample audio codes
-                audio_codes_next, all_codes_next_argmax = self._sample_audio_codes(
-                    last_hidden=last_hidden,
-                    all_code_logits_t=all_code_logits_t,
-                    temperature=temperature,
-                    topk=topk,
-                    use_local_transformer_for_inference=use_local_transformer_for_inference,
-                    use_cfg=use_cfg,
-                    cfg_scale=cfg_scale,
-                )
-
-                # Process phoneme predictions if phoneme tokenizer exists
-                phoneme_channel_input_t = None
-                if self.phoneme_tokenizer is not None:
-                    (
-                        pred_phoneme_tokens,
-                        gt_phoneme_tokens_current,
-                        input_phoneme_tokens_current,
-                        input_phoneme_embedding,
-                    ) = self._process_phoneme_predictions(
-                        last_hidden=last_hidden,
-                        actual_batch_size=actual_batch_size,
-                        current_phoneme_positions=current_phoneme_positions,
-                        gt_phoneme_tokens=gt_phoneme_tokens,
-                        phoneme_input_type=phoneme_input_type,
-                        phoneme_sampling_method=phoneme_sampling_method,
-                        temperature=temperature,
-                        topk=topk,
-                        timestep_idx=idx,
-                        device=device,
-                    )
-
-                    # Compute masked phoneme channel input
-                    phoneme_channel_input_t, use_phoneme_input = self._compute_phoneme_channel_input(
-                        input_phoneme_embedding=input_phoneme_embedding,
-                        current_phoneme_positions=current_phoneme_positions,
-                        phoneme_stream_ended=phoneme_stream_ended,
-                        actual_batch_size=actual_batch_size,
-                        device=device,
-                    )
-
-                    # Collect phoneme tokens for logging (no printing here)
-                    self._collect_phoneme_tokens_for_logging(
-                        pred_phoneme_tokens=pred_phoneme_tokens,
-                        gt_phoneme_tokens_current=gt_phoneme_tokens_current,
-                        use_phoneme_input=use_phoneme_input,
-                        pred_phoneme_token_lists=pred_phoneme_token_lists,
-                        gt_phoneme_token_lists=gt_phoneme_token_lists,
-                        batch_size=actual_batch_size,
-                    )
-
-                    # Check for phoneme EOS
-                    for item_idx in range(actual_batch_size):
-                        if torch.any(input_phoneme_tokens_current[item_idx] == self.phoneme_tokenizer.eos_token_id):
-                            if verbose and not phoneme_stream_ended[item_idx]:
-                                logging.info(f"Phoneme EOS detected for item {item_idx} at timestep {idx}")
-                            phoneme_stream_ended[item_idx] = True
-
-                # Check for audio EOS
-                self._check_eos_and_update_end_indices(
-                    all_codes_next_argmax=all_codes_next_argmax,
-                    audio_codes_next=audio_codes_next,
-                    end_indices=end_indices,
-                    context_plus_audio_lens=context_plus_audio_lens,
-                    min_context_len=min_context_len,
-                    idx=idx,
-                    verbose=verbose,
-                )
-
-                all_predictions.append(audio_codes_next)
-
-                # Prepare input for next decoder step
-                next_input = self._prepare_next_decoder_input(
-                    audio_codes_next=audio_codes_next,
-                    context_plus_audio_embedded=context_plus_audio_embedded,
-                    context_plus_audio_lens=context_plus_audio_lens,
-                    min_context_len=min_context_len,
-                    idx=idx,
-                    current_text_input_mode=current_text_input_mode,
-                    remaining_text_embedded=remaining_text_embedded,
-                    current_text_positions=current_text_positions,
-                    phoneme_channel_input_t=phoneme_channel_input_t,
-                    use_cfg=use_cfg,
-                    dummy_context_embedding_unconditional=dummy_context_embedding_unconditional,
-                )
-
-                # Forward pass for next token
-                cache_position = torch.tensor([current_cache_seq_len], device=device)
-                transformer_out = self.forward(
-                    inputs_embeds=next_input,
-                    attention_mask=None,
-                    use_cache=True,
-                    past_key_values=past_kv,
-                    cache_position=cache_position,
-                )
-                last_hidden = transformer_out.last_hidden_state
-                past_kv = transformer_out.past_key_values
-                current_cache_seq_len += 1
-
-                # Check if all items have finished
-                if len(end_indices) == actual_batch_size:
-                    if verbose:
-                        logging.info(f"All items finished at timestep {idx}")
-                    break
-
-            # Log phoneme predictions if verbose
-            if verbose and self.phoneme_tokenizer is not None:
-                self._log_phoneme_predictions(
-                    pred_phoneme_token_lists=pred_phoneme_token_lists,
-                    gt_phoneme_token_lists=gt_phoneme_token_lists,
-                    batch_size=actual_batch_size,
-                )
-
-            # Post-process predictions
-            tts_generation_time = time.time() - start_time
-            tts_generation_time_per_frame = tts_generation_time / len(all_predictions)
-
-            # Calculate predicted lengths, accounting for context offset
-            pred_codes_start_indices = context_plus_audio_lens - min_context_len
-            predicted_lens = [end_indices.get(i, max_decoder_steps) for i in range(actual_batch_size)]
-            predicted_codes_lens = torch.tensor(predicted_lens, device=device).long()
-            predicted_codes_lens = predicted_codes_lens - pred_codes_start_indices
-
-            # Stack and slice predictions to remove context portion
-            predicted_codes = torch.stack(all_predictions, dim=-1)  # (B, num_codebooks, T)
-            predicted_codes = self.slice_pred_embeddings(
-                predicted_codes.permute(0, 2, 1),
-                context_lens=pred_codes_start_indices,
-                target_lens=predicted_codes_lens,
+                training_mode=selected_training_mode,
+                use_cfg=use_cfg,
+                cfg_scale=cfg_scale,
+                use_local_transformer=use_local_transformer,
+                temperature=temperature,
+                topk=topk,
+                dummy_context_embedding_unconditional=dummy_context_embedding_unconditional,
+                last_hidden=last_hidden,
+                text_finished=torch.zeros(batch_size, dtype=torch.bool, device=device),
+                phoneme_input_type=phoneme_input_type,
+                phoneme_sampling_method=phoneme_sampling_method,
+                last_phoneme_tokens=None,
+                last_audio_codes=None,
+                audio_prediction_start_idx=torch.full((batch_size,), -1, dtype=torch.long, device=device),
+                audio_prediction_end_idx=torch.full((batch_size,), -1, dtype=torch.long, device=device),
+                phoneme_prediction_start_idx=torch.full((batch_size,), -1, dtype=torch.long, device=device),
+                phoneme_prediction_end_idx=torch.full((batch_size,), -1, dtype=torch.long, device=device),
+                gt_phoneme_embeddings=gt_phoneme_embeddings,
+                gt_phoneme_lens=gt_phoneme_lens,
             )
-            predicted_codes = predicted_codes.permute(0, 2, 1)
 
-            # Remove EOS tokens and convert codes to audio
-            predicted_codes, predicted_codes_lens = self.remove_eos_token(predicted_codes, predicted_codes_lens)
-            predicted_audio, predicted_audio_lens, _ = self.codes_to_audio(predicted_codes, predicted_codes_lens)
+            return state
+
+    def streaming_step(
+        self,
+        state: StreamingState,
+        text_tokens: Optional[torch.Tensor] = None,
+        force_dropout_text: bool = False,
+    ) -> Tuple[StreamingState, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Perform one streaming inference step with batch support.
+
+        This function processes one text token per batch item (or signals end of text with None)
+        and generates predictions according to the streaming delays. Each batch item can be
+        in a different phase.
+
+        The streaming operates in four phases per batch item:
+        1. Context phase (context_position < full_context_lens):
+           - Still processing remaining context from streaming_init
+           - Uses context embedding, ignores text_tokens for this item
+        2. Prompt phase (text_tokens_seen < phoneme_delay):
+           - Only text tokens are processed, KV cache is extended
+           - No phoneme or audio predictions
+        3. Phoneme-only phase (phoneme_delay <= text_tokens_seen < speech_delay):
+           - Starts with phoneme BOS on first step
+           - Only phoneme predictions (no audio)
+           - Input: text embedding + phoneme embedding
+        4. Audio phase (text_tokens_seen >= speech_delay):
+           - Starts with audio BOS on first step
+           - Both phoneme and audio predictions
+           - Input: text embedding + phoneme embedding + audio embedding
+
+        IMPORTANT: Only ONE forward call to the decoder per streaming_step.
+
+        Args:
+            state: Current StreamingState from streaming_init or previous streaming_step.
+            text_tokens: Next text token for each batch item, shape (B,), or None if text has finished.
+                For items still in context phase, the text_token value is ignored (can be 0).
+                When None is passed, the model continues generating until EOS.
+
+        Returns:
+            Tuple of:
+                - Updated StreamingState
+                - Predicted audio codes for this step (B, C, S) unstacked, or None if no items in audio phase
+                  where C = num_audio_codebooks and S = frame_stacking_factor
+                - Predicted phoneme tokens for this step (B, phoneme_stacking_factor) or None if no items in phoneme phase
+        """
+        if state.finished.all():
+            return state, None, None
+
+        with torch.inference_mode():
+            device = state.device
+            batch_size = state.batch_size
+            streaming_speech_delay = state.training_mode.streaming_speech_delay
+            streaming_phonemes_delay = state.training_mode.streaming_phonemes_delay
+
+            # ==================== DETERMINE PHASES PER BATCH ITEM ====================
+            needs_context = state.context_position < state.full_context_lens  # (B,) bool
+            needs_text = (~needs_context) & (~state.text_finished)
+            needs_phoneme = (state.text_tokens_seen >= streaming_phonemes_delay) & (~state.phoneme_stream_ended)
+            needs_audio = (state.text_tokens_seen >= streaming_speech_delay) & (~state.finished)
+
+            next_input = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
+            # --- Context phase items: use next context embedding ---
+            if needs_context.any():
+                # Gather context embeddings at current position for each item
+                # context_position: (B,) - position indices
+                # full_context_embedding: (B, T_max, E)
+                ctx_positions = state.context_position.clone()  # (B,)
+                # Clamp positions to valid range for gathering
+                ctx_positions = ctx_positions.clamp(max=state.full_context_embedding.size(1) - 1)
+                # Gather: need (B, 1, E) from (B, T, E) at positions (B,)
+                ctx_emb = state.full_context_embedding[
+                    torch.arange(batch_size, device=device),
+                    ctx_positions,
+                    :
+                ].unsqueeze(1)  # (B, 1, E)
+                # Only apply to items in context phase
+                context_mask = needs_context.view(batch_size, 1, 1).float()
+                next_input = next_input + ctx_emb * context_mask
+
+            # --- Non-context phase items: handle text embedding ---
+            text_embedded = None
+            if text_tokens is not None and needs_text.any():
+                # Embed text tokens for all items (will be masked later)
+                text_tokens_2d = text_tokens.unsqueeze(1)  # (B, 1)
+                text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
+
+                # Handle BPE char tokenizer
+                if self.use_bpe_char_tokenizer:
+                    text_mask = torch.ones_like(text_tokens_2d, dtype=torch.bool)
+                    cas_embedding = self.cas_encoder(text_tokens_2d, subword_mask=text_mask)  # (B, 1, E)
+                    text_embedded = text_embedded + cas_embedding
+
+                if force_dropout_text:
+                    text_embedded = text_embedded * 0
+
+                text_add_mask = needs_text.view(batch_size, 1, 1).float()
+                next_input = next_input + text_embedded * text_add_mask
+                # Check for EOS tokens - mark those items as text_finished
+                # Items that receive EOS should not have their text embedded added after this step
+                is_eos_token = (text_tokens == self.eos_id)  # (B,) bool
+                state.text_finished = state.text_finished | is_eos_token
+
+            elif text_tokens is None:
+                # Text finished signal for items not in context phase
+                state.text_finished = state.text_finished | ~needs_context
+
+            # --- Phoneme embedding for phoneme and audio phase items ---
+            if self.phoneme_tokenizer is not None:
+                if needs_phoneme.any():
+                    phoneme_emb = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
+
+                    if state.phoneme_input_type == 'gt' and state.gt_phoneme_embeddings is not None:
+                        # Teacher forcing: use pre-computed GT phoneme embeddings
+                        # Only use GT embedding if within valid length, otherwise zero
+                        within_gt_len = state.phoneme_steps < state.gt_phoneme_lens  # (B,)
+                        positions = state.phoneme_steps.clamp(max=state.gt_phoneme_embeddings.size(1) - 1)
+                        gt_emb = state.gt_phoneme_embeddings[
+                            torch.arange(batch_size, device=device), positions, :
+                        ].unsqueeze(1)  # (B, 1, E)
+                        phoneme_mask = (needs_phoneme & within_gt_len).view(batch_size, 1, 1).float()
+                        phoneme_emb = phoneme_emb + gt_emb * phoneme_mask
+                    else:
+                        # Prediction mode: use BOS or last predicted phoneme
+                        first_phoneme_step = needs_phoneme & (state.phoneme_steps == 0)
+                        has_last_phoneme = needs_phoneme & ~first_phoneme_step & (state.last_phoneme_tokens is not None)
+
+                        if first_phoneme_step.any():
+                            phoneme_bos = torch.full(
+                                (batch_size, self.phoneme_stacking_factor, 1),
+                                self.phoneme_tokenizer.bos_token_id,
+                                device=device,
+                            ).long()
+                            phoneme_bos_emb = self.embed_phoneme_tokens(phoneme_bos)  # (B, 1, E)
+                            first_mask = first_phoneme_step.view(batch_size, 1, 1).float()
+                            phoneme_emb = phoneme_emb + phoneme_bos_emb * first_mask
+
+                        if has_last_phoneme.any() and state.last_phoneme_tokens is not None:
+                            last_phoneme_emb = self.embed_phoneme_tokens(state.last_phoneme_tokens.unsqueeze(2))  # (B, 1, E)
+                            last_mask = has_last_phoneme.view(batch_size, 1, 1).float()
+                            phoneme_emb = phoneme_emb + last_phoneme_emb * last_mask
+
+                    next_input = next_input + phoneme_emb
+
+            # --- Audio embedding for audio phase items ---
+            if needs_audio.any():
+                # Determine which items are at first audio step
+                first_audio_step = needs_audio & (state.audio_steps == 0)
+                has_last_audio = needs_audio & ~first_audio_step & (state.last_audio_codes is not None)
+
+                audio_emb = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
+
+                if first_audio_step.any():
+                    # Create BOS for items at first audio step
+                    audio_bos = torch.full(
+                        (batch_size, self.num_audio_codebooks * self.frame_stacking_factor, 1),
+                        self.audio_bos_id,
+                        device=device,
+                    ).long()
+                    audio_bos_emb = self.embed_audio_tokens(audio_bos)  # (B, 1, E)
+                    first_mask = first_audio_step.view(batch_size, 1, 1).float()
+                    audio_emb = audio_emb + audio_bos_emb * first_mask
+
+                if has_last_audio.any() and state.last_audio_codes is not None:
+                    # Use last predicted audio
+                    last_audio_emb = self.embed_audio_tokens(state.last_audio_codes.unsqueeze(2))  # (B, 1, E)
+                    last_mask = has_last_audio.view(batch_size, 1, 1).float()
+                    audio_emb = audio_emb + last_audio_emb * last_mask
+
+                next_input = next_input + audio_emb
+
+            # ==================== HANDLE CFG ====================
+            if state.use_cfg:
+                # For unconditional branch, use dummy embedding for non-audio items
+                # and audio-only embedding for audio items
+                next_input_unconditional_context = state.dummy_context_embedding_unconditional.expand(batch_size, 1, -1)
+                # After the context is finished, we use zero embedding for the unconditional branch until audio phase starts
+                next_input_unconditional_zeros = torch.zeros_like(next_input_unconditional_context)
+                context_mask = needs_context.view(batch_size, 1, 1).float()
+                next_input_unconditional = context_mask * next_input_unconditional_context + (1 - context_mask) * next_input_unconditional_zeros
+                
+                # For audio phase items, we use audio embedding for the unconditional branch
+                if needs_audio.any():
+                    audio_mask = needs_audio.view(batch_size, 1, 1).float()
+                    next_input_unconditional = next_input_unconditional * (1 - audio_mask) + audio_emb * audio_mask
+
+                # Concatenate conditional and unconditional: (2*B, 1, E)
+                next_input = torch.cat([next_input, next_input_unconditional], dim=0)
+
+            # ==================== FORWARD PASS ====================
+            cache_position = torch.tensor([state.cache_seq_len], device=device)
+            transformer_out = self.forward(
+                inputs_embeds=next_input,
+                attention_mask=None,
+                use_cache=True,
+                past_key_values=state.past_key_values,
+                cache_position=cache_position,
+            )
+
+            state.last_hidden = transformer_out.last_hidden_state
+            state.past_key_values = transformer_out.past_key_values
+            state.cache_seq_len += 1
+
+            # ==================== UPDATE STATE ====================
+            # Update context_position for items in context phase
+            state.context_position = state.context_position + needs_context.long()
+            # Keep updating text_tokens_seen for items once the context is finished
+            # This is because this counter is used to determine when to start predicting phonemes and audio
+            state.text_tokens_seen = state.text_tokens_seen + (~needs_context).long()
+
+            # Update phoneme_steps for items in phoneme or audio phase
+            state.phoneme_steps = state.phoneme_steps + needs_phoneme.long()
+
+            # Update audio_steps for items in audio phase
+            state.audio_steps = state.audio_steps + needs_audio.long()
+
+            # ==================== PREDICTIONS ====================
+            pred_phoneme_tokens = None
+            audio_codes_next = None
+
+            # Phoneme predictions for items in phoneme or audio phase
+            if needs_phoneme.any() and self.phoneme_tokenizer is not None:
+                # Track phoneme prediction start index for items just entering phoneme phase
+                first_phoneme_step = needs_phoneme & (state.phoneme_prediction_start_idx == -1)
+                if first_phoneme_step.any():
+                    current_phoneme_step_idx = len(state.all_phoneme_predictions)  # before append
+                    state.phoneme_prediction_start_idx = torch.where(
+                        first_phoneme_step,
+                        torch.full_like(state.phoneme_prediction_start_idx, current_phoneme_step_idx),
+                        state.phoneme_prediction_start_idx
+                    )
+
+                # Check which items should predict phonemes (not ended)
+                pred_phoneme_tokens = self._predict_phoneme_tokens(state)  # (B, phoneme_stacking_factor)
+                state.last_phoneme_tokens = pred_phoneme_tokens
+                state.all_phoneme_predictions.append(pred_phoneme_tokens)
+
+                # Check for phoneme EOS per item
+                phoneme_eos_detected = needs_phoneme & (pred_phoneme_tokens == self.phoneme_tokenizer.eos_token_id).any(dim=1)  # (B,)
+                state.phoneme_stream_ended = state.phoneme_stream_ended | phoneme_eos_detected
+
+                # Track phoneme prediction end index for items that just ended
+                newly_ended_phoneme = phoneme_eos_detected & (state.phoneme_prediction_end_idx == -1)
+                if newly_ended_phoneme.any():
+                    current_phoneme_step_idx = len(state.all_phoneme_predictions)  # after append
+                    state.phoneme_prediction_end_idx = torch.where(
+                        newly_ended_phoneme,
+                        torch.full_like(state.phoneme_prediction_end_idx, current_phoneme_step_idx),
+                        state.phoneme_prediction_end_idx
+                    )
+
+            # Audio predictions for items in audio phase
+            if needs_audio.any():
+                # Track audio prediction start index for items just entering audio phase
+                first_audio_step = needs_audio & (state.audio_prediction_start_idx == -1)
+                if first_audio_step.any():
+                    # Track start in terms of frames (not steps)
+                    current_frame_idx = sum(p.size(-1) for p in state.all_predictions)  # total frames so far
+                    state.audio_prediction_start_idx = torch.where(
+                        first_audio_step,
+                        torch.full_like(state.audio_prediction_start_idx, current_frame_idx),
+                        state.audio_prediction_start_idx
+                    )
+
+                audio_codes_next_stacked, all_codes_next_argmax = self._predict_audio_codes(state)  # (B, C*S)
+
+                # Unstack immediately: (B, C*S) -> (B, C, S) where S = frame_stacking_factor
+                S = self.frame_stacking_factor
+                C = self.num_audio_codebooks
+                audio_codes_unstacked = audio_codes_next_stacked.view(batch_size, C, S)  # (B, C, S)
+
+                # Update last_audio_codes with stacked format (needed for next step's embedding)
+                if state.last_audio_codes is None:
+                    state.last_audio_codes = audio_codes_next_stacked
+                else:
+                    update_mask = needs_audio.view(batch_size, 1).expand_as(audio_codes_next_stacked)
+                    state.last_audio_codes = torch.where(update_mask, audio_codes_next_stacked, state.last_audio_codes)
+
+                # Check for EOS in each frame and track exact end position
+                # all_codes_next_argmax is also (B, C*S), reshape to (B, C, S)
+                all_codes_argmax_unstacked = all_codes_next_argmax.view(batch_size, C, S)
+
+                # For each batch item, find if/where EOS occurs in this step's frames
+                eos_in_sampled = (audio_codes_unstacked == self.audio_eos_id)  # (B, C, S)
+                eos_in_argmax = (all_codes_argmax_unstacked == self.audio_eos_id)  # (B, C, S)
+                eos_any_codebook = eos_in_sampled.any(dim=1) | eos_in_argmax.any(dim=1)  # (B, S)
+
+                # Find first frame with EOS per batch item (or S if none)
+                eos_frame_idx = torch.where(
+                    eos_any_codebook.any(dim=1),
+                    eos_any_codebook.int().argmax(dim=1),  # first frame with EOS
+                    torch.full((batch_size,), S, device=device)  # no EOS in this step
+                )  # (B,)
+
+                audio_eos_detected = eos_any_codebook.any(dim=1)  # (B,)
+                state.finished = state.finished | audio_eos_detected
+
+                # Track audio prediction end index (in frames) for items that just ended
+                newly_ended_audio = audio_eos_detected & (state.audio_prediction_end_idx == -1)
+                if newly_ended_audio.any():
+                    # End index = current frame count + frame offset where EOS was found
+                    current_frame_count = len(state.all_predictions) * self.frame_stacking_factor
+                    end_frame_idx = current_frame_count + eos_frame_idx
+                    state.audio_prediction_end_idx = torch.where(
+                        newly_ended_audio,
+                        end_frame_idx,
+                        state.audio_prediction_end_idx
+                    )
+
+                # Store unstacked codes
+                state.all_predictions.append(audio_codes_unstacked)
+                audio_codes_next = audio_codes_unstacked
+
+            return state, audio_codes_next, pred_phoneme_tokens
+
+    def _predict_phoneme_tokens(self, state: StreamingState) -> torch.Tensor:
+        """Predict phoneme tokens from the last hidden state."""
+        actual_batch_size = state.batch_size
+        last_hidden = state.last_hidden
+
+        # Get phoneme logits
+        all_code_logits_t_phoneme = self.phoneme_final_proj(last_hidden[:, -1, :])
+        all_code_logits_t_phoneme = all_code_logits_t_phoneme[:actual_batch_size]
+
+        # Sample phonemes
+        if state.phoneme_sampling_method == 'argmax':
+            pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
+                all_code_logits_t_phoneme, temperature=0.01
+            )
+        else:
+            pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
+                all_code_logits_t_phoneme, temperature=state.temperature, topk=state.topk
+            )
+        # (B, phoneme_stacking_factor)
+        return pred_phoneme_tokens
+
+    def _predict_audio_codes(
+        self, state: StreamingState
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Predict audio codes from the last hidden state."""
+        actual_batch_size = state.batch_size
+        last_hidden = state.last_hidden
+
+        # Compute audio logits
+        last_hidden_audio = self.audio_out_projection(last_hidden[:, -1, :])
+        all_code_logits_t = self.final_proj(last_hidden_audio)
+
+        # Apply CFG if enabled
+        if state.use_cfg:
+            conditional_logits = all_code_logits_t[:actual_batch_size]
+            unconditional_logits = all_code_logits_t[actual_batch_size:]
+            all_code_logits_t = state.cfg_scale * conditional_logits + (1.0 - state.cfg_scale) * unconditional_logits
+
+        # Sample audio codes
+        audio_codes_next, all_codes_next_argmax = self._sample_audio_codes(
+            last_hidden=last_hidden,
+            all_code_logits_t=all_code_logits_t,
+            temperature=state.temperature,
+            topk=state.topk,
+            use_local_transformer_for_inference=state.use_local_transformer,
+            use_cfg=state.use_cfg,
+            cfg_scale=state.cfg_scale,
+        )
+
+        return audio_codes_next, all_codes_next_argmax
+
+    def streaming_decode(
+        self,
+        state: StreamingState,
+        previous_decode_length: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """
+        Decode accumulated audio codes to waveform, returning only the new chunk.
+
+        WARNING: This function does not yet support batch_size > 1.
+        Do not use with batched streaming inference. Use streaming_finalize instead.
+
+        This function takes all predicted codes so far and decodes them, but only
+        returns the newly generated audio portion (after previous_decode_length).
+
+        Args:
+            state: Current StreamingState containing all_predictions.
+            previous_decode_length: Number of audio samples already decoded and returned
+                in previous calls. Use 0 on first call.
+
+        Returns:
+            Tuple of:
+                - new_audio: Newly generated audio waveform (1, new_samples)
+                - new_audio_len: Length of new audio (1,)
+                - total_decode_length: Total decoded length so far (use as previous_decode_length
+                    for next call)
+        """
+        if len(state.all_predictions) == 0:
+            return (
+                torch.zeros(1, 0, device=state.device),
+                torch.zeros(1, dtype=torch.long, device=state.device),
+                previous_decode_length,
+            )
+
+        with torch.inference_mode():
+            # Concatenate all predictions - each is (1, C, S), concat gives (1, C, T_total_frames)
+            predicted_codes = torch.cat(state.all_predictions, dim=-1)  # (1, C, T_total_frames)
+            predicted_codes_lens = torch.tensor([predicted_codes.size(-1)], device=state.device)
+
+            # Decode to audio (codes are already unstacked, no EOS removal needed)
+            audio, audio_len, _ = self.codes_to_audio(predicted_codes, predicted_codes_lens)
+
+            # Extract only new audio
+            total_decode_length = audio_len[0].item()
+            if total_decode_length <= previous_decode_length:
+                return (
+                    torch.zeros(1, 0, device=state.device),
+                    torch.zeros(1, dtype=torch.long, device=state.device),
+                    previous_decode_length,
+                )
+
+            new_audio = audio[:, previous_decode_length:total_decode_length]
+            new_audio_len = torch.tensor([total_decode_length - previous_decode_length], device=state.device)
+
+            return new_audio, new_audio_len, total_decode_length
+
+    def streaming_finalize(
+        self,
+        state: StreamingState,
+    ) -> StreamingFinalizeOutput:
+        """
+        Finalize streaming and return the complete generated audio and phoneme predictions.
+
+        This function should be called after all streaming_step() calls are complete
+        (i.e., when state.finished.all() is True or max steps reached).
+
+        Args:
+            state: Final StreamingState after streaming is complete.
+
+        Returns:
+            StreamingFinalizeOutput containing audio, codes, and phoneme predictions.
+        """
+        batch_size = state.batch_size
+
+        # Extract and decode phoneme predictions
+        phoneme_tokens_list: List[List[int]] = []
+        phoneme_text_list: List[str] = []
+        if self.phoneme_tokenizer is not None and len(state.all_phoneme_predictions) > 0:
+            # Stack phoneme predictions: each is (B, phoneme_stacking_factor)
+            all_phonemes = torch.stack(state.all_phoneme_predictions, dim=-1)  # (B, S, T)
+            for i in range(batch_size):
+                start = max(0, state.phoneme_prediction_start_idx[i].item())
+                end = state.phoneme_prediction_end_idx[i].item()
+                if end < 0:
+                    end = all_phonemes.size(-1)
+                # Flatten stacked phonemes back to sequence
+                tokens = all_phonemes[i, :, start:end].T.reshape(-1).tolist()
+                # Remove special tokens (BOS, EOS, PAD)
+                special = {self.phoneme_tokenizer.bos_token_id, self.phoneme_tokenizer.eos_token_id}
+                if hasattr(self.phoneme_tokenizer, 'pad_token_id'):
+                    special.add(self.phoneme_tokenizer.pad_token_id)
+                tokens = [t for t in tokens if t not in special]
+                phoneme_tokens_list.append(tokens)
+                phoneme_text_list.append(self.phoneme_tokenizer.decode(tokens))
+        else:
+            phoneme_tokens_list = [[] for _ in range(batch_size)]
+            phoneme_text_list = ["" for _ in range(batch_size)]
+
+        if len(state.all_predictions) == 0:
+            return StreamingFinalizeOutput(
+                audio=torch.zeros(batch_size, 0, device=state.device),
+                audio_len=torch.zeros(batch_size, dtype=torch.long, device=state.device),
+                audio_codes=torch.zeros(batch_size, self.num_audio_codebooks, 0, device=state.device),
+                audio_codes_len=torch.zeros(batch_size, dtype=torch.long, device=state.device),
+                phoneme_tokens=phoneme_tokens_list,
+                phoneme_text=phoneme_text_list,
+            )
+
+        with torch.inference_mode():
+            # Concatenate all predictions - each is (B, C, S), concat gives (B, C, T_total_frames)
+            all_codes = torch.cat(state.all_predictions, dim=-1)  # (B, C, T_total_frames)
+            total_frames = all_codes.size(-1)
+            num_codebooks = all_codes.size(1)
+
+            # Start and end indices are in frames (not steps)
+            # If start_idx is -1, item never started audio predictions - use 0
+            # If end_idx is -1, item never ended - use total_frames
+            start_indices = torch.clamp(state.audio_prediction_start_idx, min=0)
+            end_indices = torch.where(
+                state.audio_prediction_end_idx >= 0,
+                state.audio_prediction_end_idx,
+                torch.full_like(state.audio_prediction_end_idx, total_frames)
+            )
+
+            # Calculate per-item lengths (in frames)
+            predicted_codes_lens = end_indices - start_indices
+            max_len = predicted_codes_lens.max().item()
+
+            # Handle case where all items have zero-length predictions
+            if max_len == 0:
+                return StreamingFinalizeOutput(
+                    audio=torch.zeros(batch_size, 0, device=state.device),
+                    audio_len=torch.zeros(batch_size, dtype=torch.long, device=state.device),
+                    audio_codes=torch.zeros(batch_size, num_codebooks, 0, device=state.device, dtype=all_codes.dtype),
+                    audio_codes_len=torch.zeros(batch_size, dtype=torch.long, device=state.device),
+                    phoneme_tokens=phoneme_tokens_list,
+                    phoneme_text=phoneme_text_list,
+                )
+
+            # Create padded output tensor and slice each item's valid predictions
+            predicted_codes = torch.zeros(
+                batch_size, num_codebooks, max_len,
+                dtype=all_codes.dtype, device=state.device
+            )
+            for i in range(batch_size):
+                start = start_indices[i].item()
+                end = end_indices[i].item()
+                length = end - start
+                if length > 0:
+                    predicted_codes[i, :, :length] = all_codes[i, :, start:end]
+
+            # No need to remove EOS - end_indices already point to the frame before EOS
+            # Decode to audio (codes are already unstacked: B, C, T)
+            audio, audio_len, decoded_codes = self.codes_to_audio(predicted_codes, predicted_codes_lens)
+
+            return StreamingFinalizeOutput(
+                audio=audio,
+                audio_len=audio_len,
+                audio_codes=predicted_codes,
+                audio_codes_len=predicted_codes_lens,
+                phoneme_tokens=phoneme_tokens_list,
+                phoneme_text=phoneme_text_list,
+            )
+
+    def infer_batch(
+        self,
+        batch: Dict[str, torch.Tensor],
+        max_decoder_steps: int = 500,
+        temperature: float = 0.7,
+        topk: int = 80,
+        use_cfg: bool = False,
+        cfg_scale: float = 1.0,
+        use_local_transformer_for_inference: bool = False,
+        phoneme_input_type: str = 'pred',
+        phoneme_sampling_method: str = 'argmax',
+        force_dropout_text: bool = False,
+    ) -> InferBatchOutput:
+        """
+        Batch inference using streaming infrastructure.
+
+        This is a simple wrapper around streaming_init, streaming_step, and streaming_finalize
+        that processes a batch dictionary similar to training_step/validation_step.
+
+        Args:
+            batch: Dictionary containing:
+                - text: Text token IDs (B, L)
+                - text_lens: Lengths (B,)
+                - context_text_tokens: Context text tokens (B, L')
+                - context_text_tokens_lens: Lengths (B,)
+                - context_audio_codes: Context audio codes (B, C, T) OR
+                - context_audio / context_audio_lens: Raw context audio to encode
+                - phoneme_tokens (optional): GT phoneme tokens (B, L'')
+                - phoneme_tokens_lens (optional): Lengths (B,)
+            max_decoder_steps: Maximum number of decoder steps.
+            temperature: Sampling temperature for audio codes.
+            topk: Top-k sampling parameter.
+            use_cfg: Whether to use classifier-free guidance.
+            cfg_scale: CFG scale factor.
+            use_local_transformer_for_inference: Whether to use local transformer.
+            phoneme_input_type: 'gt' or 'pred' for phoneme tokens.
+            phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
+            force_dropout_text: Whether to dropout text embeddings.
+
+        Returns:
+            InferBatchOutput containing predicted audio, codes, and RTF metrics.
+        """
+        with torch.inference_mode():
+            start_time = time.time()
+
+            # Extract tensors from batch
+            text = batch['text']
+            text_lens = batch['text_lens']
+            context_text_tokens = batch['context_text_tokens']
+            context_text_tokens_lens = batch['context_text_tokens_lens']
+
+            # Handle context audio - either use codes directly or encode from audio
+            if 'context_audio_codes' in batch:
+                context_audio_codes = batch['context_audio_codes']
+                context_audio_codes_lens = batch['context_audio_codes_lens']
+            else:
+                context_audio = batch['context_audio']
+                context_audio_lens = batch['context_audio_lens']
+                context_audio_codes, context_audio_codes_lens = self.audio_to_codes(
+                    context_audio, context_audio_lens
+                )
+
+            # Optional GT phoneme tokens for teacher forcing
+            gt_phoneme_tokens = batch.get('phoneme_tokens')
+            gt_phoneme_tokens_lens = batch.get('phoneme_tokens_lens')
+
+            batch_size = text.size(0)
+
+            # Initialize streaming state
+            state = self.streaming_init(
+                context_audio_codes=context_audio_codes,
+                context_audio_codes_lens=context_audio_codes_lens,
+                context_text_tokens=context_text_tokens,
+                context_text_tokens_lens=context_text_tokens_lens,
+                use_cfg=use_cfg,
+                cfg_scale=cfg_scale,
+                use_local_transformer=use_local_transformer_for_inference,
+                temperature=temperature,
+                topk=topk,
+                phoneme_input_type=phoneme_input_type,
+                phoneme_sampling_method=phoneme_sampling_method,
+                gt_phoneme_tokens=gt_phoneme_tokens,
+                gt_phoneme_tokens_lens=gt_phoneme_tokens_lens,
+            )
+
+            time_to_first_prediction = None
+            generation_start_time = time.time()
+            device = text.device
+
+            # Generate until all items are finished or max steps reached
+            while not state.finished.all() and len(state.all_predictions) < max_decoder_steps:
+                # Gather the correct text token for each batch item based on text_tokens_seen
+                # Items in context phase will have their token ignored by streaming_step
+                positions = state.text_tokens_seen.clamp(max=text.size(1) - 1)
+                current_tokens = text[torch.arange(batch_size, device=device), positions]
+
+                # For items that have exhausted their text, provide EOS token
+                text_exhausted = state.text_tokens_seen >= text_lens
+                current_tokens = torch.where(text_exhausted, torch.full_like(current_tokens, self.eos_id), current_tokens)
+
+                state, audio_codes, phoneme_tokens = self.streaming_step(
+                    state=state,
+                    text_tokens=current_tokens,
+                    force_dropout_text=force_dropout_text,
+                )
+
+                # Record time to first audio prediction
+                if time_to_first_prediction is None and audio_codes is not None:
+                    time_to_first_prediction = time.time() - start_time
+
+            tts_generation_time = time.time() - generation_start_time
+
+            # Finalize and decode audio
+            finalize_output = self.streaming_finalize(state)
+
+            end_time = time.time()
+            total_time = end_time - start_time
 
             # Compute RTF metrics
-            end_time = time.time()
-            total_audio_duration_generated = (
-                predicted_audio_lens.max().item() * predicted_audio_lens.shape[0]
-            ) / self.sample_rate
-            rtf = total_audio_duration_generated / (end_time - start_time)
+            total_audio_samples = finalize_output.audio_len.sum().item()
+            total_audio_duration = total_audio_samples / self.output_sample_rate
+            num_frames = len(state.all_predictions)
+            tts_generation_time_per_frame = tts_generation_time / num_frames if num_frames > 0 else 0.0
 
             rtf_metrics = {
-                'rtf': rtf,
+                'rtf': total_audio_duration / total_time if total_time > 0 else 0.0,
                 'time_to_first_prediction': time_to_first_prediction,
                 'tts_generation_time': tts_generation_time,
-                'max_frames_generated': len(all_predictions),
+                'max_frames_generated': num_frames,
                 'tts_generation_time_per_frame': tts_generation_time_per_frame,
-                'batch_size': actual_batch_size,
+                'batch_size': batch_size,
             }
 
-            return predicted_audio, predicted_audio_lens, predicted_codes, predicted_codes_lens, rtf_metrics
+            return InferBatchOutput(
+                predicted_audio=finalize_output.audio,
+                predicted_audio_lens=finalize_output.audio_len,
+                predicted_codes=finalize_output.audio_codes,
+                predicted_codes_lens=finalize_output.audio_codes_len,
+                rtf_metrics=rtf_metrics,
+            )
 
     @classmethod
     def list_available_models(cls) -> List[PretrainedModelInfo]:

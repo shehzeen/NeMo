@@ -412,22 +412,21 @@ class MagpieInferenceRunner:
             if self.config.is_decoder_only_model:
                 output = self.model.infer_batch(
                     batch,
-                    max_decoder_steps=440,
+                    max_decoder_steps=self.config.model_inference_parameters.max_decoder_steps,
                     temperature=self.config.model_inference_parameters.temperature,
                     topk=self.config.model_inference_parameters.topk,
                     use_cfg=self.config.use_cfg,
                     cfg_scale=self.config.model_inference_parameters.cfg_scale,
                     use_local_transformer_for_inference=self.config.use_local_transformer,
-                    maskgit_n_steps=self.config.maskgit_n_steps,
                     phoneme_input_type=self.config.phoneme_input_type,
                     phoneme_sampling_method=self.config.phoneme_sampling_method,
-                    dropout_text_input=self.config.dropout_text_input,
+                    force_dropout_text=self.config.dropout_text_input,
                 )
-                predicted_audio = output[0]
-                predicted_audio_lens = output[1]
-                predicted_codes = output[2]
-                predicted_codes_lens = output[3]
-                rtf_metrics = output[4]
+                predicted_audio = output.predicted_audio
+                predicted_audio_lens = output.predicted_audio_lens
+                predicted_codes = output.predicted_codes
+                predicted_codes_lens = output.predicted_codes_lens
+                rtf_metrics = output.rtf_metrics
                 cross_attention_maps = None
             else:
                 output = self.model.infer_batch(
