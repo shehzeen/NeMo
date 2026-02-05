@@ -1210,9 +1210,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Create zero tensor for delay padding
         max_delay = delay.max().item()
-        zero_delay_tensor = torch.zeros(
-            batch_size, max_delay, self.cfg.embedding_dim, device=device
-        )
+        zero_delay_tensor = torch.zeros(batch_size, max_delay, self.cfg.embedding_dim, device=device)
 
         # Join delay zeros with text embeddings
         text_channel_embedding, text_channel_lens = self.join_embeddings_temporally(
@@ -1277,9 +1275,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Create zero tensor for delay padding
         max_delay = delay.max().item()
-        zero_delay_tensor = torch.zeros(
-            batch_size, max_delay, self.cfg.embedding_dim, device=device
-        )
+        zero_delay_tensor = torch.zeros(batch_size, max_delay, self.cfg.embedding_dim, device=device)
 
         # Join delay zeros with phoneme embeddings
         phoneme_channel_embedding, phoneme_channel_lens = self.join_embeddings_temporally(
@@ -1355,9 +1351,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Create zero tensor for delay padding
         max_delay = delay.max().item()
-        zero_delay_tensor = torch.zeros(
-            batch_size, max_delay, self.cfg.embedding_dim, device=device
-        )
+        zero_delay_tensor = torch.zeros(batch_size, max_delay, self.cfg.embedding_dim, device=device)
 
         # Join delay zeros with audio embeddings
         audio_channel_embedding, audio_channel_lens = self.join_embeddings_temporally(
@@ -1667,13 +1661,18 @@ class EasyMagpieTTSModel(ModelPT):
 
         # 7. Join context with combined channel embeddings
         # The combined_channel_lens is the max of all channel lens for each batch item
-        combined_channel_lens = torch.stack([
-            text_channel_lens,
-            audio_channel_lens,
-            phoneme_channel_lens if phoneme_channel_embedding is not None else audio_channel_lens,
-        ], dim=0).max(dim=0).values
-
-        
+        combined_channel_lens = (
+            torch.stack(
+                [
+                    text_channel_lens,
+                    audio_channel_lens,
+                    phoneme_channel_lens if phoneme_channel_embedding is not None else audio_channel_lens,
+                ],
+                dim=0,
+            )
+            .max(dim=0)
+            .values
+        )
 
         # Right pad context embedding
         context_padding = torch.zeros(
@@ -1767,7 +1766,7 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio = batch['context_audio']
             context_audio_lens = batch['context_audio_lens']
             context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
-        
+
         if 'audio_codes' in batch:
             audio_codes = batch['audio_codes']
             audio_codes_lens = batch['audio_codes_lens']
@@ -1856,7 +1855,7 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio = batch['context_audio']
             context_audio_lens = batch['context_audio_lens']
             context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
-        
+
         if 'audio_codes' in batch:
             audio_codes = batch['audio_codes']
             audio_codes_lens = batch['audio_codes_lens']
@@ -1864,7 +1863,7 @@ class EasyMagpieTTSModel(ModelPT):
             audio = batch['audio']
             audio_lens = batch['audio_lens']
             audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
-        
+
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
@@ -2049,7 +2048,6 @@ class EasyMagpieTTSModel(ModelPT):
     def setup_test_data(self, cfg):
         self._test_dl = self._setup_test_dataloader(cfg)
 
-    
     def _sample_audio_codes(
         self,
         last_hidden: torch.Tensor,
@@ -2161,13 +2159,15 @@ class EasyMagpieTTSModel(ModelPT):
             selected_training_mode = self.mode_name_to_mode[mode_name]
 
             # Prepare context embedding using shared helper
-            context_embedding, context_lens, context_audio_codes, context_audio_codes_lens = self.prepare_context_tensors(
-                context_text_tokens=context_text_tokens,
-                context_text_tokens_lens=context_text_tokens_lens,
-                context_audio_codes=context_audio_codes,
-                context_audio_codes_lens=context_audio_codes_lens,
-                training_mode=selected_training_mode,
-                dropout_conditional_input=False,
+            context_embedding, context_lens, context_audio_codes, context_audio_codes_lens = (
+                self.prepare_context_tensors(
+                    context_text_tokens=context_text_tokens,
+                    context_text_tokens_lens=context_text_tokens_lens,
+                    context_audio_codes=context_audio_codes,
+                    context_audio_codes_lens=context_audio_codes_lens,
+                    training_mode=selected_training_mode,
+                    dropout_conditional_input=False,
+                )
             )
 
             # Store full context embedding and lens before any CFG manipulation
@@ -2331,10 +2331,10 @@ class EasyMagpieTTSModel(ModelPT):
                 ctx_positions = ctx_positions.clamp(max=state.full_context_embedding.size(1) - 1)
                 # Gather: need (B, 1, E) from (B, T, E) at positions (B,)
                 ctx_emb = state.full_context_embedding[
-                    torch.arange(batch_size, device=device),
-                    ctx_positions,
-                    :
-                ].unsqueeze(1)  # (B, 1, E)
+                    torch.arange(batch_size, device=device), ctx_positions, :
+                ].unsqueeze(
+                    1
+                )  # (B, 1, E)
                 # Only apply to items in context phase
                 context_mask = needs_context.view(batch_size, 1, 1).float()
                 next_input = next_input + ctx_emb * context_mask
@@ -2359,7 +2359,7 @@ class EasyMagpieTTSModel(ModelPT):
                 next_input = next_input + text_embedded * text_add_mask
                 # Check for EOS tokens - mark those items as text_finished
                 # Items that receive EOS should not have their text embedded added after this step
-                is_eos_token = (text_tokens == self.eos_id)  # (B,) bool
+                is_eos_token = text_tokens == self.eos_id  # (B,) bool
                 state.text_finished = state.text_finished | is_eos_token
 
             elif text_tokens is None:
@@ -2378,13 +2378,17 @@ class EasyMagpieTTSModel(ModelPT):
                         positions = state.phoneme_steps.clamp(max=state.gt_phoneme_embeddings.size(1) - 1)
                         gt_emb = state.gt_phoneme_embeddings[
                             torch.arange(batch_size, device=device), positions, :
-                        ].unsqueeze(1)  # (B, 1, E)
+                        ].unsqueeze(
+                            1
+                        )  # (B, 1, E)
                         phoneme_mask = (needs_phoneme & within_gt_len).view(batch_size, 1, 1).float()
                         phoneme_emb = phoneme_emb + gt_emb * phoneme_mask
                     else:
                         # Prediction mode: use BOS or last predicted phoneme
                         first_phoneme_step = needs_phoneme & (state.phoneme_steps == 0)
-                        has_last_phoneme = needs_phoneme & ~first_phoneme_step & (state.last_phoneme_tokens is not None)
+                        has_last_phoneme = (
+                            needs_phoneme & ~first_phoneme_step & (state.last_phoneme_tokens is not None)
+                        )
 
                         if first_phoneme_step.any():
                             phoneme_bos = torch.full(
@@ -2397,7 +2401,9 @@ class EasyMagpieTTSModel(ModelPT):
                             phoneme_emb = phoneme_emb + phoneme_bos_emb * first_mask
 
                         if has_last_phoneme.any() and state.last_phoneme_tokens is not None:
-                            last_phoneme_emb = self.embed_phoneme_tokens(state.last_phoneme_tokens.unsqueeze(2))  # (B, 1, E)
+                            last_phoneme_emb = self.embed_phoneme_tokens(
+                                state.last_phoneme_tokens.unsqueeze(2)
+                            )  # (B, 1, E)
                             last_mask = has_last_phoneme.view(batch_size, 1, 1).float()
                             phoneme_emb = phoneme_emb + last_phoneme_emb * last_mask
 
@@ -2434,12 +2440,17 @@ class EasyMagpieTTSModel(ModelPT):
             if state.use_cfg:
                 # For unconditional branch, use dummy embedding for non-audio items
                 # and audio-only embedding for audio items
-                next_input_unconditional_context = state.dummy_context_embedding_unconditional.expand(batch_size, 1, -1)
+                next_input_unconditional_context = state.dummy_context_embedding_unconditional.expand(
+                    batch_size, 1, -1
+                )
                 # After the context is finished, we use zero embedding for the unconditional branch until audio phase starts
                 next_input_unconditional_zeros = torch.zeros_like(next_input_unconditional_context)
                 context_mask = needs_context.view(batch_size, 1, 1).float()
-                next_input_unconditional = context_mask * next_input_unconditional_context + (1 - context_mask) * next_input_unconditional_zeros
-                
+                next_input_unconditional = (
+                    context_mask * next_input_unconditional_context
+                    + (1 - context_mask) * next_input_unconditional_zeros
+                )
+
                 # For audio phase items, we use audio embedding for the unconditional branch
                 if needs_audio.any():
                     audio_mask = needs_audio.view(batch_size, 1, 1).float()
@@ -2488,7 +2499,7 @@ class EasyMagpieTTSModel(ModelPT):
                     state.phoneme_prediction_start_idx = torch.where(
                         first_phoneme_step,
                         torch.full_like(state.phoneme_prediction_start_idx, current_phoneme_step_idx),
-                        state.phoneme_prediction_start_idx
+                        state.phoneme_prediction_start_idx,
                     )
 
                 # Check which items should predict phonemes (not ended)
@@ -2497,7 +2508,11 @@ class EasyMagpieTTSModel(ModelPT):
                 state.all_phoneme_predictions.append(pred_phoneme_tokens)
 
                 # Check for phoneme EOS per item
-                phoneme_eos_detected = needs_phoneme & (pred_phoneme_tokens == self.phoneme_tokenizer.eos_token_id).any(dim=1)  # (B,)
+                phoneme_eos_detected = needs_phoneme & (
+                    pred_phoneme_tokens == self.phoneme_tokenizer.eos_token_id
+                ).any(
+                    dim=1
+                )  # (B,)
                 state.phoneme_stream_ended = state.phoneme_stream_ended | phoneme_eos_detected
 
                 # Track phoneme prediction end index for items that just ended
@@ -2507,7 +2522,7 @@ class EasyMagpieTTSModel(ModelPT):
                     state.phoneme_prediction_end_idx = torch.where(
                         newly_ended_phoneme,
                         torch.full_like(state.phoneme_prediction_end_idx, current_phoneme_step_idx),
-                        state.phoneme_prediction_end_idx
+                        state.phoneme_prediction_end_idx,
                     )
 
             # Audio predictions for items in audio phase
@@ -2520,7 +2535,7 @@ class EasyMagpieTTSModel(ModelPT):
                     state.audio_prediction_start_idx = torch.where(
                         first_audio_step,
                         torch.full_like(state.audio_prediction_start_idx, current_frame_idx),
-                        state.audio_prediction_start_idx
+                        state.audio_prediction_start_idx,
                     )
 
                 audio_codes_next_stacked, all_codes_next_argmax = self._predict_audio_codes(state)  # (B, C*S)
@@ -2542,15 +2557,15 @@ class EasyMagpieTTSModel(ModelPT):
                 all_codes_argmax_unstacked = all_codes_next_argmax.view(batch_size, C, S)
 
                 # For each batch item, find if/where EOS occurs in this step's frames
-                eos_in_sampled = (audio_codes_unstacked == self.audio_eos_id)  # (B, C, S)
-                eos_in_argmax = (all_codes_argmax_unstacked == self.audio_eos_id)  # (B, C, S)
+                eos_in_sampled = audio_codes_unstacked == self.audio_eos_id  # (B, C, S)
+                eos_in_argmax = all_codes_argmax_unstacked == self.audio_eos_id  # (B, C, S)
                 eos_any_codebook = eos_in_sampled.any(dim=1) | eos_in_argmax.any(dim=1)  # (B, S)
 
                 # Find first frame with EOS per batch item (or S if none)
                 eos_frame_idx = torch.where(
                     eos_any_codebook.any(dim=1),
                     eos_any_codebook.int().argmax(dim=1),  # first frame with EOS
-                    torch.full((batch_size,), S, device=device)  # no EOS in this step
+                    torch.full((batch_size,), S, device=device),  # no EOS in this step
                 )  # (B,)
 
                 audio_eos_detected = eos_any_codebook.any(dim=1)  # (B,)
@@ -2563,9 +2578,7 @@ class EasyMagpieTTSModel(ModelPT):
                     current_frame_count = len(state.all_predictions) * self.frame_stacking_factor
                     end_frame_idx = current_frame_count + eos_frame_idx
                     state.audio_prediction_end_idx = torch.where(
-                        newly_ended_audio,
-                        end_frame_idx,
-                        state.audio_prediction_end_idx
+                        newly_ended_audio, end_frame_idx, state.audio_prediction_end_idx
                     )
 
                 # Store unstacked codes
@@ -2585,9 +2598,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Sample phonemes
         if state.phoneme_sampling_method == 'argmax':
-            pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
-                all_code_logits_t_phoneme, temperature=0.01
-            )
+            pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(all_code_logits_t_phoneme, temperature=0.01)
         else:
             pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
                 all_code_logits_t_phoneme, temperature=state.temperature, topk=state.topk
@@ -2595,9 +2606,7 @@ class EasyMagpieTTSModel(ModelPT):
         # (B, phoneme_stacking_factor)
         return pred_phoneme_tokens
 
-    def _predict_audio_codes(
-        self, state: StreamingState
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _predict_audio_codes(self, state: StreamingState) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predict audio codes from the last hidden state."""
         actual_batch_size = state.batch_size
         last_hidden = state.last_hidden
@@ -2745,7 +2754,7 @@ class EasyMagpieTTSModel(ModelPT):
             end_indices = torch.where(
                 state.audio_prediction_end_idx >= 0,
                 state.audio_prediction_end_idx,
-                torch.full_like(state.audio_prediction_end_idx, total_frames)
+                torch.full_like(state.audio_prediction_end_idx, total_frames),
             )
 
             # Calculate per-item lengths (in frames)
@@ -2765,8 +2774,7 @@ class EasyMagpieTTSModel(ModelPT):
 
             # Create padded output tensor and slice each item's valid predictions
             predicted_codes = torch.zeros(
-                batch_size, num_codebooks, max_len,
-                dtype=all_codes.dtype, device=state.device
+                batch_size, num_codebooks, max_len, dtype=all_codes.dtype, device=state.device
             )
             for i in range(batch_size):
                 start = start_indices[i].item()
@@ -2846,9 +2854,7 @@ class EasyMagpieTTSModel(ModelPT):
             else:
                 context_audio = batch['context_audio']
                 context_audio_lens = batch['context_audio_lens']
-                context_audio_codes, context_audio_codes_lens = self.audio_to_codes(
-                    context_audio, context_audio_lens
-                )
+                context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
 
             # Optional GT phoneme tokens for teacher forcing
             gt_phoneme_tokens = batch.get('phoneme_tokens')
@@ -2886,7 +2892,9 @@ class EasyMagpieTTSModel(ModelPT):
 
                 # For items that have exhausted their text, provide EOS token
                 text_exhausted = state.text_tokens_seen >= text_lens
-                current_tokens = torch.where(text_exhausted, torch.full_like(current_tokens, self.eos_id), current_tokens)
+                current_tokens = torch.where(
+                    text_exhausted, torch.full_like(current_tokens, self.eos_id), current_tokens
+                )
 
                 state, audio_codes, phoneme_tokens = self.streaming_step(
                     state=state,
