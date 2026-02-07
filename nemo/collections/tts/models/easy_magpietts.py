@@ -2809,7 +2809,7 @@ class EasyMagpieTTSModel(ModelPT):
                         # Prediction mode: use BOS or last predicted phoneme
                         first_phoneme_step = needs_phoneme & (state.phoneme_steps == 0)
                         has_last_phoneme = (
-                            needs_phoneme & ~first_phoneme_step & (state.last_phoneme_tokens is not None)
+                            needs_phoneme & (~first_phoneme_step) & (state.last_phoneme_tokens is not None)
                         )
 
                         if first_phoneme_step.any():
@@ -3076,61 +3076,6 @@ class EasyMagpieTTSModel(ModelPT):
         )
 
         return audio_codes_next, all_codes_next_argmax
-
-    def streaming_decode(
-        self,
-        state: StreamingState,
-        previous_decode_length: int = 0,
-    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        """
-        Decode accumulated audio codes to waveform, returning only the new chunk.
-
-        WARNING: This function does not yet support batch_size > 1.
-        Do not use with batched streaming inference. Use streaming_finalize instead.
-
-        This function takes all predicted codes so far and decodes them, but only
-        returns the newly generated audio portion (after previous_decode_length).
-
-        Args:
-            state: Current StreamingState containing all_predictions.
-            previous_decode_length: Number of audio samples already decoded and returned
-                in previous calls. Use 0 on first call.
-
-        Returns:
-            Tuple of:
-                - new_audio: Newly generated audio waveform (1, new_samples)
-                - new_audio_len: Length of new audio (1,)
-                - total_decode_length: Total decoded length so far (use as previous_decode_length
-                    for next call)
-        """
-        if len(state.all_predictions) == 0:
-            return (
-                torch.zeros(1, 0, device=state.device),
-                torch.zeros(1, dtype=torch.long, device=state.device),
-                previous_decode_length,
-            )
-
-        with torch.inference_mode():
-            # Concatenate all predictions - each is (1, C, S), concat gives (1, C, T_total_frames)
-            predicted_codes = torch.cat(state.all_predictions, dim=-1)  # (1, C, T_total_frames)
-            predicted_codes_lens = torch.tensor([predicted_codes.size(-1)], device=state.device)
-
-            # Decode to audio (codes are already unstacked, no EOS removal needed)
-            audio, audio_len, _ = self.codes_to_audio(predicted_codes, predicted_codes_lens)
-
-            # Extract only new audio
-            total_decode_length = audio_len[0].item()
-            if total_decode_length <= previous_decode_length:
-                return (
-                    torch.zeros(1, 0, device=state.device),
-                    torch.zeros(1, dtype=torch.long, device=state.device),
-                    previous_decode_length,
-                )
-
-            new_audio = audio[:, previous_decode_length:total_decode_length]
-            new_audio_len = torch.tensor([total_decode_length - previous_decode_length], device=state.device)
-
-            return new_audio, new_audio_len, total_decode_length
 
     def streaming_finalize(
         self,
