@@ -14,13 +14,12 @@
 import os
 import random
 import time
-
-import numpy as np
-import soundfile as sf
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+import soundfile as sf
 import torch
 import wandb
 from hydra.utils import instantiate
@@ -1900,10 +1899,12 @@ class EasyMagpieTTSModel(ModelPT):
 
     def validation_step(self, batch, batch_idx):
         # Extract inputs from batch and pass explicitly to process_batch
-        print(f"[Validation] global_rank: {self.global_rank}, "
-          f"local_rank: {self.local_rank}, "
-          f"world_size: {self.trainer.world_size}, "
-          f"batch_idx: {batch_idx}")
+        print(
+            f"[Validation] global_rank: {self.global_rank}, "
+            f"local_rank: {self.local_rank}, "
+            f"world_size: {self.trainer.world_size}, "
+            f"batch_idx: {batch_idx}"
+        )
         if 'context_audio_codes' in batch:
             context_audio_codes = batch['context_audio_codes']
             context_audio_codes_lens = batch['context_audio_codes_lens']
@@ -1978,7 +1979,7 @@ class EasyMagpieTTSModel(ModelPT):
                 max_decoder_steps=220,
                 temperature=0.7,
                 topk=80,
-                use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR
+                use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR,
             )
 
             # Get audio output directory
@@ -1994,7 +1995,9 @@ class EasyMagpieTTSModel(ModelPT):
                 codes=context_audio_codes,
                 codes_len=context_audio_codes_lens,
             )
-            context_audio_cleaned, context_audio_lens_cleaned, _ = self.codes_to_audio(context_audio_codes_cleaned, context_audio_codes_lens_cleaned)
+            context_audio_cleaned, context_audio_lens_cleaned, _ = self.codes_to_audio(
+                context_audio_codes_cleaned, context_audio_codes_lens_cleaned
+            )
 
             for idx in range(infer_output.predicted_audio.size(0)):
                 audio_np = infer_output.predicted_audio[idx].float().detach().cpu().numpy()
@@ -2026,7 +2029,13 @@ class EasyMagpieTTSModel(ModelPT):
                     predicted_audio_paths.append(audio_path)
 
                     # Save context audio for SSIM computation
-                    ctx_audio_np = context_audio_codes_cleaned[idx].float().detach().cpu().numpy()[: context_audio_lens_cleaned[idx]]
+                    ctx_audio_np = (
+                        context_audio_codes_cleaned[idx]
+                        .float()
+                        .detach()
+                        .cpu()
+                        .numpy()[: context_audio_lens_cleaned[idx]]
+                    )
                     ctx_path = os.path.join(audio_dir, f'rank{self.global_rank}_batch{batch_idx}_idx{idx}_context.wav')
                     sf.write(ctx_path, ctx_audio_np, self.output_sample_rate)
                     context_audio_paths.append(ctx_path)
@@ -2044,7 +2053,12 @@ class EasyMagpieTTSModel(ModelPT):
                         for audio_path, lang in zip(predicted_audio_paths, languages):
                             try:
                                 transcript = transcribe_with_whisper(
-                                    audio_path, lang, self.whisper_processor, self.whisper_model, self.device, normalizer=None
+                                    audio_path,
+                                    lang,
+                                    self.whisper_processor,
+                                    self.whisper_model,
+                                    self.device,
+                                    normalizer=None,
                                 )
                                 pred_transcripts.append(process_text_for_cer(transcript))
                             except Exception as e:
@@ -2055,10 +2069,8 @@ class EasyMagpieTTSModel(ModelPT):
                             predicted_audio_paths,
                             batch_size=len(predicted_audio_paths),
                             override_config=TranscribeConfig(
-                                use_lhotse=False,
-                                batch_size=len(predicted_audio_paths),
-                                num_workers=0
-                            )
+                                use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0
+                            ),
                         )
                         pred_transcripts = [process_text_for_cer(t.text) for t in pred_transcripts]
 
@@ -2099,7 +2111,9 @@ class EasyMagpieTTSModel(ModelPT):
                         val_output['val_wer'] = torch.tensor(np.mean(batch_wer), device=self.device)
                         if self.use_multilingual_asr:
                             langs = batch.get('languages', ['en'] * len(predicted_audio_paths))
-                            val_output['val_languages'] = [langs[i] for i in range(len(pred_transcripts)) if pred_transcripts[i] is not None]
+                            val_output['val_languages'] = [
+                                langs[i] for i in range(len(pred_transcripts)) if pred_transcripts[i] is not None
+                            ]
                             val_output['val_cer_list'] = batch_cer
                             val_output['val_wer_list'] = batch_wer
                     if batch_ssim:
@@ -2154,9 +2168,19 @@ class EasyMagpieTTSModel(ModelPT):
                         lang_cer.setdefault(lang, []).append(cer)
                         lang_wer.setdefault(lang, []).append(wer)
                 for lang in lang_cer:
-                    self.log(f"val/cer_lang_{lang}", torch.tensor(np.mean(lang_cer[lang]), device=self.device), prog_bar=True, sync_dist=True)
+                    self.log(
+                        f"val/cer_lang_{lang}",
+                        torch.tensor(np.mean(lang_cer[lang]), device=self.device),
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
                 for lang in lang_wer:
-                    self.log(f"val/wer_lang_{lang}", torch.tensor(np.mean(lang_wer[lang]), device=self.device), prog_bar=True, sync_dist=True)
+                    self.log(
+                        f"val/wer_lang_{lang}",
+                        torch.tensor(np.mean(lang_wer[lang]), device=self.device),
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
 
         self.validation_step_outputs.clear()  # free memory
 
@@ -2288,7 +2312,9 @@ class EasyMagpieTTSModel(ModelPT):
             return self._validation_dl
 
         if not torch.distributed.is_initialized():
-            print(f"[val_dataloader] rank={self.global_rank}: Distributed not initialized, skipping DistributedSampler wrap")
+            print(
+                f"[val_dataloader] rank={self.global_rank}: Distributed not initialized, skipping DistributedSampler wrap"
+            )
             return self._validation_dl
 
         if getattr(self, '_val_dl_wrapped_with_dist_sampler', False):
@@ -2299,9 +2325,11 @@ class EasyMagpieTTSModel(ModelPT):
         wrapped = []
         for i, dl in enumerate(dataloaders):
             if dl is not None and not isinstance(dl.sampler, DistributedSampler):
-                print(f"[val_dataloader] rank={self.global_rank}: Wrapping val dataloader {i} with DistributedSampler "
-                      f"(dataset_len={len(dl.dataset)}, world_size={torch.distributed.get_world_size()}, "
-                      f"batch_size={dl.batch_size}, num_workers={dl.num_workers})")
+                print(
+                    f"[val_dataloader] rank={self.global_rank}: Wrapping val dataloader {i} with DistributedSampler "
+                    f"(dataset_len={len(dl.dataset)}, world_size={torch.distributed.get_world_size()}, "
+                    f"batch_size={dl.batch_size}, num_workers={dl.num_workers})"
+                )
                 sampler = DistributedSampler(dl.dataset, shuffle=False)
                 new_dl = torch.utils.data.DataLoader(
                     dl.dataset,
@@ -2317,8 +2345,10 @@ class EasyMagpieTTSModel(ModelPT):
                 wrapped.append(new_dl)
             else:
                 sampler_type = type(dl.sampler).__name__ if dl is not None else "N/A"
-                print(f"[val_dataloader] rank={self.global_rank}: Val dataloader {i} already has "
-                      f"sampler={sampler_type}, skipping wrap")
+                print(
+                    f"[val_dataloader] rank={self.global_rank}: Val dataloader {i} already has "
+                    f"sampler={sampler_type}, skipping wrap"
+                )
                 wrapped.append(dl)
 
         if isinstance(self._validation_dl, list):
