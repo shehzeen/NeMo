@@ -49,7 +49,7 @@ def build_minimal_config(codecmodel_path: str) -> OmegaConf:
             'intermediate_size': 512,
             'mlp_hidden_act': 'silu',
             'mlp_bias': False,
-            'hybrid_override_pattern': 'M*',
+            'hybrid_override_pattern': 'M*',  # All Mamba layers
             'layer_norm_epsilon': 1e-5,
             'residual_in_fp32': True,
         },
