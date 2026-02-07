@@ -225,6 +225,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         context_text_tokens_len_list = []
         context_has_text_context_list = []
         reward_list = []
+        language_list = []
         raw_text_list = (
             []
         )  # raw text here is the string of normalized text or text stored in the supervision segment. Used to distinguish from text tokens.
@@ -236,6 +237,12 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                 raise ValueError(f"Invalid format in cut.supervisions[0].speaker: {speaker}")
             dataset_name = speaker.strip().split()[2].split(":")[-1]
             dataset_name_list.append(dataset_name)
+            language = (
+                cut.supervisions[0].language
+                if cut.supervisions[0].has_custom("language")
+                else "en"
+            )
+            language_list.append(language)
 
             # target audio or target codes
             if self.load_cached_codes_if_available and cut.has_custom("target_codes"):
@@ -444,6 +451,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         batch_dict = {
             "dataset_names": dataset_name_list,
             "raw_texts": raw_text_list,
+            "languages": language_list,
             "text": collate_vectors(token_list, padding_value=self.pad_id),  # (B, max_len)
             "text_lens": torch.IntTensor(token_len_list),
         }

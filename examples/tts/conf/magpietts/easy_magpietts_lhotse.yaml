@@ -59,7 +59,7 @@ model:
   
   embedding_dim: 1536
   hidden_dim: 1536
-  audio_embedding_dim: 256  # Smaller dimension for audio embeddings to reduce parameters. Set equal to hidden_dim for no projection.
+  audio_embedding_dim: 1536  # Can set a smaller dimension for audio embeddings to reduce parameters. Set equal to hidden_dim for no projection.
   codecmodel_path: ???
   
   # Local transformer parameters for autoregressive codebook prediction within a frame
@@ -141,6 +141,7 @@ model:
       shuffle: false
       num_workers: 2
       pin_memory: true
+      force_map_dataset: true
 
       input_cfg:
       - type: lhotse_shar
