@@ -60,7 +60,7 @@ model:
   
   embedding_dim: 1536
   hidden_dim: 1536
-  audio_embedding_dim: 256  # Smaller dimension for audio embeddings to reduce parameters. Set equal to hidden_dim for no projection.
+  audio_embedding_dim: 1536  # Can set a smaller dimension for audio embeddings to reduce parameters. Set equal to hidden_dim for no projection.
   codecmodel_path: ???
   max_epochs: ${max_epochs}
   steps_per_epoch: ${weighted_sampling_steps_per_epoch}

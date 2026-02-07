@@ -32,6 +32,7 @@ from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector, WhisperForCo
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
 from nemo.collections.tts.metrics.frechet_codec_distance import FrechetCodecDistance
+from nemo.collections.tts.parts.utils.helpers import transcribe_with_whisper
 from nemo.utils import logging
 
 # Optional import for UTMOSv2 (audio quality metric)
@@ -115,24 +116,6 @@ def process_text(input_text):
     single_space_text = single_space_text.translate(str.maketrans('', '', string.punctuation))
 
     return single_space_text
-
-
-def transcribe_with_whisper(whisper_model, whisper_processor, audio_path, language, device):
-    speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
-    # Set the language task (optional, improves performance for specific languages)
-    forced_decoder_ids = (
-        whisper_processor.get_decoder_prompt_ids(language=language, task="transcribe") if language else None
-    )
-    inputs = whisper_processor(speech_array, sampling_rate=sampling_rate, return_tensors="pt").input_features
-    inputs = inputs.to(device)
-    # Generate transcription
-    with torch.inference_mode():
-        predicted_ids = whisper_model.generate(inputs, forced_decoder_ids=forced_decoder_ids)
-
-    # Decode transcription
-    transcription = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)
-    result = transcription[0]
-    return result
 
 
 def pad_audio_to_min_length(audio_np: np.ndarray, sampling_rate: int, min_seconds: float) -> np.ndarray:
@@ -293,12 +276,12 @@ def evaluate(
                         gt_audio_text = None
             else:
                 pred_text = transcribe_with_whisper(
-                    whisper_model, whisper_processor, pred_audio_filepath, language, device
+                    pred_audio_filepath, language, whisper_processor, whisper_model, device
                 )
                 pred_text = process_text(pred_text)
                 if gt_audio_filepath is not None:
                     gt_audio_text = transcribe_with_whisper(
-                        whisper_model, whisper_processor, gt_audio_filepath, language, device
+                        gt_audio_filepath, language, whisper_processor, whisper_model, device
                     )
                     gt_audio_text = process_text(gt_audio_text)
                 else:
