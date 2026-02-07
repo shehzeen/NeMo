@@ -80,6 +80,7 @@ class InferenceConfig:
     phoneme_input_type: str = "gt"  # gt or predicted
     phoneme_sampling_method: str = "argmax"  # argmax or multinomial
     dropout_text_input: bool = False
+    legacy_context_stacking: bool = False  # Use audio_bos_id/audio_eos_id for context stacking
     # Longform inference mode
     longform_mode: str = "auto"  # "auto" | "always" | "never"
     longform_word_threshold: int = 40  # Word threshold for auto-detection
@@ -152,6 +153,9 @@ class MagpieInferenceRunner:
         """
         self.model = model
         self.config = config
+
+        # Set legacy context stacking flag on model
+        self.model.legacy_context_stacking = config.legacy_context_stacking
 
         # Set phoneme probability to 1 for inference
         self._configure_tokenizer()

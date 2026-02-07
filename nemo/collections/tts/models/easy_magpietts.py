@@ -935,10 +935,15 @@ class EasyMagpieTTSModel(ModelPT):
             )  # (B, num_tokens_per_codebook)
             codebook_logits_rescored = codebook_logits.clone()
             codebook_logits_rescored[indices_to_remove] = float('-inf')
-            codebook_probs = torch.softmax(
-                codebook_logits_rescored / temperature, dim=-1
-            )  # (B, num_tokens_per_codebook)
-            codebook_preds = torch.multinomial(codebook_probs, 1)  # (B, 1)
+
+            if temperature <= 0.0:
+                # Argmax sampling for deterministic output
+                codebook_preds = codebook_logits_rescored.argmax(dim=-1, keepdim=True)  # (B, 1)
+            else:
+                codebook_probs = torch.softmax(
+                    codebook_logits_rescored / temperature, dim=-1
+                )  # (B, num_tokens_per_codebook)
+                codebook_preds = torch.multinomial(codebook_probs, 1)  # (B, 1)
             if use_cfg:
                 codebook_preds[actual_batch_size:] = codebook_preds[:actual_batch_size]
             all_preds.append(codebook_preds)
@@ -1226,11 +1231,15 @@ class EasyMagpieTTSModel(ModelPT):
             eos_id=self.context_audio_eos_id,
         )
 
+        # Use legacy audio_bos_id/audio_eos_id if flag is set
+        stack_bos_id = self.audio_bos_id if getattr(self, 'legacy_context_stacking', False) else self.context_audio_bos_id
+        stack_eos_id = self.audio_eos_id if getattr(self, 'legacy_context_stacking', False) else self.context_audio_eos_id
+        
         context_audio_codes, context_audio_codes_lens = self.stack_codes(
             context_audio_codes,
             context_audio_codes_lens,
-            self.context_audio_bos_id,
-            self.context_audio_eos_id,
+            stack_bos_id,
+            stack_eos_id,
             self.frame_stacking_factor,
             self.num_audio_codebooks,
         )
