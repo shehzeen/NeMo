@@ -2977,33 +2977,35 @@ class EasyMagpieTTSModel(ModelPT):
                     state.last_audio_codes = torch.where(update_mask, audio_codes_next_stacked, state.last_audio_codes)
 
                 # Check for EOS in each frame and track exact end position
-                # all_codes_next_argmax is also (B, C*S), reshape to (B, C, S)
-                all_codes_argmax_unstacked = all_codes_next_argmax.view(batch_size, C, S)
+                # Skip EOS detection in teacher-forced mode - rely on GT exhaustion instead
+                if state.gt_audio_embeddings is None:
+                    # all_codes_next_argmax is also (B, C*S), reshape to (B, C, S)
+                    all_codes_argmax_unstacked = all_codes_next_argmax.view(batch_size, C, S)
 
-                # For each batch item, find if/where EOS occurs in this step's frames
-                eos_in_sampled = audio_codes_unstacked == self.audio_eos_id  # (B, C, S)
-                eos_in_argmax = all_codes_argmax_unstacked == self.audio_eos_id  # (B, C, S)
-                eos_any_codebook = eos_in_sampled.any(dim=1) | eos_in_argmax.any(dim=1)  # (B, S)
+                    # For each batch item, find if/where EOS occurs in this step's frames
+                    eos_in_sampled = audio_codes_unstacked == self.audio_eos_id  # (B, C, S)
+                    eos_in_argmax = all_codes_argmax_unstacked == self.audio_eos_id  # (B, C, S)
+                    eos_any_codebook = eos_in_sampled.any(dim=1) | eos_in_argmax.any(dim=1)  # (B, S)
 
-                # Find first frame with EOS per batch item (or S if none)
-                eos_frame_idx = torch.where(
-                    eos_any_codebook.any(dim=1),
-                    eos_any_codebook.int().argmax(dim=1),  # first frame with EOS
-                    torch.full((batch_size,), S, device=device),  # no EOS in this step
-                )  # (B,)
+                    # Find first frame with EOS per batch item (or S if none)
+                    eos_frame_idx = torch.where(
+                        eos_any_codebook.any(dim=1),
+                        eos_any_codebook.int().argmax(dim=1),  # first frame with EOS
+                        torch.full((batch_size,), S, device=device),  # no EOS in this step
+                    )  # (B,)
 
-                audio_eos_detected = eos_any_codebook.any(dim=1)  # (B,)
-                state.finished = state.finished | audio_eos_detected
+                    audio_eos_detected = eos_any_codebook.any(dim=1)  # (B,)
+                    state.finished = state.finished | audio_eos_detected
 
-                # Track audio prediction end index (in frames) for items that just ended
-                newly_ended_audio = audio_eos_detected & (state.audio_prediction_end_idx == -1)
-                if newly_ended_audio.any():
-                    # End index = current frame count + frame offset where EOS was found
-                    current_frame_count = len(state.all_predictions) * self.frame_stacking_factor
-                    end_frame_idx = current_frame_count + eos_frame_idx
-                    state.audio_prediction_end_idx = torch.where(
-                        newly_ended_audio, end_frame_idx, state.audio_prediction_end_idx
-                    )
+                    # Track audio prediction end index (in frames) for items that just ended
+                    newly_ended_audio = audio_eos_detected & (state.audio_prediction_end_idx == -1)
+                    if newly_ended_audio.any():
+                        # End index = current frame count + frame offset where EOS was found
+                        current_frame_count = len(state.all_predictions) * self.frame_stacking_factor
+                        end_frame_idx = current_frame_count + eos_frame_idx
+                        state.audio_prediction_end_idx = torch.where(
+                            newly_ended_audio, end_frame_idx, state.audio_prediction_end_idx
+                        )
 
                 # Store unstacked codes
                 state.all_predictions.append(audio_codes_unstacked)
@@ -3030,7 +3032,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Sample phonemes
         if state.phoneme_sampling_method == 'argmax':
-            pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(all_code_logits_t_phoneme, temperature=0.01)
+            pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(all_code_logits_t_phoneme, temperature=0.0)
         else:
             pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
                 all_code_logits_t_phoneme, temperature=state.temperature, topk=state.topk
