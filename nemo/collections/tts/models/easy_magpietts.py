@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 import random
 import time
@@ -519,6 +520,8 @@ class EasyMagpieTTSModel(ModelPT):
                 self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
                 self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3")
                 self.whisper_model.eval()
+                for param in self.whisper_model.parameters():
+                    param.requires_grad = False
                 self._eval_asr_model = None
             else:
                 self._eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
@@ -532,6 +535,38 @@ class EasyMagpieTTSModel(ModelPT):
             )
             self._eval_speaker_verification_model.freeze()
             logging.info("Eval models loaded successfully.")
+
+    def setup_optimizer_param_groups(self):
+        """
+        Override to exclude frozen eval/inference-only models from the optimizer.
+        This prevents optimizer state mismatch errors when resuming from checkpoints
+        that were saved before these eval models were added.
+        """
+        modules_to_exclude = {
+            '_speaker_verification_model',
+            # '_codec_model',
+            '_eval_asr_model',
+            '_eval_speaker_verification_model',
+            'whisper_model',
+            'whisper_processor',
+        }
+
+        # Collect parameter ids to exclude
+        excluded_param_ids = set()
+        for name, module in self.named_children():
+            if name in modules_to_exclude:
+                for param in module.parameters():
+                    excluded_param_ids.add(id(param))
+
+        # Build param group with only trainable (non-excluded) parameters
+        trainable_params = [p for p in self.parameters() if id(p) not in excluded_param_ids]
+
+        logging.info(
+            f"setup_optimizer_param_groups: {len(trainable_params)} params in optimizer, "
+            f"{len(excluded_param_ids)} params excluded (eval models)"
+        )
+
+        self._optimizer_param_groups = [{"params": trainable_params}]
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         """
@@ -1980,6 +2015,8 @@ class EasyMagpieTTSModel(ModelPT):
                 temperature=0.7,
                 topk=80,
                 use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR,
+                use_cfg=True,
+                cfg_scale=2.5
             )
 
             # Get audio output directory
@@ -2030,7 +2067,7 @@ class EasyMagpieTTSModel(ModelPT):
 
                     # Save context audio for SSIM computation
                     ctx_audio_np = (
-                        context_audio_codes_cleaned[idx]
+                        context_audio_cleaned[idx]
                         .float()
                         .detach()
                         .cpu()
@@ -2096,15 +2133,34 @@ class EasyMagpieTTSModel(ModelPT):
                         wer = word_error_rate([pred_transcripts[idx]], [gt_transcript], use_cer=False)
                         batch_cer.append(cer)
                         batch_wer.append(wer)
+                        ssim = None
                         if pred_embeddings is not None and ctx_embeddings is not None:
                             pred_emb = pred_embeddings[idx].cpu().float().numpy()
                             ctx_emb = ctx_embeddings[idx].cpu().float().numpy()
-                            ssim = np.dot(pred_emb, ctx_emb) / (np.linalg.norm(pred_emb) * np.linalg.norm(ctx_emb))
+                            ssim = float(np.dot(pred_emb, ctx_emb) / (np.linalg.norm(pred_emb) * np.linalg.norm(ctx_emb)))
                             batch_ssim.append(ssim)
                         logging.info(
                             f"[Val] rank{self.global_rank}_batch{batch_idx}_idx{idx}: "
                             f"CER={cer:.4f}, WER={wer:.4f} | GT: '{gt_transcript[:50]}...' | Pred: '{pred_transcripts[idx][:50]}...'"
                         )
+
+                        # Save per-audio metrics JSON file alongside the audio file
+                        if audio_dir:
+                            metrics_dict = {
+                                'cer': float(cer),
+                                'wer': float(wer),
+                                'ssim': ssim,
+                                'gt_transcript': gt_transcript,
+                                'pred_transcript': pred_transcripts[idx],
+                                'audio_path': predicted_audio_paths[idx],
+                                'epoch': self.trainer.current_epoch,
+                                'global_step': self.global_step,
+                            }
+                            metrics_path = os.path.join(
+                                audio_dir, f'rank{self.global_rank}_batch{batch_idx}_idx{idx}_metrics.json'
+                            )
+                            with open(metrics_path, 'w') as f:
+                                json.dump(metrics_dict, f, indent=2)
 
                     if batch_cer:
                         val_output['val_cer'] = torch.tensor(np.mean(batch_cer), device=self.device)
