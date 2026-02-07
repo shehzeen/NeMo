@@ -507,6 +507,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     target_group.add_argument('--cer_target', type=float, default=None)
     target_group.add_argument('--ssim_target', type=float, default=None)
     target_group.add_argument('--is_decoder_only_model', action='store_true')
+    target_group.add_argument('--legacy_context_stacking', action='store_true', help='Use audio_bos_id/audio_eos_id instead of context_audio_bos_id/context_audio_eos_id for context stacking')
     target_group.add_argument('--phoneme_input_type', type=str, default='gt', choices=['predicted', 'gt'])
     target_group.add_argument(
         '--phoneme_sampling_method', type=str, default='greedy', choices=['greedy', 'multinomial']
@@ -575,6 +576,9 @@ def main(argv=None):
         phoneme_input_type=args.phoneme_input_type,
         phoneme_sampling_method=args.phoneme_sampling_method,
         dropout_text_input=args.dropout_text_input,
+        legacy_context_stacking=args.legacy_context_stacking,
+        longform_mode=args.longform_mode,
+        longform_word_threshold=args.longform_word_threshold,
     )
 
     eval_config = EvaluationConfig(
