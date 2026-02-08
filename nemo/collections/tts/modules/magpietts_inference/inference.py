@@ -267,7 +267,7 @@ class MagpieInferenceRunner:
             logging.info("Creating MagpieTTSDataset for standard inference")
             dataset = MagpieTTSDataset(
                 dataset_meta=dataset_meta,
-                sample_rate=self.model.output_sample_rate,
+                sample_rate=self.model.sample_rate,
                 min_duration=0.5,
                 max_duration=20,
                 codec_model_samples_per_frame=self.model.codec_model_samples_per_frame,
