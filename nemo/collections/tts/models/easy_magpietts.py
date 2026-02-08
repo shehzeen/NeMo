@@ -151,6 +151,7 @@ class StreamingState:
         phoneme_steps: Number of phoneme prediction steps taken per batch item (B,).
         audio_steps: Number of audio prediction steps taken per batch item (B,).
         phoneme_stream_ended: Whether the phoneme stream has ended per batch item (B,) bool tensor.
+        phoneme_eos_detected: Whether the phoneme EOS has been predicted per batch item (B,) bool tensor.
         finished: Whether generation is complete per batch item (B,) bool tensor.
         device: Device tensors are on.
         training_mode: The training mode being used for inference.
@@ -187,6 +188,7 @@ class StreamingState:
     phoneme_steps: torch.Tensor
     audio_steps: torch.Tensor
     phoneme_stream_ended: torch.Tensor
+    phoneme_eos_detected: torch.Tensor
     finished: torch.Tensor
     device: torch.device
     training_mode: TrainingMode
@@ -2654,6 +2656,7 @@ class EasyMagpieTTSModel(ModelPT):
                 phoneme_steps=torch.zeros(batch_size, dtype=torch.long, device=device),
                 audio_steps=torch.zeros(batch_size, dtype=torch.long, device=device),
                 phoneme_stream_ended=torch.zeros(batch_size, dtype=torch.bool, device=device),
+                phoneme_eos_detected=torch.zeros(batch_size, dtype=torch.bool, device=device),
                 finished=torch.zeros(batch_size, dtype=torch.bool, device=device),
                 device=device,
                 training_mode=selected_training_mode,
@@ -2828,8 +2831,12 @@ class EasyMagpieTTSModel(ModelPT):
                             )  # (B, 1, E)
                             last_mask = has_last_phoneme.view(batch_size, 1, 1).float()
                             phoneme_emb = phoneme_emb + last_phoneme_emb * last_mask
+                        
+                        # Only end phoneme stream in prediction mode when the phoneme EOS is detected
+                        state.phoneme_stream_ended = state.phoneme_stream_ended | state.phoneme_eos_detected
 
                     next_input = next_input + phoneme_emb
+                    
 
             # --- Audio embedding for audio phase items ---
             if needs_audio.any():
@@ -2947,6 +2954,7 @@ class EasyMagpieTTSModel(ModelPT):
                     dim=1
                 )  # (B,)
                 state.phoneme_stream_ended = state.phoneme_stream_ended | phoneme_eos_detected
+                state.phoneme_eos_detected = state.phoneme_eos_detected | phoneme_eos_detected
 
                 # Track phoneme prediction end index for items that just ended
                 newly_ended_phoneme = phoneme_eos_detected & (state.phoneme_prediction_end_idx == -1)
