@@ -3011,7 +3011,7 @@ class EasyMagpieTTSModel(ModelPT):
                         torch.full((batch_size,), S, device=device),  # no EOS in this step
                     )  # (B,)
 
-                    audio_eos_detected = eos_any_codebook.any(dim=1)  # (B,)
+                    audio_eos_detected = eos_any_codebook.any(dim=1)  & needs_audio
                     state.finished = state.finished | audio_eos_detected
 
                     # Track audio prediction end index (in frames) for items that just ended
