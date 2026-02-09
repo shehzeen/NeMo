@@ -557,7 +557,7 @@ class EasyMagpieTTSModel(ModelPT):
         """
         modules_to_exclude = {
             '_speaker_verification_model',
-            # '_codec_model',
+            '_codec_model',
             '_eval_asr_model',
             '_eval_speaker_verification_model',
             'whisper_model',
