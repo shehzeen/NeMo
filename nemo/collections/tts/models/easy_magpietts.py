@@ -2953,7 +2953,7 @@ class EasyMagpieTTSModel(ModelPT):
                 ).any(
                     dim=1
                 )  # (B,)
-                state.phoneme_stream_ended = state.phoneme_stream_ended | phoneme_eos_detected
+                
                 state.phoneme_eos_detected = state.phoneme_eos_detected | phoneme_eos_detected
 
                 # Track phoneme prediction end index for items that just ended
