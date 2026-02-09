@@ -70,22 +70,22 @@ model:
   local_transformer_n_heads: 12
   local_transformer_hidden_dim: 1536
 
-  cfg_unconditional_prob: 0.1
+  cfg_unconditional_prob: 0.05
   
   # Multi-mode training configuration
   # The model will randomly select one of the modes for each batch during training.
   # Each mode has its own task embedding that is prepended to the context.
   # During inference, you can specify which mode to use via the 'inference_mode' parameter.
   training_modes:
-    - name: "streaming_4_8"
+    - name: "streaming_0_1"
       text_input_mode: "streaming" # Options: "full", "streaming"
-      streaming_phonemes_delay: 4
-      streaming_speech_delay: 8
+      streaming_phonemes_delay: 0
+      streaming_speech_delay: 1
 
   frame_stacking_factor: 2
   phoneme_stacking_factor: 1
-  dropout_text_input_prob: 0.3
-  dropout_phoneme_input_prob: 0.3
+  dropout_text_input_prob: 0.1
+  dropout_phoneme_input_prob: 0.1
   
   phoneme_tokenizer:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPABPETokenizer
