@@ -1348,7 +1348,7 @@ class EasyMagpieTTSModel(ModelPT):
         delay: torch.Tensor,
         apply_corruption: bool = False,
         dropout_complete_phoneme_channel: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
         """
         Prepare phoneme embeddings as a channel input with delay handling.
 
@@ -1370,6 +1370,7 @@ class EasyMagpieTTSModel(ModelPT):
                 - phoneme_channel_lens: Total length of phoneme channel for each batch item (B,)
                 - phoneme_tokens_stacked: Stacked phoneme tokens (B, S, T')
                 - phoneme_tokens_lens_stacked: Length of stacked phoneme tokens (B,)
+                - phoneme_tokens_stacked_clean: Clean stacked phoneme tokens before corruption (B, S, T')
                 - corruption_mode: None, "unk", or "repeat_skip"
         """
         batch_size = phoneme_tokens.size(0)
@@ -1385,6 +1386,7 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_stacking_factor,
             1,
         )
+        phoneme_tokens_stacked_clean = phoneme_tokens_stacked.clone()
 
         phoneme_corruption_mode = None
         if apply_corruption:
@@ -1419,6 +1421,7 @@ class EasyMagpieTTSModel(ModelPT):
             phoneme_channel_lens,
             phoneme_tokens_stacked,
             phoneme_tokens_lens_stacked,
+            phoneme_tokens_stacked_clean,
             phoneme_corruption_mode,
         )
 
@@ -1789,6 +1792,7 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_channel_embedding = None
         phoneme_tokens_stacked = None
         phoneme_tokens_lens_stacked = None
+        phoneme_tokens_stacked_clean = None
         phoneme_corruption_mode = None
         dropout_complete_phoneme_channel = False
         if self.phoneme_tokenizer is not None and phoneme_tokens is not None:
@@ -1800,6 +1804,7 @@ class EasyMagpieTTSModel(ModelPT):
                 phoneme_channel_lens,
                 phoneme_tokens_stacked,
                 phoneme_tokens_lens_stacked,
+                phoneme_tokens_stacked_clean,
                 phoneme_corruption_mode,
             ) = self.prepare_phoneme_channel_embeddings(
                 phoneme_tokens=phoneme_tokens,
@@ -1940,10 +1945,10 @@ class EasyMagpieTTSModel(ModelPT):
                 target_lens=phoneme_tokens_lens_stacked - 1,
             )
             pb_phoneme_logits = self.phoneme_final_proj(pred_embeddings_phoneme)
-            pb_phoneme_tokens_target = phoneme_tokens_stacked[:, :, 1:].long()
+            pb_phoneme_tokens_target = phoneme_tokens_stacked_clean[:, :, 1:].long()
             pb_phoneme_tokens_lens_target = phoneme_tokens_lens_stacked - 1
 
-            if phoneme_corruption_mode != 'repeat_skip' and not dropout_complete_phoneme_channel:
+            if (phoneme_corruption_mode != 'repeat_skip') and not (dropout_complete_phoneme_channel or dropout_conditional_input or dropout_text_input):
                 phoneme_loss, _ = self.compute_phoneme_loss(
                     pb_phoneme_logits, pb_phoneme_tokens_target, pb_phoneme_tokens_lens_target
                 )
