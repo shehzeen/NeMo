@@ -380,6 +380,10 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
             self.phoneme_vocab_size = self.phoneme_tokenizer.vocab_size
+            if cfg.get('phoneme_corruption_batch_prob', None) is None:
+                # Legacy mode: remove the UNK token from the phoneme vocabulary
+                # TODO: Remove this.
+                self.phoneme_vocab_size -= 1
             # If max phoneme probability is below this threshold at inference-time,
             # replace the predicted timestep with UNK to reduce error propagation.
             self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.0)
@@ -412,7 +416,6 @@ class EasyMagpieTTSModel(ModelPT):
             for _ in range(self.phoneme_stacking_factor):
                 phoneme_embeddings.append(nn.Embedding(self.phoneme_vocab_size, cfg.embedding_dim))
             self.phoneme_embeddings = nn.ModuleList(phoneme_embeddings)
-            print("phoneme_vocab_size for final proj.", self.phoneme_vocab_size)
             self.phoneme_final_proj = nn.Linear(cfg.hidden_dim, self.phoneme_vocab_size * self.phoneme_stacking_factor)
 
         # Decoder backend selection - supports HuggingFace models or NemotronH
