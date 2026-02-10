@@ -380,6 +380,7 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
             self.phoneme_vocab_size = self.phoneme_tokenizer.vocab_size
+            self.phoneme_vocab_size -= 1
             # If max phoneme probability is below this threshold at inference-time,
             # replace the predicted timestep with UNK to reduce error propagation.
             self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.0)
@@ -412,6 +413,7 @@ class EasyMagpieTTSModel(ModelPT):
             for _ in range(self.phoneme_stacking_factor):
                 phoneme_embeddings.append(nn.Embedding(self.phoneme_vocab_size, cfg.embedding_dim))
             self.phoneme_embeddings = nn.ModuleList(phoneme_embeddings)
+            print("phoneme_vocab_size for final proj.", self.phoneme_vocab_size)
             self.phoneme_final_proj = nn.Linear(cfg.hidden_dim, self.phoneme_vocab_size * self.phoneme_stacking_factor)
 
         # Decoder backend selection - supports HuggingFace models or NemotronH
@@ -2832,8 +2834,8 @@ class EasyMagpieTTSModel(ModelPT):
             # ==================== DETERMINE PHASES PER BATCH ITEM ====================
             needs_context = state.context_position < state.full_context_lens  # (B,) bool
             needs_text = (~needs_context) & (~state.text_finished)
-            needs_phoneme = (state.text_tokens_seen >= streaming_phonemes_delay) & (~state.phoneme_stream_ended)
-            needs_audio = (state.text_tokens_seen >= streaming_speech_delay) & (~state.finished)
+            needs_phoneme = (~needs_context) & (state.text_tokens_seen >= streaming_phonemes_delay) & (~state.phoneme_stream_ended)
+            needs_audio = (~needs_context) & (state.text_tokens_seen >= streaming_speech_delay) & (~state.finished)
 
             next_input = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
             # --- Context phase items: use next context embedding ---
@@ -2874,7 +2876,7 @@ class EasyMagpieTTSModel(ModelPT):
                 # The EOS token itself IS embedded normally (matching process_batch behavior
                 # where EOS is part of the text sequence). After this step, text_finished is set
                 # so subsequent steps won't add any text embedding.
-                is_eos_token = text_tokens == self.eos_id  # (B,) bool
+                is_eos_token = text_tokens == self.eos_id  & needs_text # (B,) bool
                 text_add_mask = needs_text.view(batch_size, 1, 1).float()
                 next_input = next_input + text_embedded * text_add_mask
                 state.text_finished = state.text_finished | is_eos_token
