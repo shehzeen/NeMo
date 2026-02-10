@@ -89,7 +89,7 @@ model:
   
   frame_stacking_factor: 2
   phoneme_stacking_factor: 1
-  phoneme_confidence_unk_threshold: 0.35
+  phoneme_confidence_unk_threshold: 0.0 # If max phoneme probability is below this threshold at inference-time, replace the predicted timestep with UNK to reduce error propagation.
   dropout_text_input_prob: 0.1
   phoneme_corruption_batch_prob: 0.1
   phoneme_corruption_timestep_ratio: 0.15

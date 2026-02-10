@@ -382,7 +382,7 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_vocab_size = self.phoneme_tokenizer.vocab_size
             # If max phoneme probability is below this threshold at inference-time,
             # replace the predicted timestep with UNK to reduce error propagation.
-            self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.35)
+            self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.0)
 
         self.pad_context_text_to_max_duration = False
 
@@ -1743,7 +1743,6 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Determine dropout flags
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
-        dropout_phoneme_input = False
 
         # Determine CFG unconditional dropout
         dropout_conditional_input = False
@@ -1794,7 +1793,7 @@ class EasyMagpieTTSModel(ModelPT):
         dropout_complete_phoneme_channel = False
         if self.phoneme_tokenizer is not None and phoneme_tokens is not None:
             # Corrupt phonemes only when text input is not dropped.
-            apply_phoneme_corruption = mode == 'train' and not dropout_text_input and not dropout_conditional_input
+            apply_phoneme_corruption = mode == 'train' and (not dropout_text_input) and (not dropout_conditional_input)
             dropout_complete_phoneme_channel = dropout_conditional_input
             (
                 phoneme_channel_embedding,
