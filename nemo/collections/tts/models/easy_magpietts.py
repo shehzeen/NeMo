@@ -2875,7 +2875,7 @@ class EasyMagpieTTSModel(ModelPT):
                 # The EOS token itself IS embedded normally (matching process_batch behavior
                 # where EOS is part of the text sequence). After this step, text_finished is set
                 # so subsequent steps won't add any text embedding.
-                is_eos_token = text_tokens == self.eos_id  & needs_text # (B,) bool
+                is_eos_token = (text_tokens == self.eos_id)  & needs_text # (B,) bool
                 text_add_mask = needs_text.view(batch_size, 1, 1).float()
                 next_input = next_input + text_embedded * text_add_mask
                 state.text_finished = state.text_finished | is_eos_token
