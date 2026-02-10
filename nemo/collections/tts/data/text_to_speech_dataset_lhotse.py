@@ -65,7 +65,8 @@ def instantiate_phoneme_tokenizer(phoneme_tokenizer_config):
     phoneme_vocab_size = len(phoneme_tokenizer.tokens)
     phoneme_tokenizer.bos_token_id = phoneme_vocab_size
     phoneme_tokenizer.eos_token_id = phoneme_vocab_size + 1
-    phoneme_tokenizer.vocab_size = phoneme_vocab_size + 2
+    phoneme_tokenizer.unk_token_id = phoneme_vocab_size + 2
+    phoneme_tokenizer.vocab_size = phoneme_vocab_size + 3
     return phoneme_tokenizer
 
 

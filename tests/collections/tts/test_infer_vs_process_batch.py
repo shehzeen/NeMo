@@ -82,7 +82,6 @@ def build_minimal_config(codecmodel_path: str) -> OmegaConf:
         'frame_stacking_factor': 2,
         'cfg_unconditional_prob': 0.0,
         'dropout_text_input_prob': 0.0,
-        'dropout_phoneme_input_prob': 0.0,
         'local_transformer_type': 'none',
         'run_val_inference': False,
         # Optim placeholder (required by ModelPT but not used)

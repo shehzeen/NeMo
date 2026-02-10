@@ -373,11 +373,16 @@ class EasyMagpieTTSModel(ModelPT):
         self.cfg_unk_token_id = num_tokens - 1
         self.phoneme_tokenizer = None
         self.dropout_text_input_prob = cfg.get('dropout_text_input_prob', 0.0)
-        self.dropout_phoneme_input_prob = cfg.get('dropout_phoneme_input_prob', 0.0)
+        self.phoneme_corruption_batch_prob = cfg.get('phoneme_corruption_batch_prob', 0.0)
+        self.phoneme_corruption_timestep_ratio = cfg.get('phoneme_corruption_timestep_ratio', 0.0)
+        self.phoneme_corruption_unk_mode_prob = cfg.get('phoneme_corruption_unk_mode_prob', 0.5)
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
             self.phoneme_vocab_size = self.phoneme_tokenizer.vocab_size
+            # If max phoneme probability is below this threshold at inference-time,
+            # replace the predicted timestep with UNK to reduce error propagation.
+            self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.35)
 
         self.pad_context_text_to_max_duration = False
 
@@ -1341,8 +1346,9 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_tokens: torch.Tensor,
         phoneme_tokens_lens: torch.Tensor,
         delay: torch.Tensor,
-        dropout_phoneme_input: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        apply_corruption: bool = False,
+        dropout_complete_phoneme_channel: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
         """
         Prepare phoneme embeddings as a channel input with delay handling.
 
@@ -1355,7 +1361,8 @@ class EasyMagpieTTSModel(ModelPT):
             phoneme_tokens_lens: Length of phoneme tokens for each batch item (B,)
             delay: Number of zero positions to prepend for each batch item (B,).
                    This is typically context_lens + phoneme_delay.
-            dropout_phoneme_input: If True, return all zeros (for phoneme dropout regularization).
+            apply_corruption: If True, apply phoneme-token corruption before embedding.
+            dropout_complete_phoneme_channel: If True, zero-out the whole phoneme channel embedding.
 
         Returns:
             Tuple of:
@@ -1363,6 +1370,7 @@ class EasyMagpieTTSModel(ModelPT):
                 - phoneme_channel_lens: Total length of phoneme channel for each batch item (B,)
                 - phoneme_tokens_stacked: Stacked phoneme tokens (B, S, T')
                 - phoneme_tokens_lens_stacked: Length of stacked phoneme tokens (B,)
+                - corruption_mode: None, "unk", or "repeat_skip"
         """
         batch_size = phoneme_tokens.size(0)
         device = phoneme_tokens.device
@@ -1378,6 +1386,13 @@ class EasyMagpieTTSModel(ModelPT):
             1,
         )
 
+        phoneme_corruption_mode = None
+        if apply_corruption:
+            phoneme_tokens_stacked, phoneme_corruption_mode = self.corrupt_stacked_phoneme_tokens(
+                phoneme_tokens_stacked=phoneme_tokens_stacked,
+                phoneme_tokens_lens_stacked=phoneme_tokens_lens_stacked,
+            )
+
         # Embed phoneme tokens
         phoneme_embedded = self.embed_phoneme_tokens(phoneme_tokens_stacked)  # (B, T', E)
 
@@ -1386,7 +1401,7 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_embedded = phoneme_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
 
         # Handle phoneme dropout - zero out the embeddings
-        if dropout_phoneme_input:
+        if dropout_complete_phoneme_channel:
             phoneme_embedded = phoneme_embedded * 0.0
 
         # Create zero tensor for delay padding
@@ -1399,7 +1414,78 @@ class EasyMagpieTTSModel(ModelPT):
             lengths=[delay, phoneme_tokens_lens_stacked],
         )
 
-        return phoneme_channel_embedding, phoneme_channel_lens, phoneme_tokens_stacked, phoneme_tokens_lens_stacked
+        return (
+            phoneme_channel_embedding,
+            phoneme_channel_lens,
+            phoneme_tokens_stacked,
+            phoneme_tokens_lens_stacked,
+            phoneme_corruption_mode,
+        )
+
+    def corrupt_stacked_phoneme_tokens(
+        self,
+        phoneme_tokens_stacked: torch.Tensor,
+        phoneme_tokens_lens_stacked: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[str]]:
+        """
+        Corrupt stacked phoneme tokens for robustness to phoneme prediction errors.
+
+        Two corruption modes are supported:
+        1. UNK replacement at selected timesteps (all stacked channels replaced).
+        2. Repeat/skip corruption via a shared index remapping over the valid prefix.
+        """
+        if self.phoneme_tokenizer is None:
+            return phoneme_tokens_stacked, None
+        if self.phoneme_corruption_batch_prob <= 0.0:
+            return phoneme_tokens_stacked, None
+        if self.phoneme_corruption_timestep_ratio <= 0.0:
+            return phoneme_tokens_stacked, None
+        if torch.rand(1).item() >= self.phoneme_corruption_batch_prob:
+            return phoneme_tokens_stacked, None
+
+        min_len = int(phoneme_tokens_lens_stacked.min().item())
+        # Need room for BOS and EOS plus at least one interior timestep.
+        if min_len <= 2:
+            return phoneme_tokens_stacked, None
+
+        # Corrupt only interior steps, keeping BOS/EOS untouched.
+        valid_start = 1
+        valid_end = min_len - 1  # exclusive
+        num_valid_steps = max(0, valid_end - valid_start)
+        if num_valid_steps == 0:
+            return phoneme_tokens_stacked, None
+
+        num_corrupt_steps = int(round(num_valid_steps * self.phoneme_corruption_timestep_ratio))
+        num_corrupt_steps = max(1, min(num_valid_steps, num_corrupt_steps))
+
+        corrupted = phoneme_tokens_stacked.clone()
+        mode = 'unk' if torch.rand(1).item() < self.phoneme_corruption_unk_mode_prob else 'repeat_skip'
+
+        candidate_steps = torch.arange(valid_start, valid_end, device=phoneme_tokens_stacked.device)
+        corrupt_steps = candidate_steps[torch.randperm(num_valid_steps, device=phoneme_tokens_stacked.device)][
+            :num_corrupt_steps
+        ]
+
+        if mode == 'unk':
+            if not hasattr(self.phoneme_tokenizer, 'unk_token_id'):
+                raise ValueError("Phoneme tokenizer is missing `unk_token_id` required for UNK corruption.")
+            corrupted[:, :, corrupt_steps] = self.phoneme_tokenizer.unk_token_id
+            return corrupted, mode
+
+        # Repeat/skip corruption with a shared remap over [0, min_len).
+        # This keeps batched execution efficient and applies the same corrupted timeline across the batch.
+        source_index = torch.arange(min_len, device=phoneme_tokens_stacked.device, dtype=torch.long)
+        step_delta = torch.ones(min_len, device=phoneme_tokens_stacked.device, dtype=torch.long)
+        op_is_repeat = torch.rand(corrupt_steps.numel(), device=phoneme_tokens_stacked.device) < 0.5
+        step_delta[corrupt_steps] = torch.where(op_is_repeat, torch.zeros_like(corrupt_steps), torch.full_like(corrupt_steps, 2))
+        source_index = torch.cumsum(step_delta, dim=0) - step_delta[0]
+        source_index = torch.clamp(source_index, min=0, max=min_len - 1)
+        source_index[0] = 0
+        source_index[-1] = min_len - 1
+
+        corrupted_prefix = phoneme_tokens_stacked[:, :, :min_len].index_select(dim=2, index=source_index)
+        corrupted[:, :, :min_len] = corrupted_prefix
+        return corrupted, mode
 
     def prepare_audio_channel_embeddings(
         self,
@@ -1657,10 +1743,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Determine dropout flags
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
-        dropout_phoneme_input = (random.random() < self.dropout_phoneme_input_prob) if mode == 'train' else False
-        if dropout_phoneme_input and dropout_text_input:
-            dropout_phoneme_input = random.random() < 0.5
-            dropout_text_input = not dropout_phoneme_input
+        dropout_phoneme_input = False
 
         # Determine CFG unconditional dropout
         dropout_conditional_input = False
@@ -1707,17 +1790,24 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_channel_embedding = None
         phoneme_tokens_stacked = None
         phoneme_tokens_lens_stacked = None
+        phoneme_corruption_mode = None
+        dropout_complete_phoneme_channel = False
         if self.phoneme_tokenizer is not None and phoneme_tokens is not None:
+            # Corrupt phonemes only when text input is not dropped.
+            apply_phoneme_corruption = mode == 'train' and not dropout_text_input and not dropout_conditional_input
+            dropout_complete_phoneme_channel = dropout_conditional_input
             (
                 phoneme_channel_embedding,
                 phoneme_channel_lens,
                 phoneme_tokens_stacked,
                 phoneme_tokens_lens_stacked,
+                phoneme_corruption_mode,
             ) = self.prepare_phoneme_channel_embeddings(
                 phoneme_tokens=phoneme_tokens,
                 phoneme_tokens_lens=phoneme_tokens_lens,
                 delay=phoneme_delay,
-                dropout_phoneme_input=dropout_phoneme_input or dropout_conditional_input,
+                apply_corruption=apply_phoneme_corruption,
+                dropout_complete_phoneme_channel=dropout_complete_phoneme_channel,
             )
 
         # 5. Prepare audio channel embeddings
@@ -1854,14 +1944,12 @@ class EasyMagpieTTSModel(ModelPT):
             pb_phoneme_tokens_target = phoneme_tokens_stacked[:, :, 1:].long()
             pb_phoneme_tokens_lens_target = phoneme_tokens_lens_stacked - 1
 
-            if not (dropout_conditional_input or dropout_text_input or dropout_phoneme_input):
+            if phoneme_corruption_mode != 'repeat_skip' and not dropout_complete_phoneme_channel:
                 phoneme_loss, _ = self.compute_phoneme_loss(
                     pb_phoneme_logits, pb_phoneme_tokens_target, pb_phoneme_tokens_lens_target
                 )
-                print("No Dropout - phoneme loss:", phoneme_loss.item())
             else:
                 phoneme_loss = torch.tensor(0.0, device=logits.device)
-                print("Dropout - phoneme loss skipped", phoneme_loss.item())
 
             loss = loss + phoneme_loss
 
@@ -3046,6 +3134,8 @@ class EasyMagpieTTSModel(ModelPT):
         # Get phoneme logits
         all_code_logits_t_phoneme = self.phoneme_final_proj(last_hidden[:, -1, :])
         all_code_logits_t_phoneme = all_code_logits_t_phoneme[:actual_batch_size]
+        phoneme_logits = all_code_logits_t_phoneme.view(actual_batch_size, self.phoneme_stacking_factor, self.phoneme_vocab_size)
+        max_probs = torch.softmax(phoneme_logits, dim=-1).max(dim=-1).values  # (B, phoneme_stacking_factor)
 
         # Sample phonemes
         if state.phoneme_sampling_method == 'argmax':
@@ -3054,6 +3144,20 @@ class EasyMagpieTTSModel(ModelPT):
             pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
                 all_code_logits_t_phoneme, temperature=state.temperature, topk=state.topk
             )
+
+        # In prediction mode, low-confidence phoneme steps are replaced with UNK across
+        # all stacked channels (except steps where EOS is predicted).
+        if (
+            state.phoneme_input_type != 'gt'
+            and hasattr(self.phoneme_tokenizer, 'unk_token_id')
+            and self.phoneme_confidence_unk_threshold > 0.0
+        ):
+            underconfident_step = (max_probs < self.phoneme_confidence_unk_threshold).any(dim=1, keepdim=True)  # (B, 1)
+            eos_predicted_step = (pred_phoneme_tokens == self.phoneme_tokenizer.eos_token_id).any(dim=1, keepdim=True)
+            replace_with_unk = underconfident_step & (~eos_predicted_step)
+            if replace_with_unk.any():
+                unk_tokens = torch.full_like(pred_phoneme_tokens, self.phoneme_tokenizer.unk_token_id)
+                pred_phoneme_tokens = torch.where(replace_with_unk, unk_tokens, pred_phoneme_tokens)
         # (B, phoneme_stacking_factor)
         return pred_phoneme_tokens
 
