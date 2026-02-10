@@ -380,7 +380,6 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
             self.phoneme_vocab_size = self.phoneme_tokenizer.vocab_size
-            self.phoneme_vocab_size -= 1
             # If max phoneme probability is below this threshold at inference-time,
             # replace the predicted timestep with UNK to reduce error propagation.
             self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.0)
