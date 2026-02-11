@@ -420,6 +420,12 @@ class MagpieTTSDataset(TextToSpeechDataset):
 
     def __getitem__(self, index):
         data = self.data_samples[index]
+
+        def _sample_context_duration_with_available_limit(available_duration_sec: float) -> float:
+            effective_duration_max = min(self.context_duration_max, available_duration_sec)
+            effective_duration_max = max(self.context_duration_min, effective_duration_max)
+            return random.uniform(self.context_duration_min, effective_duration_max)
+
         tokenizer_name = "english_phoneme"  # Default to english phoneme tokenizer
         if data.tokenizer_names is not None:
             # Pick a random tokenizer from the list of tokenizers
@@ -489,8 +495,10 @@ class MagpieTTSDataset(TextToSpeechDataset):
         if self.load_cached_codes_if_available and 'context_audio_codes_path' in data.manifest_entry:
             context_audio_codes_path = data.manifest_entry['context_audio_codes_path']
             context_audio_codes = torch.load(context_audio_codes_path)  # (8, T)
-            # Sample random duration between self.context_duration_min and self.context_duration_max
-            _context_duration_to_slice = random.uniform(self.context_duration_min, self.context_duration_max)
+            _available_context_duration = (
+                context_audio_codes.shape[1] * self.codec_model_samples_per_frame / self.sample_rate
+            )
+            _context_duration_to_slice = _sample_context_duration_with_available_limit(_available_context_duration)
             _num_frames_to_slice = int(
                 _context_duration_to_slice * self.sample_rate / self.codec_model_samples_per_frame
             )
@@ -517,7 +525,8 @@ class MagpieTTSDataset(TextToSpeechDataset):
                 duration=context_duration,
             )
             context_audio_array = context_audio_array.samples
-            _context_duration_to_slice = random.uniform(self.context_duration_min, self.context_duration_max)
+            _available_context_duration = len(context_audio_array) / self.sample_rate
+            _context_duration_to_slice = _sample_context_duration_with_available_limit(_available_context_duration)
             _num_samples_to_slice = self.get_num_audio_samples_to_slice(_context_duration_to_slice, self.sample_rate)
             if _num_samples_to_slice < len(context_audio_array):
                 start_idx = random.randint(0, len(context_audio_array) - _num_samples_to_slice)
@@ -566,7 +575,8 @@ class MagpieTTSDataset(TextToSpeechDataset):
                     sample_rate=16000,
                     volume_norm=self.volume_norm,
                 )
-            _context_duration_to_slice = random.uniform(self.context_duration_min, self.context_duration_max)
+            _available_context_duration = len(audio_array_16khz) / 16000
+            _context_duration_to_slice = _sample_context_duration_with_available_limit(_available_context_duration)
             _num_samples_to_slice = int(_context_duration_to_slice * 16000)
             if _num_samples_to_slice < len(audio_array_16khz):
                 start_idx = random.randint(0, len(audio_array_16khz) - _num_samples_to_slice)
