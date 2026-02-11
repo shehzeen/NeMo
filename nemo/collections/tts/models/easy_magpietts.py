@@ -2263,8 +2263,8 @@ class EasyMagpieTTSModel(ModelPT):
                         if pred_transcripts[idx] is None:
                             continue
                         gt_transcript = process_text_for_cer(batch['raw_texts'][idx])
-                        cer = word_error_rate([pred_transcripts[idx]], [gt_transcript], use_cer=True)
-                        wer = word_error_rate([pred_transcripts[idx]], [gt_transcript], use_cer=False)
+                        cer = min(word_error_rate([pred_transcripts[idx]], [gt_transcript], use_cer=True), 1.0)
+                        wer = min(word_error_rate([pred_transcripts[idx]], [gt_transcript], use_cer=False), 1.0)
                         batch_cer.append(cer)
                         batch_wer.append(wer)
                         ssim = None
