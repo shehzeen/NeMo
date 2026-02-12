@@ -2150,6 +2150,11 @@ class EasyMagpieTTSModel(ModelPT):
                 disable_cfg_dropout=True,
             )
             delta = batch_output.codebook_loss_per_sample - uncond_output.codebook_loss_per_sample
+            # Log delta statistics for diagnostics
+            self.log('train/transcript_delta_mean', delta.mean(), on_step=True, sync_dist=True)
+            self.log('train/transcript_delta_std', delta.std(), on_step=True, sync_dist=True)
+            self.log('train/transcript_delta_min', delta.min(), on_step=True, sync_dist=True)
+            self.log('train/transcript_delta_max', delta.max(), on_step=True, sync_dist=True)
             harmful_mask = delta > self.gating_margin
             harmful_mask = self._apply_min_keep_ratio(harmful_mask=harmful_mask, delta=delta)
 
