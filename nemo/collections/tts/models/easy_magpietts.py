@@ -2057,12 +2057,9 @@ class EasyMagpieTTSModel(ModelPT):
             delta_value = float(delta[idx].detach().cpu().item())
             dataset_name = dataset_names[idx] if idx < len(dataset_names) else "unknown_dataset"
             raw_text = raw_texts[idx] if idx < len(raw_texts) else ""
-            caption = f"gated_idx={idx}, delta={delta_value:.4f}, dataset={dataset_name}"
+            caption = f"gated_idx={idx}, delta={delta_value:.4f}, dataset={dataset_name}, text={raw_text}"
 
-            if self.gating_audit_log_text:
-                logging.info(f"[TranscriptGatingAudit] {caption}, text='{raw_text}'")
-            else:
-                logging.info(f"[TranscriptGatingAudit] {caption}")
+            logging.info(f"[TranscriptGatingAudit] {caption}")
 
             for logger in self.loggers:
                 if self.gating_audit_log_text:
