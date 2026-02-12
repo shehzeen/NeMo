@@ -2201,8 +2201,8 @@ class EasyMagpieTTSModel(ModelPT):
 
             self._log_transcript_gating_audit(
                 batch=batch,
-                audio_codes=audio_codes,
-                audio_codes_lens=audio_codes_lens,
+                audio_codes=batch_output.audio_codes_target,
+                audio_codes_lens=batch_output.audio_codes_lens_target,
                 harmful_mask=harmful_mask,
                 delta=delta,
             )
