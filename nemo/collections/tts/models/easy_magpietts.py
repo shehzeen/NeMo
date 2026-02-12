@@ -119,6 +119,7 @@ class ProcessBatchOutput:
     selected_training_mode: Optional[str] = None
     codebook_loss_per_sample: Optional[torch.Tensor] = None
     local_transformer_loss_per_sample: Optional[torch.Tensor] = None
+    used_cfg_dropout: bool = False
 
 
 @dataclass
@@ -1722,6 +1723,7 @@ class EasyMagpieTTSModel(ModelPT):
         mode: str = "train",
         training_mode: Optional[TrainingMode] = None,
         force_text_dropout: bool = False,
+        force_phoneme_dropout: bool = False,
         return_per_sample_losses: bool = False,
         disable_cfg_dropout: bool = False,
     ) -> ProcessBatchOutput:
@@ -1824,7 +1826,7 @@ class EasyMagpieTTSModel(ModelPT):
         if self.phoneme_tokenizer is not None and phoneme_tokens is not None:
             # Corrupt phonemes only when text input is not dropped.
             apply_phoneme_corruption = mode == 'train' and (not dropout_text_input) and (not dropout_conditional_input)
-            dropout_complete_phoneme_channel = dropout_conditional_input
+            dropout_complete_phoneme_channel = dropout_conditional_input or force_phoneme_dropout
             (
                 phoneme_channel_embedding,
                 phoneme_channel_lens,
@@ -2012,6 +2014,7 @@ class EasyMagpieTTSModel(ModelPT):
             selected_training_mode=selected_training_mode.name if selected_training_mode is not None else None,
             codebook_loss_per_sample=codebook_loss_per_sample,
             local_transformer_loss_per_sample=local_transformer_loss_per_sample,
+            used_cfg_dropout=dropout_conditional_input,
         )
 
     def _apply_min_keep_ratio(self, harmful_mask: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
@@ -2131,83 +2134,90 @@ class EasyMagpieTTSModel(ModelPT):
         local_transformer_loss = batch_output.local_transformer_loss
         phoneme_loss = batch_output.phoneme_loss
         if gating_active:
-            selected_mode = self.mode_name_to_mode[batch_output.selected_training_mode]
-            uncond_output = self.process_batch(
-                text=batch['text'],
-                text_lens=batch['text_lens'],
-                context_text_tokens=batch['context_text_tokens'],
-                context_text_tokens_lens=batch['context_text_tokens_lens'],
-                audio_codes=audio_codes,
-                audio_codes_lens=audio_codes_lens,
-                context_audio_codes=context_audio_codes,
-                context_audio_codes_lens=context_audio_codes_lens,
-                phoneme_tokens=batch.get('phoneme_tokens'),
-                phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
-                mode="train",
-                training_mode=selected_mode,
-                force_text_dropout=True,
-                return_per_sample_losses=True,
-                disable_cfg_dropout=True,
-            )
-            delta = batch_output.codebook_loss_per_sample - uncond_output.codebook_loss_per_sample
-            # Log delta statistics for diagnostics
-            self.log('train/transcript_delta_mean', delta.mean(), on_step=True, sync_dist=True)
-            self.log('train/transcript_delta_std', delta.std(), on_step=True, sync_dist=True)
-            self.log('train/transcript_delta_min', delta.min(), on_step=True, sync_dist=True)
-            self.log('train/transcript_delta_max', delta.max(), on_step=True, sync_dist=True)
-            harmful_mask = delta > self.gating_margin
-            harmful_mask = self._apply_min_keep_ratio(harmful_mask=harmful_mask, delta=delta)
-
-            codebook_loss_per_sample = torch.where(
-                harmful_mask, uncond_output.codebook_loss_per_sample, batch_output.codebook_loss_per_sample
-            )
-            codebook_loss = codebook_loss_per_sample.mean()
-            loss = codebook_loss
-
-            local_transformer_loss = None
-            if (
-                batch_output.local_transformer_loss_per_sample is not None
-                and uncond_output.local_transformer_loss_per_sample is not None
-            ):
-                local_transformer_loss_per_sample = torch.where(
-                    harmful_mask,
-                    uncond_output.local_transformer_loss_per_sample,
-                    batch_output.local_transformer_loss_per_sample,
+            if batch_output.used_cfg_dropout:
+                # If CFG dropout was already used, the batch_output is already unconditional
+                # Skip dual-pass and use batch_output directly
+                self.log('train/transcript_gating_active', 1.0, on_step=True, sync_dist=True)
+                self.log('train/transcript_skipped_dual_pass_cfg_dropout', 1.0, on_step=True, sync_dist=True)
+            else:
+                selected_mode = self.mode_name_to_mode[batch_output.selected_training_mode]
+                uncond_output = self.process_batch(
+                    text=batch['text'],
+                    text_lens=batch['text_lens'],
+                    context_text_tokens=batch['context_text_tokens'],
+                    context_text_tokens_lens=batch['context_text_tokens_lens'],
+                    audio_codes=audio_codes,
+                    audio_codes_lens=audio_codes_lens,
+                    context_audio_codes=context_audio_codes,
+                    context_audio_codes_lens=context_audio_codes_lens,
+                    phoneme_tokens=batch.get('phoneme_tokens'),
+                    phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
+                    mode="train",
+                    training_mode=selected_mode,
+                    force_text_dropout=True,
+                    force_phoneme_dropout=True,
+                    return_per_sample_losses=True,
+                    disable_cfg_dropout=True,
                 )
-                local_transformer_loss = local_transformer_loss_per_sample.mean()
-                local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
-                loss = loss + local_transformer_loss_scale * local_transformer_loss
+                delta = batch_output.codebook_loss_per_sample - uncond_output.codebook_loss_per_sample
+                # Log delta statistics for diagnostics
+                self.log('train/transcript_delta_mean', delta.mean(), on_step=True, sync_dist=True)
+                self.log('train/transcript_delta_std', delta.std(), on_step=True, sync_dist=True)
+                self.log('train/transcript_delta_min', delta.min(), on_step=True, sync_dist=True)
+                self.log('train/transcript_delta_max', delta.max(), on_step=True, sync_dist=True)
+                harmful_mask = delta > self.gating_margin
+                harmful_mask = self._apply_min_keep_ratio(harmful_mask=harmful_mask, delta=delta)
 
-            if phoneme_loss is not None:
-                loss = loss + phoneme_loss
+                codebook_loss_per_sample = torch.where(
+                    harmful_mask, uncond_output.codebook_loss_per_sample, batch_output.codebook_loss_per_sample
+                )
+                codebook_loss = codebook_loss_per_sample.mean()
+                loss = codebook_loss
 
-            harmful_ratio = harmful_mask.float().mean()
-            self.log('train/transcript_gating_active', 1.0, on_step=True, sync_dist=True)
-            self.log('train/transcript_harmful_ratio', harmful_ratio, on_step=True, sync_dist=True)
-            self.log('train/transcript_skipped_percent', harmful_ratio * 100.0, on_step=True, sync_dist=True)
-
-            dataset_names = batch.get('dataset_names')
-            if dataset_names is not None and len(dataset_names) == harmful_mask.numel():
-                dataset_to_flags = {}
-                for sample_idx, dataset_name in enumerate(dataset_names):
-                    dataset_to_flags.setdefault(dataset_name, []).append(harmful_mask[sample_idx].float())
-                for dataset_name, flags in dataset_to_flags.items():
-                    safe_dataset_name = self._sanitize_metric_name(str(dataset_name))
-                    dataset_ratio = torch.stack(flags).mean()
-                    self.log(
-                        f'train/transcript_harmful_ratio_dataset_{safe_dataset_name}',
-                        dataset_ratio,
-                        on_step=True,
-                        sync_dist=False,
+                local_transformer_loss = None
+                if (
+                    batch_output.local_transformer_loss_per_sample is not None
+                    and uncond_output.local_transformer_loss_per_sample is not None
+                ):
+                    local_transformer_loss_per_sample = torch.where(
+                        harmful_mask,
+                        uncond_output.local_transformer_loss_per_sample,
+                        batch_output.local_transformer_loss_per_sample,
                     )
+                    local_transformer_loss = local_transformer_loss_per_sample.mean()
+                    local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
+                    loss = loss + local_transformer_loss_scale * local_transformer_loss
 
-            self._log_transcript_gating_audit(
-                batch=batch,
-                audio_codes=batch_output.audio_codes_target,
-                audio_codes_lens=batch_output.audio_codes_lens_target,
-                harmful_mask=harmful_mask,
-                delta=delta,
-            )
+                if phoneme_loss is not None:
+                    loss = loss + phoneme_loss
+
+                harmful_ratio = harmful_mask.float().mean()
+                self.log('train/transcript_gating_active', 1.0, on_step=True, sync_dist=True)
+                self.log('train/transcript_harmful_ratio', harmful_ratio, on_step=True, sync_dist=True)
+                self.log('train/transcript_skipped_percent', harmful_ratio * 100.0, on_step=True, sync_dist=True)
+
+                dataset_names = batch.get('dataset_names')
+                if dataset_names is not None and len(dataset_names) == harmful_mask.numel():
+                    dataset_to_flags = {}
+                    for sample_idx, dataset_name in enumerate(dataset_names):
+                        dataset_to_flags.setdefault(dataset_name, []).append(harmful_mask[sample_idx].float())
+                    for dataset_name, flags in dataset_to_flags.items():
+                        safe_dataset_name = self._sanitize_metric_name(str(dataset_name))
+                        dataset_ratio = torch.stack(flags).mean()
+                        self.log(
+                            f'train/transcript_harmful_ratio_dataset_{safe_dataset_name}',
+                            dataset_ratio,
+                            on_step=True,
+                            sync_dist=False,
+                        )
+
+                self._log_transcript_gating_audit(
+                    batch=batch,
+                    audio_codes=batch_output.audio_codes_target,
+                    audio_codes_lens=batch_output.audio_codes_lens_target,
+                    harmful_mask=harmful_mask,
+                    delta=delta,
+                )
         else:
             self.log('train/transcript_gating_active', 0.0, on_step=True, sync_dist=True)
 
