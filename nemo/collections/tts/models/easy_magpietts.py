@@ -117,6 +117,8 @@ class ProcessBatchOutput:
     context_audio_codes: torch.Tensor
     context_audio_codes_lens: torch.Tensor
     selected_training_mode: Optional[str] = None
+    codebook_loss_per_sample: Optional[torch.Tensor] = None
+    local_transformer_loss_per_sample: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -376,6 +378,14 @@ class EasyMagpieTTSModel(ModelPT):
         self.phoneme_corruption_batch_prob = cfg.get('phoneme_corruption_batch_prob', 0.0)
         self.phoneme_corruption_timestep_ratio = cfg.get('phoneme_corruption_timestep_ratio', 0.0)
         self.phoneme_corruption_unk_mode_prob = cfg.get('phoneme_corruption_unk_mode_prob', 0.5)
+        self.enable_transcript_aware_gating = cfg.get('enable_transcript_aware_gating', False)
+        self.gating_start_step = int(cfg.get('gating_start_step', 0))
+        self.gating_margin = float(cfg.get('gating_margin', 0.0))
+        self.min_keep_ratio = float(cfg.get('min_keep_ratio', 0.2))
+        self.gating_audit_every_n_steps = int(cfg.get('gating_audit_every_n_steps', 1000))
+        self.gating_audit_max_examples = int(cfg.get('gating_audit_max_examples', 2))
+        self.gating_audit_log_audio = cfg.get('gating_audit_log_audio', True)
+        self.gating_audit_log_text = cfg.get('gating_audit_log_text', True)
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
@@ -812,7 +822,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         return all_code_logits
 
-    def compute_loss(self, logits, audio_codes, audio_codes_lens):
+    def compute_loss(self, logits, audio_codes, audio_codes_lens, return_per_sample: bool = False):
         """
         Computes the audio codebook loss. Used by
         (1) The main Magpie-TTS transformer
@@ -825,6 +835,7 @@ class EasyMagpieTTSModel(ModelPT):
         loss_mask = get_mask_from_lengths(audio_codes_lens)
         loss_mask = loss_mask.unsqueeze(1).repeat(1, audio_codes.size(1), 1)
         total_codebook_loss = None
+        total_codebook_loss_per_sample = None
         for codebook in range(audio_codes.size(1)):
             si = codebook * self.num_all_tokens_per_codebook
             ei = si + self.num_all_tokens_per_codebook
@@ -834,13 +845,19 @@ class EasyMagpieTTSModel(ModelPT):
                 codebook_logits.permute(0, 2, 1), codebook_targets.long()  # (B, num_tokens_per_codebook, T')
             )  # (B, T')
             codebook_loss = codebook_loss * loss_mask[:, codebook, :]
+            codebook_loss_per_sample = codebook_loss.sum(dim=1) / loss_mask[:, codebook, :].sum(dim=1).clamp_min(1.0)
             codebook_loss = codebook_loss.sum() / loss_mask[:, codebook, :].sum()
             if total_codebook_loss is None:
                 total_codebook_loss = codebook_loss
+                total_codebook_loss_per_sample = codebook_loss_per_sample
             else:
                 total_codebook_loss = total_codebook_loss + codebook_loss
+                total_codebook_loss_per_sample = total_codebook_loss_per_sample + codebook_loss_per_sample
 
         total_codebook_loss = total_codebook_loss / audio_codes.size(1)
+        total_codebook_loss_per_sample = total_codebook_loss_per_sample / audio_codes.size(1)
+        if return_per_sample:
+            return total_codebook_loss, loss_mask, total_codebook_loss_per_sample
         return total_codebook_loss, loss_mask
 
     def compute_phoneme_loss(self, logits, phoneme_tokens, phoneme_tokens_lens):
@@ -1704,6 +1721,9 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_tokens_lens: Optional[torch.Tensor] = None,
         mode: str = "train",
         training_mode: Optional[TrainingMode] = None,
+        force_text_dropout: bool = False,
+        return_per_sample_losses: bool = False,
+        disable_cfg_dropout: bool = False,
     ) -> ProcessBatchOutput:
         """
         Simplified batch processing using channel-based embedding architecture.
@@ -1750,10 +1770,12 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Determine dropout flags
         dropout_text_input = (random.random() < self.dropout_text_input_prob) if mode == 'train' else False
+        if force_text_dropout:
+            dropout_text_input = True
 
         # Determine CFG unconditional dropout
         dropout_conditional_input = False
-        if mode == 'train' and self.cfg_unconditional_prob > 0.0:
+        if (not disable_cfg_dropout) and mode == 'train' and self.cfg_unconditional_prob > 0.0:
             if torch.rand(1).item() < self.cfg_unconditional_prob:
                 dropout_conditional_input = True
 
@@ -1919,20 +1941,32 @@ class EasyMagpieTTSModel(ModelPT):
         logits = self.final_proj(pred_embeddings_audio)
 
         # Compute codebook loss
-        codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
+        codebook_loss_per_sample = None
+        if return_per_sample_losses:
+            codebook_loss, _, codebook_loss_per_sample = self.compute_loss(
+                logits, audio_codes_target, audio_codes_lens_target, return_per_sample=True
+            )
+        else:
+            codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
         loss = codebook_loss
 
         # Compute local transformer loss if applicable
         local_transformer_loss = None
+        local_transformer_loss_per_sample = None
         local_transformer_logits = None
         if self.local_transformer_type != LocalTransformerType.NO_LT:
             assert self.local_transformer_type == LocalTransformerType.AR, "Unexpected local transformer type"
             local_transformer_logits = self.compute_local_transformer_logits(
                 pred_embeddings, audio_codes_target, targets_offset_by_one=False
             )
-            local_transformer_loss, _ = self.compute_loss(
-                local_transformer_logits, audio_codes_target, audio_codes_lens_target
-            )
+            if return_per_sample_losses:
+                local_transformer_loss, _, local_transformer_loss_per_sample = self.compute_loss(
+                    local_transformer_logits, audio_codes_target, audio_codes_lens_target, return_per_sample=True
+                )
+            else:
+                local_transformer_loss, _ = self.compute_loss(
+                    local_transformer_logits, audio_codes_target, audio_codes_lens_target
+                )
             local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
             loss = loss + local_transformer_loss_scale * local_transformer_loss
 
@@ -1976,7 +2010,89 @@ class EasyMagpieTTSModel(ModelPT):
             context_audio_codes=context_audio_codes_processed,
             context_audio_codes_lens=context_audio_codes_lens_processed,
             selected_training_mode=selected_training_mode.name if selected_training_mode is not None else None,
+            codebook_loss_per_sample=codebook_loss_per_sample,
+            local_transformer_loss_per_sample=local_transformer_loss_per_sample,
         )
+
+    def _apply_min_keep_ratio(self, harmful_mask: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+        if harmful_mask.numel() == 0:
+            return harmful_mask
+        min_keep_ratio = max(0.0, min(1.0, self.min_keep_ratio))
+        max_harmful = int((1.0 - min_keep_ratio) * harmful_mask.numel())
+        if harmful_mask.sum().item() <= max_harmful:
+            return harmful_mask
+        harmful_indices = torch.where(harmful_mask)[0]
+        if max_harmful <= 0:
+            return torch.zeros_like(harmful_mask, dtype=torch.bool)
+        harmful_delta = delta[harmful_indices]
+        topk = torch.topk(harmful_delta, k=max_harmful, largest=True).indices
+        limited_mask = torch.zeros_like(harmful_mask, dtype=torch.bool)
+        limited_mask[harmful_indices[topk]] = True
+        return limited_mask
+
+    @staticmethod
+    def _sanitize_metric_name(metric_name: str) -> str:
+        return ''.join(ch if ch.isalnum() else '_' for ch in metric_name)
+
+    def _log_transcript_gating_audit(self, batch, audio_codes, audio_codes_lens, harmful_mask, delta):
+        if self.global_rank != 0:
+            return
+        if self.gating_audit_every_n_steps <= 0 or (self.global_step % self.gating_audit_every_n_steps) != 0:
+            return
+        harmful_indices = torch.where(harmful_mask)[0]
+        if harmful_indices.numel() == 0:
+            return
+        harmful_indices = harmful_indices[: self.gating_audit_max_examples]
+        decoded_audio, decoded_audio_lens, _ = None, None, None
+        if self.gating_audit_log_audio:
+            decoded_audio, decoded_audio_lens, _ = self.codes_to_audio(
+                codes=audio_codes[harmful_indices], codes_len=audio_codes_lens[harmful_indices]
+            )
+
+        dataset_names = batch.get('dataset_names', [])
+        raw_texts = batch.get('raw_texts', [])
+        wandb_log = {}
+        for local_idx, idx_tensor in enumerate(harmful_indices):
+            idx = int(idx_tensor.item())
+            delta_value = float(delta[idx].detach().cpu().item())
+            dataset_name = dataset_names[idx] if idx < len(dataset_names) else "unknown_dataset"
+            raw_text = raw_texts[idx] if idx < len(raw_texts) else ""
+            caption = f"gated_idx={idx}, delta={delta_value:.4f}, dataset={dataset_name}"
+
+            if self.gating_audit_log_text:
+                logging.info(f"[TranscriptGatingAudit] {caption}, text='{raw_text}'")
+            else:
+                logging.info(f"[TranscriptGatingAudit] {caption}")
+
+            for logger in self.loggers:
+                if self.gating_audit_log_text:
+                    if isinstance(logger, WandbLogger):
+                        wandb_log[f"TranscriptGatingAudit/Text_{local_idx}"] = raw_text
+                    elif isinstance(logger, TensorBoardLogger):
+                        logger.experiment.add_text(
+                            f"TranscriptGatingAudit/Text_{local_idx}",
+                            raw_text,
+                            global_step=self.global_step,
+                        )
+                if self.gating_audit_log_audio and decoded_audio is not None:
+                    audio_np = decoded_audio[local_idx].detach().float().cpu().numpy()
+                    audio_np = audio_np[: int(decoded_audio_lens[local_idx])]
+                    if isinstance(logger, WandbLogger):
+                        wandb_log[f"TranscriptGatingAudit/Audio_{local_idx}"] = wandb.Audio(
+                            audio_np, sample_rate=self.output_sample_rate, caption=caption
+                        )
+                    elif isinstance(logger, TensorBoardLogger):
+                        logger.experiment.add_audio(
+                            f"TranscriptGatingAudit/Audio_{local_idx}",
+                            audio_np,
+                            global_step=self.global_step,
+                            sample_rate=self.output_sample_rate,
+                        )
+
+        if wandb_log:
+            for logger in self.loggers:
+                if isinstance(logger, WandbLogger):
+                    logger.experiment.log(wandb_log)
 
     def training_step(self, batch, batch_idx):
         if 'context_audio_codes' in batch:
@@ -1995,6 +2111,8 @@ class EasyMagpieTTSModel(ModelPT):
             audio_lens = batch['audio_lens']
             audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
 
+        gating_active = self.enable_transcript_aware_gating and self.global_step >= self.gating_start_step
+
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
@@ -2007,17 +2125,97 @@ class EasyMagpieTTSModel(ModelPT):
             phoneme_tokens=batch.get('phoneme_tokens'),
             phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
             mode="train",
+            return_per_sample_losses=gating_active,
+            disable_cfg_dropout=gating_active,
         )
         loss = batch_output.loss
         codebook_loss = batch_output.codebook_loss
+
+        local_transformer_loss = batch_output.local_transformer_loss
+        phoneme_loss = batch_output.phoneme_loss
+        if gating_active:
+            selected_mode = self.mode_name_to_mode[batch_output.selected_training_mode]
+            uncond_output = self.process_batch(
+                text=batch['text'],
+                text_lens=batch['text_lens'],
+                context_text_tokens=batch['context_text_tokens'],
+                context_text_tokens_lens=batch['context_text_tokens_lens'],
+                audio_codes=audio_codes,
+                audio_codes_lens=audio_codes_lens,
+                context_audio_codes=context_audio_codes,
+                context_audio_codes_lens=context_audio_codes_lens,
+                phoneme_tokens=batch.get('phoneme_tokens'),
+                phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
+                mode="train",
+                training_mode=selected_mode,
+                force_text_dropout=True,
+                return_per_sample_losses=True,
+                disable_cfg_dropout=True,
+            )
+            delta = batch_output.codebook_loss_per_sample - uncond_output.codebook_loss_per_sample
+            harmful_mask = delta > self.gating_margin
+            harmful_mask = self._apply_min_keep_ratio(harmful_mask=harmful_mask, delta=delta)
+
+            codebook_loss_per_sample = torch.where(
+                harmful_mask, uncond_output.codebook_loss_per_sample, batch_output.codebook_loss_per_sample
+            )
+            codebook_loss = codebook_loss_per_sample.mean()
+            loss = codebook_loss
+
+            local_transformer_loss = None
+            if (
+                batch_output.local_transformer_loss_per_sample is not None
+                and uncond_output.local_transformer_loss_per_sample is not None
+            ):
+                local_transformer_loss_per_sample = torch.where(
+                    harmful_mask,
+                    uncond_output.local_transformer_loss_per_sample,
+                    batch_output.local_transformer_loss_per_sample,
+                )
+                local_transformer_loss = local_transformer_loss_per_sample.mean()
+                local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
+                loss = loss + local_transformer_loss_scale * local_transformer_loss
+
+            if phoneme_loss is not None:
+                loss = loss + phoneme_loss
+
+            harmful_ratio = harmful_mask.float().mean()
+            self.log('train/transcript_gating_active', 1.0, on_step=True, sync_dist=True)
+            self.log('train/transcript_harmful_ratio', harmful_ratio, on_step=True, sync_dist=True)
+            self.log('train/transcript_skipped_percent', harmful_ratio * 100.0, on_step=True, sync_dist=True)
+
+            dataset_names = batch.get('dataset_names')
+            if dataset_names is not None and len(dataset_names) == harmful_mask.numel():
+                dataset_to_flags = {}
+                for sample_idx, dataset_name in enumerate(dataset_names):
+                    dataset_to_flags.setdefault(dataset_name, []).append(harmful_mask[sample_idx].float())
+                for dataset_name, flags in dataset_to_flags.items():
+                    safe_dataset_name = self._sanitize_metric_name(str(dataset_name))
+                    dataset_ratio = torch.stack(flags).mean()
+                    self.log(
+                        f'train/transcript_harmful_ratio_dataset_{safe_dataset_name}',
+                        dataset_ratio,
+                        on_step=True,
+                        sync_dist=False,
+                    )
+
+            self._log_transcript_gating_audit(
+                batch=batch,
+                audio_codes=audio_codes,
+                audio_codes_lens=audio_codes_lens,
+                harmful_mask=harmful_mask,
+                delta=delta,
+            )
+        else:
+            self.log('train/transcript_gating_active', 0.0, on_step=True, sync_dist=True)
+
         self.log('train/codebook_loss', codebook_loss, prog_bar=True, sync_dist=True)
         self.log('train/loss', loss, prog_bar=True, sync_dist=True)
 
         if self.phoneme_tokenizer is not None:
-            phoneme_loss = batch_output.phoneme_loss
-            self.log('train/phoneme_loss', phoneme_loss, prog_bar=True, sync_dist=True)
+            if phoneme_loss is not None:
+                self.log('train/phoneme_loss', phoneme_loss, prog_bar=True, sync_dist=True)
 
-        local_transformer_loss = batch_output.local_transformer_loss
         if local_transformer_loss is not None:
             self.log('train/local_transformer_loss', local_transformer_loss, prog_bar=True, sync_dist=True)
 

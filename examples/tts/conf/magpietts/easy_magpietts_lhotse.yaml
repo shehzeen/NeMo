@@ -86,6 +86,14 @@ model:
   phoneme_stacking_factor: 1
   phoneme_confidence_unk_threshold: 0.0 # If max phoneme probability is below this threshold at inference-time, replace the predicted timestep with UNK to reduce error propagation.
   dropout_text_input_prob: 0.1
+  enable_transcript_aware_gating: false
+  gating_start_step: 10_000
+  gating_margin: 0.0
+  min_keep_ratio: 0.2
+  gating_audit_every_n_steps: 1_000
+  gating_audit_max_examples: 2
+  gating_audit_log_audio: true
+  gating_audit_log_text: true
   phoneme_corruption_batch_prob: 0.1
   phoneme_corruption_timestep_ratio: 0.15
   phoneme_corruption_unk_mode_prob: 0.5
