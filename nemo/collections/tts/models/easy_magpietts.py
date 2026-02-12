@@ -2198,14 +2198,18 @@ class EasyMagpieTTSModel(ModelPT):
 
                 dataset_names = batch.get('dataset_names')
                 if dataset_names is not None and len(dataset_names) == harmful_mask.numel():
-                    dataset_to_flags = {}
+                    languages = batch.get('languages', None)
+                    dataset_lang_to_flags = {}
                     for sample_idx, dataset_name in enumerate(dataset_names):
-                        dataset_to_flags.setdefault(dataset_name, []).append(harmful_mask[sample_idx].float())
-                    for dataset_name, flags in dataset_to_flags.items():
+                        language = languages[sample_idx] if languages is not None and sample_idx < len(languages) else 'unknown'
+                        key = (dataset_name, language)
+                        dataset_lang_to_flags.setdefault(key, []).append(harmful_mask[sample_idx].float())
+                    for (dataset_name, language), flags in dataset_lang_to_flags.items():
                         safe_dataset_name = self._sanitize_metric_name(str(dataset_name))
+                        safe_language = self._sanitize_metric_name(str(language))
                         dataset_ratio = torch.stack(flags).mean()
                         self.log(
-                            f'train/transcript_harmful_ratio_dataset_{safe_dataset_name}',
+                            f'train/transcript_harmful_ratio_dataset_{safe_dataset_name}_lang_{safe_language}',
                             dataset_ratio,
                             on_step=True,
                             sync_dist=False,
