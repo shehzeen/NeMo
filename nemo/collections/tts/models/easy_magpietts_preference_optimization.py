@@ -301,6 +301,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             use_cfg = random.random() < inference_cfg_prob
             cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
 
+        phoneme_input_type = self.cfg.get('inference_phoneme_input_type', 'pred')
+        gt_phoneme_input_prob = self.cfg.get('gt_phoneme_input_prob', 0.0)
+        can_use_gt_phonemes = ('phoneme_tokens' in batch_repeated) and ('phoneme_tokens_lens' in batch_repeated)
+        if can_use_gt_phonemes and gt_phoneme_input_prob > 0.0 and mode == 'train':
+            phoneme_input_type = 'gt' if random.random() < gt_phoneme_input_prob else 'pred'
+
         output = self.infer_batch(
             batch=batch_repeated,
             max_decoder_steps=self.max_decoder_steps,
@@ -309,7 +315,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             use_cfg=use_cfg,
             cfg_scale=cfg_scale,
             use_local_transformer_for_inference=use_local_transformer_for_inference,
-            phoneme_input_type=self.cfg.get('inference_phoneme_input_type', 'pred'),
+            phoneme_input_type=phoneme_input_type,
             phoneme_sampling_method=self.cfg.get('inference_phoneme_sampling_method', 'argmax'),
             force_dropout_text=False,
             use_teacher_forced=False,
@@ -482,6 +488,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'predicted_codes_lens': predicted_codes_lens,
             'advantages': advantages,
             'group_validities': group_validities,
+            'rollout_phoneme_input_type': phoneme_input_type,
         }
 
     def process_batch_online_po(self, batch: Dict, n_generations_per_item: int, mode: str = 'train'):
@@ -595,7 +602,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         total_po_loss = total_loss / n_codebooks
         total_kl = total_kl / n_codebooks
 
-        phoneme_aux_loss = policy_output.phoneme_loss
+        rollout_phoneme_input_type = generated_codes_and_metrics.get('rollout_phoneme_input_type', 'pred')
+        phoneme_aux_loss = policy_output.phoneme_loss if rollout_phoneme_input_type == 'gt' else None
         if phoneme_aux_loss is None:
             phoneme_aux_loss = torch.tensor(0.0, device=self.device)
         total_loss = total_po_loss + self.aux_phoneme_loss_weight * phoneme_aux_loss
@@ -607,6 +615,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'po_loss': total_po_loss,
             'phoneme_aux_loss': phoneme_aux_loss,
             'kl_loss': total_kl,
+            'used_gt_phoneme_input': float(rollout_phoneme_input_type == 'gt'),
             'batch_metrics': generated_codes_and_metrics['metrics'],
         }
 
@@ -617,6 +626,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.log('train_po_loss', po_outputs['po_loss'], prog_bar=True, sync_dist=True)
         self.log('train_phoneme_aux_loss', po_outputs['phoneme_aux_loss'], prog_bar=True, sync_dist=True)
         self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_used_gt_phoneme_input', po_outputs['used_gt_phoneme_input'], prog_bar=True, sync_dist=True)
         self.log('train_mean_reward', po_outputs['mean_reward'], prog_bar=True, sync_dist=True)
         self.log('train_std_reward', po_outputs['std_reward'], prog_bar=True, sync_dist=True)
         return po_outputs['loss']
@@ -636,6 +646,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 'val_po_loss': po_outputs['po_loss'],
                 'val_phoneme_aux_loss': po_outputs['phoneme_aux_loss'],
                 'val_kl_loss': po_outputs['kl_loss'],
+                'val_used_gt_phoneme_input': torch.tensor(
+                    po_outputs['used_gt_phoneme_input'], device=self.device, dtype=torch.float32
+                ),
                 'batch_metrics': po_outputs['batch_metrics'],
             }
         )
@@ -654,6 +667,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         val_po_loss = collect("val_po_loss")
         val_phoneme_aux_loss = collect("val_phoneme_aux_loss")
         val_kl_loss = collect("val_kl_loss")
+        val_used_gt_phoneme_input = collect("val_used_gt_phoneme_input")
         mean_reward = collect("mean_reward")
         std_reward = collect("std_reward")
 
@@ -661,6 +675,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.log("val_po_loss", val_po_loss, prog_bar=True, sync_dist=True)
         self.log("val_phoneme_aux_loss", val_phoneme_aux_loss, prog_bar=True, sync_dist=True)
         self.log("val_kl_loss", val_kl_loss, prog_bar=True, sync_dist=True)
+        self.log("val_used_gt_phoneme_input", val_used_gt_phoneme_input, prog_bar=True, sync_dist=True)
         self.log("val_mean_reward", mean_reward, prog_bar=True, sync_dist=True)
         self.log("val_std_reward", std_reward, prog_bar=True, sync_dist=True)
 
