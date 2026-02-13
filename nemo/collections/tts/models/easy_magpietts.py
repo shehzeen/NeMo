@@ -2131,7 +2131,7 @@ class EasyMagpieTTSModel(ModelPT):
             phoneme_tokens=batch.get('phoneme_tokens'),
             phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
             mode="train",
-            return_per_sample_losses=gating_active
+            return_per_sample_losses=gating_active,
         )
         loss = batch_output.loss
         codebook_loss = batch_output.codebook_loss
