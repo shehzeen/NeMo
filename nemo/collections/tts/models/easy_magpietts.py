@@ -1777,9 +1777,15 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Determine CFG unconditional dropout
         dropout_conditional_input = False
+        dropout_context_audio = False
         if (not disable_cfg_dropout) and mode == 'train' and self.cfg_unconditional_prob > 0.0:
             if torch.rand(1).item() < self.cfg_unconditional_prob:
                 dropout_conditional_input = True
+                # Drop the context audio with 50% probability
+                # This means sometimes we only drop the text input during CFG dropout
+                # So that the model learns reasonable behavior with not-dropped context audio 
+                # but dropped text input
+                dropout_context_audio = torch.rand(1).item() < 0.5
 
         # 1. Prepare context tensors (without text)
         context_embedding, context_lens, context_audio_codes_processed, context_audio_codes_lens_processed = (
@@ -1789,7 +1795,7 @@ class EasyMagpieTTSModel(ModelPT):
                 context_audio_codes=context_audio_codes,
                 context_audio_codes_lens=context_audio_codes_lens,
                 training_mode=selected_training_mode,
-                dropout_conditional_input=dropout_conditional_input,
+                dropout_conditional_input=dropout_context_audio,
             )
         )
 
