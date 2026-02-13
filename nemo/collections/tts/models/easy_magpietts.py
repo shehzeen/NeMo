@@ -15,6 +15,7 @@ import json
 import os
 import random
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -383,6 +384,14 @@ class EasyMagpieTTSModel(ModelPT):
         self.gating_start_step = int(cfg.get('gating_start_step', 0))
         self.gating_margin = float(cfg.get('gating_margin', 0.0))
         self.min_keep_ratio = float(cfg.get('min_keep_ratio', 0.2))
+        self.gating_percentile_scope = cfg.get('gating_percentile_scope', 'overall')
+        self.gating_stats_window_size = max(1, int(cfg.get('gating_stats_window_size', 4096)))
+        self.gating_keep_percentile_start = float(cfg.get('gating_keep_percentile_start', 0.75))
+        self.gating_keep_percentile_end = float(cfg.get('gating_keep_percentile_end', 0.50))
+        self.gating_anneal_end_step = int(cfg.get('gating_anneal_end_step', self.gating_start_step))
+        self.gating_min_samples_for_threshold = int(cfg.get('gating_min_samples_for_threshold', 64))
+        self._gating_delta_history_overall = deque(maxlen=self.gating_stats_window_size)
+        self._gating_delta_history_by_language = defaultdict(lambda: deque(maxlen=self.gating_stats_window_size))
         self.gating_audit_every_n_steps = int(cfg.get('gating_audit_every_n_steps', 1000))
         self.gating_audit_max_examples = int(cfg.get('gating_audit_max_examples', 2))
         self.gating_audit_log_audio = cfg.get('gating_audit_log_audio', True)
@@ -652,6 +661,32 @@ class EasyMagpieTTSModel(ModelPT):
                     if key.startswith(name_with_dot):
                         new_state_dict[key[len(name_with_dot) :]] = state_dict[key]
                 child.load_state_dict(new_state_dict)
+
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        checkpoint['transcript_gating_delta_history_overall'] = list(self._gating_delta_history_overall)
+        checkpoint['transcript_gating_delta_history_by_language'] = {
+            language: list(history) for language, history in self._gating_delta_history_by_language.items()
+        }
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        raw_overall_history = checkpoint.get('transcript_gating_delta_history_overall', [])
+        if isinstance(raw_overall_history, (list, tuple)):
+            self._gating_delta_history_overall = deque(
+                [float(value) for value in raw_overall_history], maxlen=self.gating_stats_window_size
+            )
+        else:
+            self._gating_delta_history_overall = deque(maxlen=self.gating_stats_window_size)
+
+        raw_history_by_language = checkpoint.get('transcript_gating_delta_history_by_language', {})
+        restored_history_by_language = defaultdict(lambda: deque(maxlen=self.gating_stats_window_size))
+        if isinstance(raw_history_by_language, dict):
+            for language, history in raw_history_by_language.items():
+                if not isinstance(history, (list, tuple)):
+                    continue
+                restored_history_by_language[str(language)] = deque(
+                    [float(value) for value in history], maxlen=self.gating_stats_window_size
+                )
+        self._gating_delta_history_by_language = restored_history_by_language
 
     def add_eos_token(self, codes, codes_len, eos_id, num_eos_tokens=1):
         # codes: (B, C, T')
@@ -2039,6 +2074,75 @@ class EasyMagpieTTSModel(ModelPT):
         limited_mask[harmful_indices[topk]] = True
         return limited_mask
 
+    def _get_scheduled_keep_percentile(self) -> float:
+        start = max(0.0, min(1.0, self.gating_keep_percentile_start))
+        end = max(0.0, min(1.0, self.gating_keep_percentile_end))
+        if self.global_step <= self.gating_start_step:
+            return start
+        if self.gating_anneal_end_step <= self.gating_start_step:
+            return end
+        progress = (self.global_step - self.gating_start_step) / float(
+            self.gating_anneal_end_step - self.gating_start_step
+        )
+        progress = max(0.0, min(1.0, progress))
+        return start + (end - start) * progress
+
+    def _compute_threshold_from_history(
+        self, history: Sequence[float], keep_percentile: float, fallback_delta: torch.Tensor
+    ) -> float:
+        q = max(0.0, min(1.0, keep_percentile))
+        if len(history) > 0:
+            history_tensor = torch.tensor(list(history), device=fallback_delta.device, dtype=fallback_delta.dtype)
+            return float(torch.quantile(history_tensor, q).item())
+        return float(torch.quantile(fallback_delta, q).item())
+
+    def _update_transcript_delta_history(self, delta: torch.Tensor, languages: Optional[Sequence[str]]) -> None:
+        delta_values = delta.detach().float().cpu().tolist()
+        self._gating_delta_history_overall.extend(delta_values)
+        if languages is None:
+            return
+        if len(languages) != len(delta_values):
+            return
+        for idx, value in enumerate(delta_values):
+            language = languages[idx]
+            if language is None:
+                language = 'unknown'
+            self._gating_delta_history_by_language[str(language)].append(value)
+
+    def _compute_harmful_mask_from_percentile(self, delta: torch.Tensor, languages: Optional[Sequence[str]]):
+        keep_percentile = self._get_scheduled_keep_percentile()
+        overall_threshold = self._compute_threshold_from_history(
+            history=self._gating_delta_history_overall, keep_percentile=keep_percentile, fallback_delta=delta
+        )
+
+        scope = str(self.gating_percentile_scope).lower()
+        if scope == 'per_language':
+            thresholds = torch.full_like(delta, fill_value=overall_threshold)
+            fallback_mask = torch.ones_like(delta, dtype=torch.bool)
+            if languages is not None and len(languages) == delta.numel():
+                language_to_indices = {}
+                for idx, language in enumerate(languages):
+                    language_name = str(language) if language is not None else 'unknown'
+                    language_to_indices.setdefault(language_name, []).append(idx)
+
+                for language_name, indices in language_to_indices.items():
+                    language_history = self._gating_delta_history_by_language.get(language_name, None)
+                    if language_history is None or len(language_history) < self.gating_min_samples_for_threshold:
+                        continue
+                    language_threshold = self._compute_threshold_from_history(
+                        history=language_history, keep_percentile=keep_percentile, fallback_delta=delta[indices]
+                    )
+                    thresholds[indices] = language_threshold
+                    fallback_mask[indices] = False
+
+            harmful_mask = delta > thresholds
+            fallback_ratio = fallback_mask.float().mean()
+            threshold_mean = thresholds.mean()
+            return harmful_mask, keep_percentile, threshold_mean, fallback_ratio
+
+        harmful_mask = delta > overall_threshold
+        return harmful_mask, keep_percentile, delta.new_tensor(overall_threshold), delta.new_tensor(0.0)
+
     @staticmethod
     def _sanitize_metric_name(metric_name: str) -> str:
         return ''.join(ch if ch.isalnum() else '_' for ch in metric_name)
@@ -2170,8 +2274,44 @@ class EasyMagpieTTSModel(ModelPT):
                 self.log('train/transcript_delta_std', delta.std(), on_step=True, sync_dist=True)
                 self.log('train/transcript_delta_min', delta.min(), on_step=True, sync_dist=True)
                 self.log('train/transcript_delta_max', delta.max(), on_step=True, sync_dist=True)
-                harmful_mask = delta > self.gating_margin
+                batch_languages = batch.get('languages', None)
+                if batch_languages is not None and len(batch_languages) == delta.numel():
+                    language_to_indices = {}
+                    for sample_idx, language in enumerate(batch_languages):
+                        language_key = str(language) if language is not None else 'unknown'
+                        language_to_indices.setdefault(language_key, []).append(sample_idx)
+                    for language_key, language_indices in language_to_indices.items():
+                        safe_language = self._sanitize_metric_name(language_key)
+                        language_delta = delta[language_indices]
+                        self.log(
+                            f'train/transcript_delta_mean_lang_{safe_language}',
+                            language_delta.mean(),
+                            on_step=True,
+                            sync_dist=False,
+                        )
+                        self.log(
+                            f'train/transcript_delta_std_lang_{safe_language}',
+                            language_delta.std(unbiased=False),
+                            on_step=True,
+                            sync_dist=False,
+                        )
+                        self.log(
+                            f'train/transcript_delta_min_lang_{safe_language}',
+                            language_delta.min(),
+                            on_step=True,
+                            sync_dist=False,
+                        )
+                        self.log(
+                            f'train/transcript_delta_max_lang_{safe_language}',
+                            language_delta.max(),
+                            on_step=True,
+                            sync_dist=False,
+                        )
+                harmful_mask, keep_percentile, threshold_value, fallback_ratio = self._compute_harmful_mask_from_percentile(
+                    delta=delta, languages=batch_languages
+                )
                 harmful_mask = self._apply_min_keep_ratio(harmful_mask=harmful_mask, delta=delta)
+                self._update_transcript_delta_history(delta=delta, languages=batch_languages)
 
                 codebook_loss_per_sample = torch.where(
                     harmful_mask, uncond_output.codebook_loss_per_sample, batch_output.codebook_loss_per_sample
@@ -2200,10 +2340,18 @@ class EasyMagpieTTSModel(ModelPT):
                 self.log('train/transcript_gating_active', 1.0, on_step=True, sync_dist=True)
                 self.log('train/transcript_harmful_ratio', harmful_ratio, on_step=True, sync_dist=True)
                 self.log('train/transcript_skipped_percent', harmful_ratio * 100.0, on_step=True, sync_dist=True)
+                self.log(
+                    'train/transcript_keep_percentile_scheduled',
+                    delta.new_tensor(keep_percentile),
+                    on_step=True,
+                    sync_dist=True,
+                )
+                self.log('train/transcript_threshold', threshold_value, on_step=True, sync_dist=True)
+                self.log('train/transcript_lang_threshold_fallback_ratio', fallback_ratio, on_step=True, sync_dist=True)
 
                 dataset_names = batch.get('dataset_names')
                 if dataset_names is not None and len(dataset_names) == harmful_mask.numel():
-                    languages = batch.get('languages', None)
+                    languages = batch_languages
                     dataset_lang_to_flags = {}
                     for sample_idx, dataset_name in enumerate(dataset_names):
                         language = languages[sample_idx] if languages is not None and sample_idx < len(languages) else 'unknown'

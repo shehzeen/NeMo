@@ -88,8 +88,14 @@ model:
   dropout_text_input_prob: 0.1
   enable_transcript_aware_gating: false
   gating_start_step: 10_000
-  gating_margin: 0.0
+  gating_margin: 0.0  # Legacy fallback; percentile gating is used when transcript-aware gating is enabled.
   min_keep_ratio: 0.2
+  gating_percentile_scope: overall  # Options: overall, per_language
+  gating_stats_window_size: 4096
+  gating_min_samples_for_threshold: 64
+  gating_keep_percentile_start: 0.75
+  gating_keep_percentile_end: 0.50
+  gating_anneal_end_step: 100_000
   gating_audit_every_n_steps: 1_000
   gating_audit_max_examples: 2
   gating_audit_log_audio: true
