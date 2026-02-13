@@ -1,0 +1,676 @@
+# Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import copy
+import os
+import random
+import time
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import soundfile as sf
+import torch
+from lightning.pytorch import Trainer
+from omegaconf import DictConfig, open_dict
+
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.metrics.wer import word_error_rate
+from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
+from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
+from nemo.collections.tts.parts.utils.helpers import (
+    get_mask_from_lengths,
+    get_speaker_embeddings_from_filepaths,
+    process_text_for_cer,
+    transcribe_with_whisper,
+)
+from nemo.utils import logging
+
+try:
+    import torchaudio
+    from torchaudio.pipelines import SQUIM_OBJECTIVE
+
+    HAVE_TORCHAUDIO = True
+except ImportError:
+    HAVE_TORCHAUDIO = False
+
+try:
+    from nemo_text_processing.text_normalization.normalize import Normalizer
+
+    PYNINI_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    Normalizer = None
+    PYNINI_AVAILABLE = False
+
+
+class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
+    """
+    EasyMagpie-TTS online preference optimization model (GRPO / DR-GRPO).
+
+    Training flow:
+    1. Sample multiple generations per prompt.
+    2. Compute rewards (CER/SSIM/PESQ).
+    3. Compute group-normalized advantages.
+    4. Run teacher-forced policy forward on generated codes and optimize GRPO objective.
+    5. Add auxiliary phoneme loss from the same forward pass with GT phoneme tokens.
+    """
+
+    def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
+        super().__init__(cfg, trainer)
+
+        ref_model_cfg = copy.deepcopy(cfg)
+        with open_dict(ref_model_cfg):
+            ref_model_cfg.train_ds = None
+            ref_model_cfg.validation_ds = None
+
+        self.reference_free = self.cfg.get('reference_free', False)
+        if not self.reference_free:
+            self._reference_model = EasyMagpieTTSModel(cfg=ref_model_cfg)
+            logging.info("Loading EasyMagpie reference model from checkpoint")
+            self._reference_model.load_state_dict(
+                torch.load(cfg.reference_model_ckpt_path, map_location="cpu", weights_only=False)['state_dict']
+            )
+            self._reference_model.freeze()
+            self._reference_model._no_state_dict = True
+            logging.info("Reference model loaded and frozen")
+
+        reward_asr_model = cfg.get('reward_asr_model', 'nemo')
+        if reward_asr_model == 'nemo':
+            self._eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
+                model_name=cfg.get('reward_asr_model_name', "nvidia/parakeet-ctc-0.6b")
+            )
+            self._eval_asr_model.freeze()
+            self.whisper_processor = None
+            self.whisper_model = None
+        elif reward_asr_model == 'whisper':
+            from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+            self._eval_asr_model = None
+            self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+            self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3")
+            self.whisper_model.eval()
+        else:
+            raise ValueError(f"Unknown reward_asr_model: {reward_asr_model}")
+
+        self._eval_speaker_verification_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
+            model_name=cfg.get('speaker_verification_model_name', 'titanet_large')
+        )
+        self._eval_speaker_verification_model.freeze()
+
+        use_pesq = self.cfg.get('use_pesq', False)
+        if use_pesq:
+            assert HAVE_TORCHAUDIO, "torchaudio is required for PESQ reward."
+            self.squim_objective_model = SQUIM_OBJECTIVE.get_model()
+
+        self.loss_type = self.cfg.get('loss_type', 'grpo')
+        if self.loss_type not in ['grpo', 'dr_grpo']:
+            raise ValueError(
+                f"Received loss_type={self.loss_type}. Supported values: ['grpo', 'dr_grpo']."
+            )
+        self.scale_rewards = self.cfg.get('scale_rewards', True)
+        self.max_decoder_steps = self.cfg.get('max_decoder_steps', 430)
+        self.aux_phoneme_loss_weight = self.cfg.get('aux_phoneme_loss_weight', 1.0)
+
+        self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
+        if reward_asr_model == 'whisper' and self._normalize_whisper_transcript:
+            self._normalizer_cache = {}
+
+        # Filter out poor groups for stable optimization.
+        self.best_cer_threshold = self.cfg.get('best_cer_threshold', 1.0)
+        self.worst_cer_threshold = self.cfg.get('worst_cer_threshold', 1.0)
+
+    def setup_optimizer_param_groups(self):
+        """
+        Exclude frozen eval/reference modules from optimizer state.
+        """
+        modules_to_exclude = {
+            '_speaker_verification_model',
+            '_codec_model',
+            '_eval_asr_model',
+            '_eval_speaker_verification_model',
+            '_reference_model',
+            'whisper_model',
+            'whisper_processor',
+        }
+
+        excluded_param_ids = set()
+        for name, module in self.named_children():
+            if name in modules_to_exclude and hasattr(module, "parameters"):
+                for param in module.parameters():
+                    excluded_param_ids.add(id(param))
+
+        trainable_params = [p for p in self.parameters() if id(p) not in excluded_param_ids]
+        self._optimizer_param_groups = [{"params": trainable_params}]
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+        keys_substrings_to_exclude = ['_reference_model']
+        for key in list(state_dict.keys()):
+            if any(substring in key for substring in keys_substrings_to_exclude):
+                del state_dict[key]
+        return state_dict
+
+    def _get_cached_normalizer(self, lang_key: Optional[str]):
+        if not PYNINI_AVAILABLE:
+            return None
+        lang_key = lang_key if lang_key else "en"
+        if lang_key not in self._normalizer_cache:
+            logging.info(f"Creating normalizer for language: {lang_key}")
+            self._normalizer_cache[lang_key] = Normalizer(input_case="cased", lang=lang_key)
+        return self._normalizer_cache[lang_key]
+
+    def _get_per_token_logps(self, logits: torch.Tensor, labels: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+        per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
+        per_token_logps = per_token_logps * loss_mask
+        return per_token_logps
+
+    def repeat_items_in_batch(self, batch: Dict, num_repeats: int) -> Dict:
+        repeated_batch = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                repeated_batch[key] = value.repeat_interleave(num_repeats, dim=0)
+            elif isinstance(value, list):
+                repeated_value = []
+                for item in value:
+                    repeated_value.extend([item] * num_repeats)
+                repeated_batch[key] = repeated_value
+            else:
+                repeated_batch[key] = value
+        return repeated_batch
+
+    def _get_audio_dir(self) -> str:
+        if self.logger is not None and hasattr(self.logger, "log_dir") and self.logger.log_dir is not None:
+            log_dir = self.logger.log_dir
+        elif self.trainer is not None and self.trainer.log_dir is not None:
+            log_dir = self.trainer.log_dir
+        else:
+            log_dir = "."
+        audio_dir = os.path.join(log_dir, 'online_po_audios')
+        os.makedirs(audio_dir, exist_ok=True)
+        return audio_dir
+
+    def _save_waveforms_to_paths(
+        self,
+        waveforms: torch.Tensor,
+        waveform_lens: torch.Tensor,
+        prefix: str,
+        sample_rate: int,
+    ) -> List[str]:
+        audio_dir = self._get_audio_dir()
+        time_id = time.time_ns()
+        paths = []
+        for idx in range(waveforms.size(0)):
+            wav = waveforms[idx].float().detach().cpu().numpy()
+            wav = wav[: int(waveform_lens[idx].item())]
+            path = os.path.join(audio_dir, f'{prefix}_rank{self.global_rank}_{time_id}_{idx}.wav')
+            sf.write(path, wav, sample_rate)
+            paths.append(path)
+        return paths
+
+    def _get_reference_audio_paths(self, batch_repeated: Dict) -> List[str]:
+        """
+        Build per-item reference audio paths for speaker similarity reward.
+        Priority: audio_filepaths -> context_audio -> context_audio_codes.
+        """
+        if 'audio_filepaths' in batch_repeated and len(batch_repeated['audio_filepaths']) > 0:
+            return batch_repeated['audio_filepaths']
+
+        if 'context_audio' in batch_repeated and 'context_audio_lens' in batch_repeated:
+            return self._save_waveforms_to_paths(
+                waveforms=batch_repeated['context_audio'],
+                waveform_lens=batch_repeated['context_audio_lens'],
+                prefix='reference_context_audio',
+                sample_rate=self.sample_rate,
+            )
+
+        if 'context_audio_codes' in batch_repeated and 'context_audio_codes_lens' in batch_repeated:
+            context_codes = batch_repeated['context_audio_codes']
+            context_lens = batch_repeated['context_audio_codes_lens']
+            if self._codec_converter is not None:
+                context_codes = self._codec_converter.convert_original_to_new(
+                    audio_tokens=context_codes, audio_lens=context_lens
+                ).long()
+            context_audio, context_audio_lens, _ = self.codes_to_audio(context_codes, context_lens)
+            return self._save_waveforms_to_paths(
+                waveforms=context_audio,
+                waveform_lens=context_audio_lens,
+                prefix='reference_context_codes_decoded',
+                sample_rate=self.output_sample_rate,
+            )
+
+        raise ValueError(
+            "Could not construct reference audio for speaker similarity. Need one of: "
+            "audio_filepaths, context_audio/context_audio_lens, or context_audio_codes/context_audio_codes_lens."
+        )
+
+    def _run_easy_process_batch(
+        self,
+        model: EasyMagpieTTSModel,
+        batch: Dict,
+        audio_codes: torch.Tensor,
+        audio_codes_lens: torch.Tensor,
+        mode: str,
+    ):
+        if 'context_audio_codes' in batch:
+            context_audio_codes = batch['context_audio_codes']
+            context_audio_codes_lens = batch['context_audio_codes_lens']
+        else:
+            context_audio_codes, context_audio_codes_lens = model.audio_to_codes(
+                batch['context_audio'], batch['context_audio_lens']
+            )
+
+        return model.process_batch(
+            text=batch['text'],
+            text_lens=batch['text_lens'],
+            context_text_tokens=batch['context_text_tokens'],
+            context_text_tokens_lens=batch['context_text_tokens_lens'],
+            audio_codes=audio_codes,
+            audio_codes_lens=audio_codes_lens,
+            context_audio_codes=context_audio_codes,
+            context_audio_codes_lens=context_audio_codes_lens,
+            phoneme_tokens=batch.get('phoneme_tokens'),
+            phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
+            mode=mode,
+        )
+
+    def generate_and_reward(
+        self,
+        batch: Dict,
+        num_generations_per_item: int,
+        mode: str = 'train',
+        use_local_transformer_for_inference: bool = False,
+    ):
+        batch_repeated = self.repeat_items_in_batch(batch, num_generations_per_item)
+        reward_asr_model = self.cfg.get('reward_asr_model', 'nemo')
+        use_pesq = self.cfg.get('use_pesq', False)
+
+        use_cfg = False
+        cfg_scale = 1.0
+        inference_cfg_prob = self.cfg.get('inference_cfg_prob', 0.0)
+        if (inference_cfg_prob == 1.0) or (inference_cfg_prob > 0.0 and mode == 'train'):
+            use_cfg = random.random() < inference_cfg_prob
+            cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
+
+        output = self.infer_batch(
+            batch=batch_repeated,
+            max_decoder_steps=self.max_decoder_steps,
+            temperature=self.cfg.get('inference_temperature', 0.7),
+            topk=self.cfg.get('inference_topk', 80),
+            use_cfg=use_cfg,
+            cfg_scale=cfg_scale,
+            use_local_transformer_for_inference=use_local_transformer_for_inference,
+            phoneme_input_type=self.cfg.get('inference_phoneme_input_type', 'pred'),
+            phoneme_sampling_method=self.cfg.get('inference_phoneme_sampling_method', 'argmax'),
+            force_dropout_text=False,
+            use_teacher_forced=False,
+        )
+
+        predicted_audio = output.predicted_audio
+        predicted_audio_lens = output.predicted_audio_lens
+        predicted_codes = output.predicted_codes
+        predicted_codes_lens = output.predicted_codes_lens
+        predicted_audio_paths = self._save_waveforms_to_paths(
+            waveforms=predicted_audio,
+            waveform_lens=predicted_audio_lens,
+            prefix='generated',
+            sample_rate=self.output_sample_rate,
+        )
+        audio_durations = [int(predicted_audio_lens[idx].item()) / self.output_sample_rate for idx in range(predicted_audio.size(0))]
+
+        if reward_asr_model == 'nemo':
+            pred_transcripts = self._eval_asr_model.transcribe(
+                predicted_audio_paths,
+                batch_size=len(predicted_audio_paths),
+                override_config=TranscribeConfig(use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0),
+            )
+            pred_transcripts = [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
+        else:
+            self.whisper_model.to(self.device)
+            pred_transcripts = []
+            langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
+            for item_idx, audio_path in enumerate(predicted_audio_paths):
+                language = langs[item_idx] if item_idx < len(langs) else 'en'
+                normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+                transcript = transcribe_with_whisper(
+                    audio_filepath=audio_path,
+                    language=language,
+                    whisper_processor=self.whisper_processor,
+                    whisper_model=self.whisper_model,
+                    device=self.device,
+                    normalizer=normalizer,
+                )
+                pred_transcripts.append(process_text_for_cer(transcript))
+
+        reference_audio_paths = self._get_reference_audio_paths(batch_repeated)
+        try:
+            pred_speaker_embeddings = get_speaker_embeddings_from_filepaths(
+                predicted_audio_paths, self._eval_speaker_verification_model, self.device
+            )
+            gt_speaker_embeddings = get_speaker_embeddings_from_filepaths(
+                reference_audio_paths, self._eval_speaker_verification_model, self.device
+            )
+        except Exception as e:
+            logging.warning(f"Speaker-embedding reward failed. Falling back to zero SSIM reward. Error: {e}")
+            pred_speaker_embeddings = None
+            gt_speaker_embeddings = None
+
+        batch_metrics = []
+        cer_reward_weight = self.cfg.get('cer_reward_weight', 0.5)
+        ssim_reward_weight = self.cfg.get('ssim_reward_weight', 0.5)
+        pesq_reward_weight = self.cfg.get('pesq_reward_weight', 0.0)
+        min_valid_codes_len = self.cfg.get('min_valid_codes_len', 4)
+        max_valid_codes_len = self.cfg.get(
+            'max_valid_codes_len', self.max_decoder_steps * self.frame_stacking_factor - 1
+        )
+
+        for idx in range(predicted_audio.size(0)):
+            pred_transcript = pred_transcripts[idx]
+            gt_transcript = process_text_for_cer(batch_repeated['raw_texts'][idx])
+            cer_gt = min(max(word_error_rate([pred_transcript], [gt_transcript], use_cer=True), 0.0), 1.0)
+            wer_gt = min(max(word_error_rate([pred_transcript], [gt_transcript], use_cer=False), 0.0), 1.0)
+
+            if pred_speaker_embeddings is not None and gt_speaker_embeddings is not None:
+                spk_embedding_pred = pred_speaker_embeddings[idx].cpu().float().numpy()
+                spk_embedding_gt = gt_speaker_embeddings[idx].cpu().float().numpy()
+                denom = max(np.linalg.norm(spk_embedding_pred) * np.linalg.norm(spk_embedding_gt), 1e-8)
+                spk_similarity = float(np.dot(spk_embedding_pred, spk_embedding_gt) / denom)
+            else:
+                spk_similarity = 0.0
+
+            if use_pesq:
+                sample_audio, sr = torchaudio.load(predicted_audio_paths[idx])
+                sample_audio = sample_audio.to(self.device)
+                if sr != 16000:
+                    sample_audio = torchaudio.functional.resample(sample_audio, sr, 16000)
+                _, pesq_hyp, _ = self.squim_objective_model(sample_audio)
+                pesq_hyp = float(pesq_hyp.item())
+            else:
+                pesq_hyp = 0.0
+
+            item_metrics = {
+                'cer_gt': float(cer_gt),
+                'wer_gt': float(wer_gt),
+                'duration': float(audio_durations[idx]),
+                'spk_similarity': float(spk_similarity),
+                'pred_transcript': pred_transcript,
+                'gt_transcript': gt_transcript,
+                'codes_len': int(predicted_codes_lens[idx].item()),
+                'pesq': float(pesq_hyp),
+            }
+
+            best_ssim_achievable = self.cfg.get('best_ssim_achievable', 0.9)
+            mean_cer_dataset = self.cfg.get('mean_cer_dataset', 0.1)
+            mean_ssim_dataset = self.cfg.get('mean_ssim_dataset', 0.6)
+
+            item_cer = item_metrics['cer_gt']
+            item_ssim = max(min(item_metrics['spk_similarity'], best_ssim_achievable), 0.0)
+            if item_cer <= mean_cer_dataset:
+                cer_reward = 0.5 + 0.5 * (mean_cer_dataset - item_cer) / max(mean_cer_dataset, 1e-8)
+            else:
+                cer_reward = 0.5 - 0.5 * (item_cer - mean_cer_dataset) / max(1.0 - mean_cer_dataset, 1e-8)
+
+            if item_ssim >= mean_ssim_dataset:
+                spk_similarity_reward = 0.5 + 0.5 * (item_ssim - mean_ssim_dataset) / max(
+                    best_ssim_achievable - mean_ssim_dataset, 1e-8
+                )
+            else:
+                spk_similarity_reward = 0.5 - 0.5 * (mean_ssim_dataset - item_ssim) / max(mean_ssim_dataset, 1e-8)
+
+            pesq_reward = item_metrics['pesq'] / 4.5 if use_pesq else 0.0
+            reward = (
+                cer_reward * cer_reward_weight
+                + spk_similarity_reward * ssim_reward_weight
+                + pesq_reward * pesq_reward_weight
+            )
+            if (item_metrics['codes_len'] >= max_valid_codes_len) or (item_metrics['codes_len'] <= min_valid_codes_len):
+                reward = 0.0
+
+            item_metrics['cer_reward'] = float(cer_reward)
+            item_metrics['spk_similarity_reward'] = float(spk_similarity_reward)
+            item_metrics['pesq_reward'] = float(pesq_reward)
+            item_metrics['reward'] = float(reward)
+            batch_metrics.append(item_metrics)
+
+        num_groups = len(batch['raw_texts'])
+        all_groups_mean_reward = 0.0
+        all_groups_std_reward = 0.0
+        group_validities = []
+        for group_idx in range(num_groups):
+            group_start_idx = group_idx * num_generations_per_item
+            group_end_idx = group_start_idx + num_generations_per_item
+            group_rewards = [batch_metrics[idx]['reward'] for idx in range(group_start_idx, group_end_idx)]
+            group_cers = [batch_metrics[idx]['cer_gt'] for idx in range(group_start_idx, group_end_idx)]
+            mean_reward = float(np.mean(group_rewards))
+            std_reward = float(np.std(group_rewards))
+            is_group_valid = True
+            if min(group_cers) > self.best_cer_threshold:
+                is_group_valid = False
+            if max(group_cers) > self.worst_cer_threshold:
+                is_group_valid = False
+
+            for idx in range(group_start_idx, group_end_idx):
+                advantage = batch_metrics[idx]['reward'] - mean_reward
+                if self.scale_rewards:
+                    advantage = advantage / (std_reward + 1e-4)
+                batch_metrics[idx]['advantage'] = float(advantage)
+                group_validities.append(is_group_valid)
+
+            all_groups_mean_reward += mean_reward
+            all_groups_std_reward += std_reward
+
+        all_groups_mean_reward = all_groups_mean_reward / max(num_groups, 1)
+        all_groups_std_reward = all_groups_std_reward / max(num_groups, 1)
+        advantages = torch.tensor([x['advantage'] for x in batch_metrics], device=self.device, dtype=torch.float32)
+        group_validities = torch.tensor(group_validities, device=self.device, dtype=torch.float32)
+
+        return {
+            'mean_reward': torch.tensor(all_groups_mean_reward, device=self.device, dtype=torch.float32),
+            'std_reward': torch.tensor(all_groups_std_reward, device=self.device, dtype=torch.float32),
+            'batch_repeated': batch_repeated,
+            'metrics': batch_metrics,
+            'predicted_codes': predicted_codes,
+            'predicted_codes_lens': predicted_codes_lens,
+            'advantages': advantages,
+            'group_validities': group_validities,
+        }
+
+    def process_batch_online_po(self, batch: Dict, n_generations_per_item: int, mode: str = 'train'):
+        use_local_transformer_for_inference = False
+        use_local_transformer_prob = self.cfg.get('use_local_transformer_prob', 0.0)
+        if use_local_transformer_prob > 0.0 and mode == 'train':
+            use_local_transformer_for_inference = random.random() < use_local_transformer_prob
+
+        with torch.no_grad():
+            self.eval()
+            generated_codes_and_metrics = self.generate_and_reward(
+                batch=batch,
+                num_generations_per_item=n_generations_per_item,
+                mode=mode,
+                use_local_transformer_for_inference=use_local_transformer_for_inference,
+            )
+            self.train()
+
+        batch_repeated = generated_codes_and_metrics['batch_repeated']
+        predicted_codes = generated_codes_and_metrics['predicted_codes']
+        predicted_codes_lens = generated_codes_and_metrics['predicted_codes_lens']
+        predicted_codes = predicted_codes[:, :, : predicted_codes_lens.max()]
+        batch_repeated['audio_codes'] = predicted_codes
+        batch_repeated['audio_codes_lens'] = predicted_codes_lens
+        if 'audio' in batch_repeated:
+            del batch_repeated['audio']
+        if 'audio_lens' in batch_repeated:
+            del batch_repeated['audio_lens']
+
+        # Use mode='val' intentionally for stable PO optimization:
+        # no random input dropout, no CFG unconditional dropout, no random phoneme corruption.
+        policy_output = self._run_easy_process_batch(
+            model=self,
+            batch=batch_repeated,
+            audio_codes=predicted_codes,
+            audio_codes_lens=predicted_codes_lens,
+            mode='val',
+        )
+
+        reference_output = None
+        if not self.reference_free:
+            with torch.no_grad():
+                reference_output = self._run_easy_process_batch(
+                    model=self._reference_model,
+                    batch=batch_repeated,
+                    audio_codes=predicted_codes,
+                    audio_codes_lens=predicted_codes_lens,
+                    mode='val',
+                )
+
+        logits = policy_output.local_transformer_logits
+        if logits is None:
+            logits = policy_output.logits
+        ref_logits = None
+        if reference_output is not None:
+            ref_logits = reference_output.local_transformer_logits
+            if ref_logits is None:
+                ref_logits = reference_output.logits
+
+        audio_codes_target = policy_output.audio_codes_target.long()
+        audio_codes_lens_target = policy_output.audio_codes_lens_target
+        audio_loss_mask = get_mask_from_lengths(audio_codes_lens_target).float()
+        advantages = generated_codes_and_metrics['advantages']
+        group_validities = generated_codes_and_metrics['group_validities']
+
+        n_codebooks = audio_codes_target.size(1)
+        total_loss = None
+        total_kl = None
+        for codebook_idx in range(n_codebooks):
+            si = codebook_idx * self.num_all_tokens_per_codebook
+            ei = si + self.num_all_tokens_per_codebook
+            codebook_logits = logits[:, :, si:ei]
+            codebook_labels = audio_codes_target[:, codebook_idx, :]
+            per_token_logps = self._get_per_token_logps(codebook_logits, codebook_labels, audio_loss_mask)
+            per_token_loss = -(torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1))
+            per_token_loss = per_token_loss * group_validities.unsqueeze(1)
+
+            if not self.reference_free and ref_logits is not None:
+                with torch.no_grad():
+                    ref_codebook_logits = ref_logits[:, :, si:ei]
+                    per_token_ref_logps = self._get_per_token_logps(
+                        ref_codebook_logits, codebook_labels, audio_loss_mask
+                    )
+                per_token_kl = (
+                    torch.exp(per_token_ref_logps - per_token_logps) - (per_token_ref_logps - per_token_logps) - 1
+                )
+                per_token_loss = per_token_loss + self.cfg.get('grpo_beta', 0.0) * per_token_kl
+                codebook_kl_loss_mean = (
+                    (per_token_kl * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
+                ).mean()
+            else:
+                codebook_kl_loss_mean = torch.tensor(0.0, device=self.device)
+
+            if self.loss_type == "grpo":
+                codebook_loss = (
+                    (per_token_loss * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
+                ).mean()
+            elif self.loss_type == "dr_grpo":
+                total_tokens = per_token_loss.shape[0] * self.max_decoder_steps
+                codebook_loss = (per_token_loss * audio_loss_mask).sum() / max(total_tokens, 1)
+            else:
+                raise ValueError(f"Unknown loss function: {self.loss_type}")
+
+            if total_loss is None:
+                total_loss = codebook_loss
+                total_kl = codebook_kl_loss_mean
+            else:
+                total_loss += codebook_loss
+                total_kl += codebook_kl_loss_mean
+
+        total_po_loss = total_loss / n_codebooks
+        total_kl = total_kl / n_codebooks
+
+        phoneme_aux_loss = policy_output.phoneme_loss
+        if phoneme_aux_loss is None:
+            phoneme_aux_loss = torch.tensor(0.0, device=self.device)
+        total_loss = total_po_loss + self.aux_phoneme_loss_weight * phoneme_aux_loss
+
+        return {
+            'mean_reward': generated_codes_and_metrics['mean_reward'],
+            'std_reward': generated_codes_and_metrics['std_reward'],
+            'loss': total_loss,
+            'po_loss': total_po_loss,
+            'phoneme_aux_loss': phoneme_aux_loss,
+            'kl_loss': total_kl,
+            'batch_metrics': generated_codes_and_metrics['metrics'],
+        }
+
+    def training_step(self, batch, batch_idx):
+        n_generations_per_item = self.cfg.get('n_generations_per_item', 6)
+        po_outputs = self.process_batch_online_po(batch=batch, n_generations_per_item=n_generations_per_item, mode='train')
+        self.log('train_loss', po_outputs['loss'], prog_bar=True, sync_dist=True)
+        self.log('train_po_loss', po_outputs['po_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_phoneme_aux_loss', po_outputs['phoneme_aux_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_mean_reward', po_outputs['mean_reward'], prog_bar=True, sync_dist=True)
+        self.log('train_std_reward', po_outputs['std_reward'], prog_bar=True, sync_dist=True)
+        return po_outputs['loss']
+
+    def validation_step(self, batch, batch_idx):
+        val_n_generations_per_item = self.cfg.get('val_n_generations_per_item', 1)
+        po_outputs = self.process_batch_online_po(
+            batch=batch,
+            n_generations_per_item=val_n_generations_per_item,
+            mode='val',
+        )
+        self.validation_step_outputs.append(
+            {
+                'mean_reward': po_outputs['mean_reward'],
+                'std_reward': po_outputs['std_reward'],
+                'val_loss': po_outputs['loss'],
+                'val_po_loss': po_outputs['po_loss'],
+                'val_phoneme_aux_loss': po_outputs['phoneme_aux_loss'],
+                'val_kl_loss': po_outputs['kl_loss'],
+                'batch_metrics': po_outputs['batch_metrics'],
+            }
+        )
+
+    def on_validation_epoch_end(self):
+        def collect(key: str):
+            values = []
+            for x in self.validation_step_outputs:
+                if x[key] is not None:
+                    values.append(x[key])
+                else:
+                    values.append(torch.tensor(0.0, device=self.device))
+            return torch.stack(values).mean() if len(values) > 0 else torch.tensor(0.0, device=self.device)
+
+        val_loss = collect("val_loss")
+        val_po_loss = collect("val_po_loss")
+        val_phoneme_aux_loss = collect("val_phoneme_aux_loss")
+        val_kl_loss = collect("val_kl_loss")
+        mean_reward = collect("mean_reward")
+        std_reward = collect("std_reward")
+
+        self.log("val_loss", val_loss, prog_bar=True, sync_dist=True)
+        self.log("val_po_loss", val_po_loss, prog_bar=True, sync_dist=True)
+        self.log("val_phoneme_aux_loss", val_phoneme_aux_loss, prog_bar=True, sync_dist=True)
+        self.log("val_kl_loss", val_kl_loss, prog_bar=True, sync_dist=True)
+        self.log("val_mean_reward", mean_reward, prog_bar=True, sync_dist=True)
+        self.log("val_std_reward", std_reward, prog_bar=True, sync_dist=True)
+
+        mean_metrics = {}
+        for val_output in self.validation_step_outputs:
+            for item_metrics in val_output['batch_metrics']:
+                for key, value in item_metrics.items():
+                    if "transcript" not in key:
+                        mean_metrics.setdefault(key, []).append(value)
+        for key, values in mean_metrics.items():
+            self.log(f"val_{key}", float(np.mean(values)), prog_bar=True, sync_dist=True)
+
+        self.validation_step_outputs.clear()
