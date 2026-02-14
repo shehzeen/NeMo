@@ -2610,6 +2610,7 @@ class EasyMagpieTTSModel(ModelPT):
         gt_phoneme_tokens_lens: Optional[torch.Tensor] = None,
         gt_audio_codes: Optional[torch.Tensor] = None,
         gt_audio_codes_lens: Optional[torch.Tensor] = None,
+        use_inference_mode: bool = True,
     ) -> StreamingState:
         """
         Initialize streaming TTS inference state.
@@ -2655,7 +2656,8 @@ class EasyMagpieTTSModel(ModelPT):
         Returns:
             StreamingState: Initial state for streaming inference.
         """
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             batch_size = context_audio_codes.size(0)
             device = context_audio_codes.device
 
@@ -2785,6 +2787,7 @@ class EasyMagpieTTSModel(ModelPT):
         state: StreamingState,
         text_tokens: Optional[torch.Tensor] = None,
         force_dropout_text: bool = False,
+        use_inference_mode: bool = True,
     ) -> Tuple[StreamingState, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform one streaming inference step with batch support.
@@ -2827,7 +2830,8 @@ class EasyMagpieTTSModel(ModelPT):
         if state.finished.all():
             return state, None, None
 
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             device = state.device
             batch_size = state.batch_size
             streaming_speech_delay = state.training_mode.streaming_speech_delay
@@ -3200,6 +3204,7 @@ class EasyMagpieTTSModel(ModelPT):
     def streaming_finalize(
         self,
         state: StreamingState,
+        use_inference_mode: bool = True,
     ) -> StreamingFinalizeOutput:
         """
         Finalize streaming and return the complete generated audio and phoneme predictions.
@@ -3249,7 +3254,8 @@ class EasyMagpieTTSModel(ModelPT):
                 phoneme_text=phoneme_text_list,
             )
 
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             # Concatenate all predictions - each is (B, C, S), concat gives (B, C, T_total_frames)
             all_codes = torch.cat(state.all_predictions, dim=-1)  # (B, C, T_total_frames)
             total_frames = all_codes.size(-1)
@@ -3317,6 +3323,7 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_sampling_method: str = 'argmax',
         force_dropout_text: bool = False,
         use_teacher_forced: bool = False,
+        use_inference_mode: bool = True,
     ) -> InferBatchOutput:
         """
         Batch inference using streaming infrastructure.
@@ -3352,7 +3359,8 @@ class EasyMagpieTTSModel(ModelPT):
         Returns:
             InferBatchOutput containing predicted audio, codes, and RTF metrics.
         """
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             start_time = time.time()
 
             # Extract tensors from batch
@@ -3440,6 +3448,7 @@ class EasyMagpieTTSModel(ModelPT):
                 gt_phoneme_tokens_lens=gt_phoneme_tokens_lens,
                 gt_audio_codes=gt_audio_codes_for_init,
                 gt_audio_codes_lens=gt_audio_codes_lens_for_init,
+                use_inference_mode=use_inference_mode,
             )
 
             time_to_first_prediction = None
@@ -3463,6 +3472,7 @@ class EasyMagpieTTSModel(ModelPT):
                     state=state,
                     text_tokens=current_tokens,
                     force_dropout_text=force_dropout_text,
+                    use_inference_mode=use_inference_mode,
                 )
 
                 # Record time to first audio prediction
@@ -3472,7 +3482,7 @@ class EasyMagpieTTSModel(ModelPT):
             tts_generation_time = time.time() - generation_start_time
 
             # Finalize and decode audio
-            finalize_output = self.streaming_finalize(state)
+            finalize_output = self.streaming_finalize(state, use_inference_mode=use_inference_mode)
 
             end_time = time.time()
             total_time = end_time - start_time

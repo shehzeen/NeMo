@@ -373,6 +373,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             phoneme_sampling_method=self.cfg.get('inference_phoneme_sampling_method', 'argmax'),
             force_dropout_text=False,
             use_teacher_forced=False,
+            use_inference_mode=False,
         )
 
         predicted_audio = output.predicted_audio
@@ -576,6 +577,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         predicted_codes = generated_codes_and_metrics['predicted_codes']
         predicted_codes_lens = generated_codes_and_metrics['predicted_codes_lens']
         predicted_codes = predicted_codes[:, :, : predicted_codes_lens.max()]
+        predicted_codes = self._codec_converter.convert_new_to_original(
+            audio_tokens=predicted_codes, audio_lens=predicted_codes_lens
+        )
         batch_repeated['audio_codes'] = predicted_codes
         batch_repeated['audio_codes_lens'] = predicted_codes_lens
         if 'audio' in batch_repeated:
