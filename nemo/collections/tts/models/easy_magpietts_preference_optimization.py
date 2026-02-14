@@ -99,6 +99,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
             self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3")
             self.whisper_model.eval()
+            for param in self.whisper_model.parameters():
+                param.requires_grad = False
         else:
             raise ValueError(f"Unknown reward_asr_model: {reward_asr_model}")
 
@@ -118,7 +120,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 f"Received loss_type={self.loss_type}. Supported values: ['grpo', 'dr_grpo']."
             )
         self.scale_rewards = self.cfg.get('scale_rewards', True)
-        self.max_decoder_steps = self.cfg.get('max_decoder_steps', 430)
+        self.max_decoder_steps = self.cfg.get('max_decoder_steps', 220)
         self.aux_phoneme_loss_weight = self.cfg.get('aux_phoneme_loss_weight', 1.0)
 
         self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
@@ -283,6 +285,58 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             mode=mode,
         )
 
+    def _format_text_table(self, headers: List[str], rows: List[List[str]]) -> str:
+        col_widths = [len(h) for h in headers]
+        for row in rows:
+            for col_idx, value in enumerate(row):
+                col_widths[col_idx] = max(col_widths[col_idx], len(value))
+
+        header_line = " | ".join(headers[col_idx].ljust(col_widths[col_idx]) for col_idx in range(len(headers)))
+        separator = "-+-".join("-" * col_widths[col_idx] for col_idx in range(len(headers)))
+        row_lines = [
+            " | ".join(row[col_idx].ljust(col_widths[col_idx]) for col_idx in range(len(headers))) for row in rows
+        ]
+        return "\n".join([header_line, separator] + row_lines)
+
+    def _print_group_cer_wer_table(
+        self,
+        batch: Dict,
+        batch_metrics: List[Dict],
+        group_idx: int,
+        group_start_idx: int,
+        group_end_idx: int,
+        is_group_valid: bool,
+        mean_reward: float,
+        std_reward: float,
+    ) -> None:
+        if not getattr(self.trainer, "is_global_zero", True):
+            return
+
+        prompt_text = str(batch['raw_texts'][group_idx]).replace("\n", " ")
+        if len(prompt_text) > 120:
+            prompt_text = f"{prompt_text[:117]}..."
+
+        rows = []
+        for local_idx, metric_idx in enumerate(range(group_start_idx, group_end_idx)):
+            item_metrics = batch_metrics[metric_idx]
+            rows.append(
+                [
+                    str(local_idx),
+                    f"{item_metrics['cer_gt']:.4f}",
+                    f"{item_metrics['wer_gt']:.4f}",
+                    f"{item_metrics['spk_similarity']:.4f}",
+                    f"{item_metrics['reward']:.4f}",
+                    f"{item_metrics.get('advantage', 0.0):.4f}",
+                ]
+            )
+
+        table = self._format_text_table(headers=["item", "cer", "wer", "ssim", "reward", "advantage"], rows=rows)
+        print(
+            f"[generate_and_reward] group={group_idx} valid={is_group_valid} "
+            f"mean_reward={mean_reward:.4f} std_reward={std_reward:.4f}\n"
+            f"prompt: {prompt_text}\n{table}\n"
+        )
+
     def generate_and_reward(
         self,
         batch: Dict,
@@ -301,7 +355,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             use_cfg = random.random() < inference_cfg_prob
             cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
 
-        phoneme_input_type = self.cfg.get('inference_phoneme_input_type', 'pred')
+        phoneme_input_type = 'pred'
         gt_phoneme_input_prob = self.cfg.get('gt_phoneme_input_prob', 0.0)
         can_use_gt_phonemes = ('phoneme_tokens' in batch_repeated) and ('phoneme_tokens_lens' in batch_repeated)
         if can_use_gt_phonemes and gt_phoneme_input_prob > 0.0 and mode == 'train':
@@ -470,6 +524,17 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                     advantage = advantage / (std_reward + 1e-4)
                 batch_metrics[idx]['advantage'] = float(advantage)
                 group_validities.append(is_group_valid)
+
+            self._print_group_cer_wer_table(
+                batch=batch,
+                batch_metrics=batch_metrics,
+                group_idx=group_idx,
+                group_start_idx=group_start_idx,
+                group_end_idx=group_end_idx,
+                is_group_valid=is_group_valid,
+                mean_reward=mean_reward,
+                std_reward=std_reward,
+            )
 
             all_groups_mean_reward += mean_reward
             all_groups_std_reward += std_reward
