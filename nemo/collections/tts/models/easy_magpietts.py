@@ -718,6 +718,14 @@ class EasyMagpieTTSModel(ModelPT):
             # Pass the modified integer token IDs
             if self._codec_converter is not None:
                 codes = self._codec_converter.convert_new_to_original(audio_tokens=codes, audio_lens=codes_len)
+            if codes_len.min() < 4:
+                # Pad the codes with 0s to make the minimum length 4
+                # codes is (B, C, T)
+                codes = torch.nn.functional.pad(input=codes, pad=(0, 4 - codes_len.min()), value=0)
+                # Updates all lens less than 4 to 4
+                codes_len = torch.where(codes_len < 4, torch.ones_like(codes_len) * 4, codes_len)
+                codes = codes[:,:,:codes_len.max()]
+
             audio, audio_len = self._codec_model.decode(tokens=codes, tokens_len=codes_len)
             # audio: (B, T)
             # audio_len: (B,)
@@ -935,8 +943,8 @@ class EasyMagpieTTSModel(ModelPT):
                 codebook_logits[:actual_batch_size] = cfg_logits
 
             # Replace NaN/inf then clamp to prevent extreme values (e.g. from CFG) causing NaN in softmax
-            print("codebook_logits stats before nan_to_num")
-            print(f"min: {codebook_logits.min()}, max: {codebook_logits.max()}, mean: {codebook_logits.mean()}, std: {codebook_logits.std()}")
+            # print("codebook_logits stats before nan_to_num")
+            # print(f"min: {codebook_logits.min()}, max: {codebook_logits.max()}, mean: {codebook_logits.mean()}, std: {codebook_logits.std()}")
             codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
             codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
 

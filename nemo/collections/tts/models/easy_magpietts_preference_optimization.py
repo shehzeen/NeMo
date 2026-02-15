@@ -67,6 +67,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
+        
+        self.run_val_inference = True # Always run validation inference in PO.
         self.automatic_optimization = False
 
         ref_model_cfg = copy.deepcopy(cfg)
@@ -102,6 +104,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             self.whisper_model.eval()
             for param in self.whisper_model.parameters():
                 param.requires_grad = False
+            self.use_multilingual_asr = True
         else:
             raise ValueError(f"Unknown reward_asr_model: {reward_asr_model}")
 
@@ -227,10 +230,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         Build per-item reference audio paths for speaker similarity reward.
         Priority: audio_filepaths -> context_audio -> context_audio_codes.
         """
-        if 'audio_filepaths' in batch_repeated and len(batch_repeated['audio_filepaths']) > 0:
-            return batch_repeated['audio_filepaths']
-
         if 'context_audio' in batch_repeated and 'context_audio_lens' in batch_repeated:
+            # TODO: Handle text context here support here.
             return self._save_waveforms_to_paths(
                 waveforms=batch_repeated['context_audio'],
                 waveform_lens=batch_repeated['context_audio_lens'],
@@ -241,6 +242,27 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         if 'context_audio_codes' in batch_repeated and 'context_audio_codes_lens' in batch_repeated:
             context_codes = batch_repeated['context_audio_codes']
             context_lens = batch_repeated['context_audio_codes_lens']
+
+            target_codes = batch_repeated['audio_codes']
+            target_lens = batch_repeated['audio_codes_lens']
+
+            # For items where context_lens < 3, fall back to target_codes/target_lens
+            # This is for items with text context
+            short_context_mask = context_lens < 3
+            if short_context_mask.any():
+                # Pad the shorter tensor along the time dimension if needed
+                max_len = max(context_codes.shape[-1], target_codes.shape[-1])
+                if context_codes.shape[-1] < max_len:
+                    pad_size = max_len - context_codes.shape[-1]
+                    context_codes = torch.nn.functional.pad(context_codes, (0, pad_size), value=0)
+                if target_codes.shape[-1] < max_len:
+                    pad_size = max_len - target_codes.shape[-1]
+                    target_codes = torch.nn.functional.pad(target_codes, (0, pad_size), value=0)
+                context_codes[short_context_mask] = target_codes[short_context_mask]
+                context_lens[short_context_mask] = target_lens[short_context_mask]
+                # Slice to the actual max length needed
+                context_codes = context_codes[..., :context_lens.max()]
+
             if self._codec_converter is not None:
                 context_codes = self._codec_converter.convert_original_to_new(
                     audio_tokens=context_codes, audio_lens=context_lens
@@ -255,7 +277,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
         raise ValueError(
             "Could not construct reference audio for speaker similarity. Need one of: "
-            "audio_filepaths, context_audio/context_audio_lens, or context_audio_codes/context_audio_codes_lens."
+            "context_audio/context_audio_lens, or context_audio_codes/context_audio_codes_lens."
         )
 
     def _run_easy_process_batch(
@@ -412,6 +434,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             for item_idx, audio_path in enumerate(predicted_audio_paths):
                 language = langs[item_idx] if item_idx < len(langs) else 'en'
                 normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+                print(f"Transcribing audio {audio_path} with language {language}")
                 transcript = transcribe_with_whisper(
                     audio_filepath=audio_path,
                     language=language,
@@ -420,6 +443,10 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                     device=self.device,
                     normalizer=normalizer,
                 )
+                print(f"Pred Transcript: {transcript}")
+                print(f"Normalized Pred Text: {process_text_for_cer(transcript)}")
+                print(f"Raw Text: {batch_repeated['raw_texts'][item_idx]}")
+                print("--------------------------------")
                 pred_transcripts.append(process_text_for_cer(transcript))
 
         reference_audio_paths = self._get_reference_audio_paths(batch_repeated)
@@ -882,61 +909,61 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         print(timing_msg)
         logging.info(timing_msg)
 
-    def validation_step(self, batch, batch_idx):
-        val_n_generations_per_item = self.cfg.get('val_n_generations_per_item', 1)
-        po_outputs = self.process_batch_online_po(
-            batch=batch,
-            n_generations_per_item=val_n_generations_per_item,
-            mode='val',
-        )
-        self.validation_step_outputs.append(
-            {
-                'mean_reward': po_outputs['mean_reward'],
-                'std_reward': po_outputs['std_reward'],
-                'val_loss': po_outputs['loss'],
-                'val_po_loss': po_outputs['po_loss'],
-                'val_phoneme_aux_loss': po_outputs['phoneme_aux_loss'],
-                'val_kl_loss': po_outputs['kl_loss'],
-                'val_used_gt_phoneme_input': torch.tensor(
-                    po_outputs['used_gt_phoneme_input'], device=self.device, dtype=torch.float32
-                ),
-                'batch_metrics': po_outputs['batch_metrics'],
-            }
-        )
+    # def validation_step(self, batch, batch_idx):
+    #     val_n_generations_per_item = self.cfg.get('val_n_generations_per_item', 1)
+    #     po_outputs = self.process_batch_online_po(
+    #         batch=batch,
+    #         n_generations_per_item=val_n_generations_per_item,
+    #         mode='val',
+    #     )
+    #     self.validation_step_outputs.append(
+    #         {
+    #             'mean_reward': po_outputs['mean_reward'],
+    #             'std_reward': po_outputs['std_reward'],
+    #             'val_loss': po_outputs['loss'],
+    #             'val_po_loss': po_outputs['po_loss'],
+    #             'val_phoneme_aux_loss': po_outputs['phoneme_aux_loss'],
+    #             'val_kl_loss': po_outputs['kl_loss'],
+    #             'val_used_gt_phoneme_input': torch.tensor(
+    #                 po_outputs['used_gt_phoneme_input'], device=self.device, dtype=torch.float32
+    #             ),
+    #             'batch_metrics': po_outputs['batch_metrics'],
+    #         }
+    #     )
 
-    def on_validation_epoch_end(self):
-        def collect(key: str):
-            values = []
-            for x in self.validation_step_outputs:
-                if x[key] is not None:
-                    values.append(x[key])
-                else:
-                    values.append(torch.tensor(0.0, device=self.device))
-            return torch.stack(values).mean() if len(values) > 0 else torch.tensor(0.0, device=self.device)
+    # def on_validation_epoch_end(self):
+    #     def collect(key: str):
+    #         values = []
+    #         for x in self.validation_step_outputs:
+    #             if x[key] is not None:
+    #                 values.append(x[key])
+    #             else:
+    #                 values.append(torch.tensor(0.0, device=self.device))
+    #         return torch.stack(values).mean() if len(values) > 0 else torch.tensor(0.0, device=self.device)
 
-        val_loss = collect("val_loss")
-        val_po_loss = collect("val_po_loss")
-        val_phoneme_aux_loss = collect("val_phoneme_aux_loss")
-        val_kl_loss = collect("val_kl_loss")
-        val_used_gt_phoneme_input = collect("val_used_gt_phoneme_input")
-        mean_reward = collect("mean_reward")
-        std_reward = collect("std_reward")
+    #     val_loss = collect("val_loss")
+    #     val_po_loss = collect("val_po_loss")
+    #     val_phoneme_aux_loss = collect("val_phoneme_aux_loss")
+    #     val_kl_loss = collect("val_kl_loss")
+    #     val_used_gt_phoneme_input = collect("val_used_gt_phoneme_input")
+    #     mean_reward = collect("mean_reward")
+    #     std_reward = collect("std_reward")
 
-        self.log("val_loss", val_loss, prog_bar=True, sync_dist=True)
-        self.log("val_po_loss", val_po_loss, prog_bar=True, sync_dist=True)
-        self.log("val_phoneme_aux_loss", val_phoneme_aux_loss, prog_bar=True, sync_dist=True)
-        self.log("val_kl_loss", val_kl_loss, prog_bar=True, sync_dist=True)
-        self.log("val_used_gt_phoneme_input", val_used_gt_phoneme_input, prog_bar=True, sync_dist=True)
-        self.log("val_mean_reward", mean_reward, prog_bar=True, sync_dist=True)
-        self.log("val_std_reward", std_reward, prog_bar=True, sync_dist=True)
+    #     self.log("val_loss", val_loss, prog_bar=True, sync_dist=True)
+    #     self.log("val_po_loss", val_po_loss, prog_bar=True, sync_dist=True)
+    #     self.log("val_phoneme_aux_loss", val_phoneme_aux_loss, prog_bar=True, sync_dist=True)
+    #     self.log("val_kl_loss", val_kl_loss, prog_bar=True, sync_dist=True)
+    #     self.log("val_used_gt_phoneme_input", val_used_gt_phoneme_input, prog_bar=True, sync_dist=True)
+    #     self.log("val_mean_reward", mean_reward, prog_bar=True, sync_dist=True)
+    #     self.log("val_std_reward", std_reward, prog_bar=True, sync_dist=True)
 
-        mean_metrics = {}
-        for val_output in self.validation_step_outputs:
-            for item_metrics in val_output['batch_metrics']:
-                for key, value in item_metrics.items():
-                    if "transcript" not in key:
-                        mean_metrics.setdefault(key, []).append(value)
-        for key, values in mean_metrics.items():
-            self.log(f"val_{key}", float(np.mean(values)), prog_bar=True, sync_dist=True)
+    #     mean_metrics = {}
+    #     for val_output in self.validation_step_outputs:
+    #         for item_metrics in val_output['batch_metrics']:
+    #             for key, value in item_metrics.items():
+    #                 if "transcript" not in key:
+    #                     mean_metrics.setdefault(key, []).append(value)
+    #     for key, values in mean_metrics.items():
+    #         self.log(f"val_{key}", float(np.mean(values)), prog_bar=True, sync_dist=True)
 
-        self.validation_step_outputs.clear()
+    #     self.validation_step_outputs.clear()
