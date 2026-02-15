@@ -67,6 +67,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
+        self.automatic_optimization = False
 
         ref_model_cfg = copy.deepcopy(cfg)
         with open_dict(ref_model_cfg):
@@ -122,6 +123,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.scale_rewards = self.cfg.get('scale_rewards', True)
         self.max_decoder_steps = self.cfg.get('max_decoder_steps', 220)
         self.aux_phoneme_loss_weight = self.cfg.get('aux_phoneme_loss_weight', 1.0)
+        self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
 
         self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
         if reward_asr_model == 'whisper' and self._normalize_whisper_transcript:
@@ -214,7 +216,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         for idx in range(waveforms.size(0)):
             wav = waveforms[idx].float().detach().cpu().numpy()
             wav = wav[: int(waveform_lens[idx].item())]
-            path = os.path.join(audio_dir, f'{prefix}_rank{self.global_rank}_{time_id}_{idx}.wav')
+            # path = os.path.join(audio_dir, f'{prefix}_rank{self.global_rank}_{time_id}_{idx}.wav')
+            path = os.path.join(audio_dir, f'{prefix}_rank{self.global_rank}_{idx}.wav')
             sf.write(path, wav, sample_rate)
             paths.append(path)
         return paths
@@ -361,6 +364,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         if can_use_gt_phonemes and gt_phoneme_input_prob > 0.0 and mode == 'train':
             phoneme_input_type = 'gt' if random.random() < gt_phoneme_input_prob else 'pred'
 
+        generation_start_time = time.perf_counter()
+        print("Inference started")
         output = self.infer_batch(
             batch=batch_repeated,
             max_decoder_steps=self.max_decoder_steps,
@@ -375,19 +380,24 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             use_teacher_forced=False,
             use_inference_mode=False,
         )
+        print("Inference ended")
+        audio_generation_time_sec = time.perf_counter() - generation_start_time
 
         predicted_audio = output.predicted_audio
         predicted_audio_lens = output.predicted_audio_lens
         predicted_codes = output.predicted_codes
         predicted_codes_lens = output.predicted_codes_lens
+        save_start_time = time.perf_counter()
         predicted_audio_paths = self._save_waveforms_to_paths(
             waveforms=predicted_audio,
             waveform_lens=predicted_audio_lens,
             prefix='generated',
             sample_rate=self.output_sample_rate,
         )
+        audio_save_time_sec = time.perf_counter() - save_start_time
         audio_durations = [int(predicted_audio_lens[idx].item()) / self.output_sample_rate for idx in range(predicted_audio.size(0))]
 
+        rewarding_start_time = time.perf_counter()
         if reward_asr_model == 'nemo':
             pred_transcripts = self._eval_asr_model.transcribe(
                 predicted_audio_paths,
@@ -544,6 +554,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         all_groups_std_reward = all_groups_std_reward / max(num_groups, 1)
         advantages = torch.tensor([x['advantage'] for x in batch_metrics], device=self.device, dtype=torch.float32)
         group_validities = torch.tensor(group_validities, device=self.device, dtype=torch.float32)
+        rewarding_time_sec = time.perf_counter() - rewarding_start_time
 
         return {
             'mean_reward': torch.tensor(all_groups_mean_reward, device=self.device, dtype=torch.float32),
@@ -555,9 +566,77 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'advantages': advantages,
             'group_validities': group_validities,
             'rollout_phoneme_input_type': phoneme_input_type,
+            'timings': {
+                'audio_generation_time_sec': float(audio_generation_time_sec),
+                'audio_save_time_sec': float(audio_save_time_sec),
+                'rewarding_time_sec': float(rewarding_time_sec),
+            },
         }
 
     def process_batch_online_po(self, batch: Dict, n_generations_per_item: int, mode: str = 'train'):
+        generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens = self._prepare_online_po_inputs(
+            batch=batch,
+            n_generations_per_item=n_generations_per_item,
+            mode=mode,
+        )
+        chunked_outputs = self._run_teacher_forced_chunked_po(
+            generated_codes_and_metrics=generated_codes_and_metrics,
+            batch_repeated=batch_repeated,
+            predicted_codes=predicted_codes,
+            predicted_codes_lens=predicted_codes_lens,
+            n_generations_per_item=n_generations_per_item,
+            do_backward=False,
+        )
+        return {
+            'mean_reward': generated_codes_and_metrics['mean_reward'],
+            'std_reward': generated_codes_and_metrics['std_reward'],
+            'loss': chunked_outputs['loss'],
+            'po_loss': chunked_outputs['po_loss'],
+            'phoneme_aux_loss': chunked_outputs['phoneme_aux_loss'],
+            'kl_loss': chunked_outputs['kl_loss'],
+            'used_gt_phoneme_input': chunked_outputs['used_gt_phoneme_input'],
+            'batch_metrics': generated_codes_and_metrics['metrics'],
+        }
+
+    def _slice_batch_range(self, batch: Dict, start_idx: int, end_idx: int) -> Dict:
+        sliced_batch = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                sliced_batch[key] = value[start_idx:end_idx]
+            elif isinstance(value, list):
+                sliced_batch[key] = value[start_idx:end_idx]
+            else:
+                sliced_batch[key] = value
+
+        # Keep explicit keys only to avoid accidental slicing of non-temporal tensors.
+        temporal_key_pairs = [
+            ('text', 'text_lens'),
+            ('context_text_tokens', 'context_text_tokens_lens'),
+            ('audio_codes', 'audio_codes_lens'),
+            ('context_audio_codes', 'context_audio_codes_lens'),
+            ('phoneme_tokens', 'phoneme_tokens_lens'),
+            ('context_audio', 'context_audio_lens'),
+            ('audio', 'audio_lens'),
+        ]
+        for tensor_key, lens_key in temporal_key_pairs:
+            tensor_value = sliced_batch.get(tensor_key)
+            lens = sliced_batch.get(lens_key)
+            if not isinstance(tensor_value, torch.Tensor) or not isinstance(lens, torch.Tensor):
+                continue
+            if tensor_value.dim() < 2 or tensor_value.size(0) != lens.size(0):
+                continue
+
+            local_max_len = int(lens.max().item()) if lens.numel() > 0 else 0
+            local_max_len = min(local_max_len, tensor_value.size(-1))
+            sliced_batch[tensor_key] = tensor_value[..., :local_max_len]
+
+        return sliced_batch
+
+    def _iter_group_ranges(self, num_groups: int, groups_per_subbatch: int):
+        for group_start in range(0, num_groups, groups_per_subbatch):
+            yield group_start, min(group_start + groups_per_subbatch, num_groups)
+
+    def _prepare_online_po_inputs(self, batch: Dict, n_generations_per_item: int, mode: str):
         use_local_transformer_for_inference = False
         use_local_transformer_prob = self.cfg.get('use_local_transformer_prob', 0.0)
         if use_local_transformer_prob > 0.0 and mode == 'train':
@@ -587,27 +666,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         if 'audio_lens' in batch_repeated:
             del batch_repeated['audio_lens']
 
-        # Use mode='val' intentionally for stable PO optimization:
-        # no random input dropout, no CFG unconditional dropout, no random phoneme corruption.
-        policy_output = self._run_easy_process_batch(
-            model=self,
-            batch=batch_repeated,
-            audio_codes=predicted_codes,
-            audio_codes_lens=predicted_codes_lens,
-            mode='val',
-        )
+        return generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens
 
-        reference_output = None
-        if not self.reference_free:
-            with torch.no_grad():
-                reference_output = self._run_easy_process_batch(
-                    model=self._reference_model,
-                    batch=batch_repeated,
-                    audio_codes=predicted_codes,
-                    audio_codes_lens=predicted_codes_lens,
-                    mode='val',
-                )
-
+    def _compute_po_losses_from_outputs(
+        self,
+        policy_output,
+        reference_output,
+        advantages: torch.Tensor,
+        group_validities: torch.Tensor,
+        rollout_phoneme_input_type: str,
+    ):
         logits = policy_output.local_transformer_logits
         if logits is None:
             logits = policy_output.logits
@@ -620,8 +688,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         audio_codes_target = policy_output.audio_codes_target.long()
         audio_codes_lens_target = policy_output.audio_codes_lens_target
         audio_loss_mask = get_mask_from_lengths(audio_codes_lens_target).float()
-        advantages = generated_codes_and_metrics['advantages']
-        group_validities = generated_codes_and_metrics['group_validities']
 
         n_codebooks = audio_codes_target.size(1)
         total_loss = None
@@ -671,34 +737,150 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         total_po_loss = total_loss / n_codebooks
         total_kl = total_kl / n_codebooks
 
-        rollout_phoneme_input_type = generated_codes_and_metrics.get('rollout_phoneme_input_type', 'pred')
         phoneme_aux_loss = policy_output.phoneme_loss if rollout_phoneme_input_type == 'gt' else None
         if phoneme_aux_loss is None:
             phoneme_aux_loss = torch.tensor(0.0, device=self.device)
         total_loss = total_po_loss + self.aux_phoneme_loss_weight * phoneme_aux_loss
 
         return {
-            'mean_reward': generated_codes_and_metrics['mean_reward'],
-            'std_reward': generated_codes_and_metrics['std_reward'],
             'loss': total_loss,
             'po_loss': total_po_loss,
             'phoneme_aux_loss': phoneme_aux_loss,
             'kl_loss': total_kl,
             'used_gt_phoneme_input': float(rollout_phoneme_input_type == 'gt'),
-            'batch_metrics': generated_codes_and_metrics['metrics'],
+        }
+
+    def _run_teacher_forced_chunked_po(
+        self,
+        generated_codes_and_metrics: Dict,
+        batch_repeated: Dict,
+        predicted_codes: torch.Tensor,
+        predicted_codes_lens: torch.Tensor,
+        n_generations_per_item: int,
+        do_backward: bool,
+    ):
+        num_groups = len(batch_repeated['raw_texts']) // n_generations_per_item
+        groups_per_subbatch = max(self.po_groups_per_subbatch, 1)
+
+        accumulated_loss = torch.tensor(0.0, device=self.device)
+        accumulated_po_loss = torch.tensor(0.0, device=self.device)
+        accumulated_phoneme_aux_loss = torch.tensor(0.0, device=self.device)
+        accumulated_kl_loss = torch.tensor(0.0, device=self.device)
+        used_gt_phoneme_input = 0.0
+
+        for group_start_idx, group_end_idx in self._iter_group_ranges(num_groups, groups_per_subbatch):
+            item_start_idx = group_start_idx * n_generations_per_item
+            item_end_idx = group_end_idx * n_generations_per_item
+            group_weight = float(group_end_idx - group_start_idx) / max(float(num_groups), 1.0)
+
+            batch_sub = self._slice_batch_range(batch_repeated, item_start_idx, item_end_idx)
+            predicted_codes_sub = predicted_codes[item_start_idx:item_end_idx]
+            predicted_codes_lens_sub = predicted_codes_lens[item_start_idx:item_end_idx]
+            predicted_codes_sub = predicted_codes_sub[:, :, : predicted_codes_lens_sub.max()]
+            advantages_sub = generated_codes_and_metrics['advantages'][item_start_idx:item_end_idx]
+            group_validities_sub = generated_codes_and_metrics['group_validities'][item_start_idx:item_end_idx]
+            rollout_phoneme_input_type = generated_codes_and_metrics.get('rollout_phoneme_input_type', 'pred')
+
+            # Use mode='val' intentionally for stable PO optimization:
+            # no random input dropout, no CFG unconditional dropout, no random phoneme corruption.
+            policy_output = self._run_easy_process_batch(
+                model=self,
+                batch=batch_sub,
+                audio_codes=predicted_codes_sub,
+                audio_codes_lens=predicted_codes_lens_sub,
+                mode='val',
+            )
+
+            reference_output = None
+            if not self.reference_free:
+                with torch.no_grad():
+                    reference_output = self._run_easy_process_batch(
+                        model=self._reference_model,
+                        batch=batch_sub,
+                        audio_codes=predicted_codes_sub,
+                        audio_codes_lens=predicted_codes_lens_sub,
+                        mode='val',
+                    )
+
+            chunk_outputs = self._compute_po_losses_from_outputs(
+                policy_output=policy_output,
+                reference_output=reference_output,
+                advantages=advantages_sub,
+                group_validities=group_validities_sub,
+                rollout_phoneme_input_type=rollout_phoneme_input_type,
+            )
+
+            if do_backward:
+                self.manual_backward(chunk_outputs['loss'] * group_weight)
+
+            accumulated_loss = accumulated_loss + chunk_outputs['loss'].detach() * group_weight
+            accumulated_po_loss = accumulated_po_loss + chunk_outputs['po_loss'].detach() * group_weight
+            accumulated_phoneme_aux_loss = (
+                accumulated_phoneme_aux_loss + chunk_outputs['phoneme_aux_loss'].detach() * group_weight
+            )
+            accumulated_kl_loss = accumulated_kl_loss + chunk_outputs['kl_loss'].detach() * group_weight
+            used_gt_phoneme_input = max(used_gt_phoneme_input, chunk_outputs['used_gt_phoneme_input'])
+
+        return {
+            'loss': accumulated_loss,
+            'po_loss': accumulated_po_loss,
+            'phoneme_aux_loss': accumulated_phoneme_aux_loss,
+            'kl_loss': accumulated_kl_loss,
+            'used_gt_phoneme_input': used_gt_phoneme_input,
         }
 
     def training_step(self, batch, batch_idx):
         n_generations_per_item = self.cfg.get('n_generations_per_item', 6)
-        po_outputs = self.process_batch_online_po(batch=batch, n_generations_per_item=n_generations_per_item, mode='train')
+        optimizer = self.optimizers()
+        if isinstance(optimizer, (list, tuple)):
+            if len(optimizer) != 1:
+                raise ValueError(f"Expected a single optimizer, got {len(optimizer)}.")
+            optimizer = optimizer[0]
+        optimizer.zero_grad(set_to_none=True)
+
+        generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens = self._prepare_online_po_inputs(
+            batch=batch,
+            n_generations_per_item=n_generations_per_item,
+            mode='train',
+        )
+        teacher_forced_start_time = time.perf_counter()
+        po_outputs = self._run_teacher_forced_chunked_po(
+            generated_codes_and_metrics=generated_codes_and_metrics,
+            batch_repeated=batch_repeated,
+            predicted_codes=predicted_codes,
+            predicted_codes_lens=predicted_codes_lens,
+            n_generations_per_item=n_generations_per_item,
+            do_backward=True,
+        )
+        teacher_forced_time_sec = time.perf_counter() - teacher_forced_start_time
+
+        optimizer.step()
+
         self.log('train_loss', po_outputs['loss'], prog_bar=True, sync_dist=True)
         self.log('train_po_loss', po_outputs['po_loss'], prog_bar=True, sync_dist=True)
         self.log('train_phoneme_aux_loss', po_outputs['phoneme_aux_loss'], prog_bar=True, sync_dist=True)
         self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
         self.log('train_used_gt_phoneme_input', po_outputs['used_gt_phoneme_input'], prog_bar=True, sync_dist=True)
-        self.log('train_mean_reward', po_outputs['mean_reward'], prog_bar=True, sync_dist=True)
-        self.log('train_std_reward', po_outputs['std_reward'], prog_bar=True, sync_dist=True)
-        return po_outputs['loss']
+        self.log('train_mean_reward', generated_codes_and_metrics['mean_reward'], prog_bar=True, sync_dist=True)
+        self.log('train_std_reward', generated_codes_and_metrics['std_reward'], prog_bar=True, sync_dist=True)
+
+        timings = generated_codes_and_metrics.get('timings', {})
+        audio_generation_time_sec = float(timings.get('audio_generation_time_sec', 0.0))
+        audio_save_time_sec = float(timings.get('audio_save_time_sec', 0.0))
+        rewarding_time_sec = float(timings.get('rewarding_time_sec', 0.0))
+        self.log('train_audio_generation_time_sec', audio_generation_time_sec, prog_bar=False, sync_dist=True)
+        self.log('train_audio_save_time_sec', audio_save_time_sec, prog_bar=False, sync_dist=True)
+        self.log('train_rewarding_time_sec', rewarding_time_sec, prog_bar=False, sync_dist=True)
+        self.log('train_teacher_forced_time_sec', teacher_forced_time_sec, prog_bar=False, sync_dist=True)
+        timing_msg = (
+            f"[training_step_timing] step={self.global_step} batch_idx={batch_idx} "
+            f"audio_gen={audio_generation_time_sec:.4f}s "
+            f"audio_save={audio_save_time_sec:.4f}s "
+            f"rewarding={rewarding_time_sec:.4f}s "
+            f"teacher_forced={teacher_forced_time_sec:.4f}s"
+        )
+        print(timing_msg)
+        logging.info(timing_msg)
 
     def validation_step(self, batch, batch_idx):
         val_n_generations_per_item = self.cfg.get('val_n_generations_per_item', 1)

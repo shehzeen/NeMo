@@ -934,6 +934,12 @@ class EasyMagpieTTSModel(ModelPT):
                 cfg_logits = cfg_scale * conditional_logits + (1.0 - cfg_scale) * unconditional_logits
                 codebook_logits[:actual_batch_size] = cfg_logits
 
+            # Replace NaN/inf then clamp to prevent extreme values (e.g. from CFG) causing NaN in softmax
+            print("codebook_logits stats before nan_to_num")
+            print(f"min: {codebook_logits.min()}, max: {codebook_logits.max()}, mean: {codebook_logits.mean()}, std: {codebook_logits.std()}")
+            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
+
             for item_idx in unfinished_items:
                 codebook_logits[item_idx, self.audio_eos_id] = float('-inf')
             for item_idx in finished_items:
@@ -985,6 +991,9 @@ class EasyMagpieTTSModel(ModelPT):
             si = idx * self.num_all_tokens_per_codebook
             ei = si + self.num_all_tokens_per_codebook
             codebook_logits = all_code_logits_t[:, si:ei]  # (B, num_tokens_per_codebook)
+            # Replace NaN/inf then clamp to prevent extreme values causing NaN in softmax
+            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
             for item_idx in unfinished_items:
                 codebook_logits[item_idx, self.audio_eos_id] = float('-inf')
             for item_idx in finished_items:
@@ -1016,6 +1025,9 @@ class EasyMagpieTTSModel(ModelPT):
             si = idx * self.phoneme_vocab_size
             ei = si + self.phoneme_vocab_size
             codebook_logits = all_code_logits_t[:, si:ei]  # (B, num_tokens_per_codebook)
+            # Replace NaN/inf then clamp to prevent extreme values causing NaN in softmax
+            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
             codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0]  # (B, topk)
             indices_to_remove = codebook_logits < codebook_logits_topk[:, -1].unsqueeze(
                 -1
@@ -3456,7 +3468,12 @@ class EasyMagpieTTSModel(ModelPT):
             device = text.device
 
             # Generate until all items are finished or max steps reached
+            print("Generation started")
+            gen_step = 0
             while not state.finished.all() and len(state.all_predictions) < max_decoder_steps:
+                gen_step += 1
+                if gen_step % 10 == 0:
+                    print(f"Generation step {gen_step} ")
                 # Gather the correct text token for each batch item based on text_tokens_seen
                 # Items in context phase will have their token ignored by streaming_step
                 positions = state.text_tokens_seen.clamp(max=text.size(1) - 1)
