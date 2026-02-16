@@ -454,6 +454,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
         self.decoder.set_input_embeddings(self.text_embedding)
+        # self.decoder.float()
 
         # Task embedding for multi-mode training
         # Each mode has a unique task embedding that is prepended to the context
@@ -2169,7 +2170,7 @@ class EasyMagpieTTSModel(ModelPT):
                 temperature=0.7,
                 topk=80,
                 use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR,
-                use_cfg=True,
+                use_cfg=self.cfg.get('inference_use_cfg_in_val', True),
                 cfg_scale=2.5
             )
 
