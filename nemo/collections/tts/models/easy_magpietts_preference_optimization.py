@@ -173,7 +173,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         lang_key = lang_key if lang_key else "en"
         if lang_key not in self._normalizer_cache:
             logging.info(f"Creating normalizer for language: {lang_key}")
-            self._normalizer_cache[lang_key] = Normalizer(input_case="cased", lang=lang_key)
+            try:
+                self._normalizer_cache[lang_key] = Normalizer(input_case="cased", lang=lang_key)
+            except Exception as e:
+                logging.warning(f"Failed to create normalizer for language: {lang_key}. Error: {e}")
+                self._normalizer_cache[lang_key] = None
         return self._normalizer_cache[lang_key]
 
     def _get_per_token_logps(self, logits: torch.Tensor, labels: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
@@ -240,11 +244,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             )
 
         if 'context_audio_codes' in batch_repeated and 'context_audio_codes_lens' in batch_repeated:
-            context_codes = batch_repeated['context_audio_codes']
-            context_lens = batch_repeated['context_audio_codes_lens']
+            context_codes = batch_repeated['context_audio_codes'].clone()
+            context_lens = batch_repeated['context_audio_codes_lens'].clone()
 
-            target_codes = batch_repeated['audio_codes']
-            target_lens = batch_repeated['audio_codes_lens']
+            target_codes = batch_repeated['audio_codes'].clone()
+            target_lens = batch_repeated['audio_codes_lens'].clone()
 
             # For items where context_lens < 3, fall back to target_codes/target_lens
             # This is for items with text context

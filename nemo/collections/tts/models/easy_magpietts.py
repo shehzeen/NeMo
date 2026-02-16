@@ -2165,7 +2165,7 @@ class EasyMagpieTTSModel(ModelPT):
         if self.run_val_inference:
             infer_output = self.infer_batch(
                 batch,
-                max_decoder_steps=220,
+                max_decoder_steps=300,
                 temperature=0.7,
                 topk=80,
                 use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR,
