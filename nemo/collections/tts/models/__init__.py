@@ -15,6 +15,7 @@
 from nemo.collections.tts.models.aligner import AlignerModel
 from nemo.collections.tts.models.audio_codec import AudioCodecModel
 from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
+from nemo.collections.tts.models.easy_magpietts_preference_optimization import EasyMagpieTTSModelOnlinePO
 from nemo.collections.tts.models.fastpitch import FastPitchModel
 from nemo.collections.tts.models.fastpitch_ssl import FastPitchModel_SSL
 from nemo.collections.tts.models.hifigan import HifiGanModel
@@ -48,6 +49,7 @@ __all__ = [
     "RadTTSModel",
     "MagpieTTSModel",
     "EasyMagpieTTSModel",
+    "EasyMagpieTTSModelOnlinePO",
     "MagpieTTSModelOfflinePODataGen",
     "MagpieTTSModelOfflinePO",
     "MagpieTTSModelOnlinePO",

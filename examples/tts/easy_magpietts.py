@@ -14,9 +14,9 @@
 
 import lightning.pytorch as pl
 import torch.multiprocessing as mp
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
-from nemo.collections.tts.models import EasyMagpieTTSModel
+from nemo.collections.tts.models import EasyMagpieTTSModel, EasyMagpieTTSModelOnlinePO
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
@@ -42,15 +42,25 @@ def main(cfg):
     trainer.callbacks.append(pl.callbacks.LearningRateMonitor(logging_interval='step', log_weight_decay=True))
     exp_manager(trainer, cfg.get("exp_manager", None))
 
-    model = EasyMagpieTTSModel(cfg=cfg.model, trainer=trainer)
+    mode = cfg.get('mode', 'train')
+    if mode == 'train':
+        model = EasyMagpieTTSModel(cfg=cfg.model, trainer=trainer)
+    elif mode == 'onlinepo_train':
+        model_cfg = cfg.model
+        with open_dict(model_cfg):
+            model_cfg.reference_model_ckpt_path = cfg.init_from_ptl_ckpt
+        model = EasyMagpieTTSModelOnlinePO(cfg=model_cfg, trainer=trainer)
+    elif mode == 'test':
+        model = EasyMagpieTTSModel(cfg=cfg.model, trainer=trainer)
+    else:
+        raise NotImplementedError(f"Only train, onlinepo_train and test modes are supported. Got {mode}")
+
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
 
-    if cfg.get('mode', 'train') == 'train':
+    if mode in ['train', 'onlinepo_train']:
         trainer.fit(model)
-    elif cfg.get('mode', 'train') == 'test':
+    elif mode == 'test':
         trainer.test(model)
-    else:
-        raise NotImplementedError(f"Only train and test modes are supported. Got {cfg.mode}")
 
 
 if __name__ == '__main__':

@@ -454,6 +454,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
         self.decoder.set_input_embeddings(self.text_embedding)
+        # self.decoder.float()
 
         # Task embedding for multi-mode training
         # Each mode has a unique task embedding that is prepended to the context
@@ -718,6 +719,14 @@ class EasyMagpieTTSModel(ModelPT):
             # Pass the modified integer token IDs
             if self._codec_converter is not None:
                 codes = self._codec_converter.convert_new_to_original(audio_tokens=codes, audio_lens=codes_len)
+            if codes_len.min() < 4:
+                # Pad the codes with 0s to make the minimum length 4
+                # codes is (B, C, T)
+                codes = torch.nn.functional.pad(input=codes, pad=(0, 4 - codes_len.min()), value=0)
+                # Updates all lens less than 4 to 4
+                codes_len = torch.where(codes_len < 4, torch.ones_like(codes_len) * 4, codes_len)
+                codes = codes[:,:,:codes_len.max()]
+
             audio, audio_len = self._codec_model.decode(tokens=codes, tokens_len=codes_len)
             # audio: (B, T)
             # audio_len: (B,)
@@ -934,6 +943,12 @@ class EasyMagpieTTSModel(ModelPT):
                 cfg_logits = cfg_scale * conditional_logits + (1.0 - cfg_scale) * unconditional_logits
                 codebook_logits[:actual_batch_size] = cfg_logits
 
+            # Replace NaN/inf then clamp to prevent extreme values (e.g. from CFG) causing NaN in softmax
+            # print("codebook_logits stats before nan_to_num")
+            # print(f"min: {codebook_logits.min()}, max: {codebook_logits.max()}, mean: {codebook_logits.mean()}, std: {codebook_logits.std()}")
+            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
+
             for item_idx in unfinished_items:
                 codebook_logits[item_idx, self.audio_eos_id] = float('-inf')
             for item_idx in finished_items:
@@ -985,6 +1000,9 @@ class EasyMagpieTTSModel(ModelPT):
             si = idx * self.num_all_tokens_per_codebook
             ei = si + self.num_all_tokens_per_codebook
             codebook_logits = all_code_logits_t[:, si:ei]  # (B, num_tokens_per_codebook)
+            # Replace NaN/inf then clamp to prevent extreme values causing NaN in softmax
+            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
             for item_idx in unfinished_items:
                 codebook_logits[item_idx, self.audio_eos_id] = float('-inf')
             for item_idx in finished_items:
@@ -1016,6 +1034,9 @@ class EasyMagpieTTSModel(ModelPT):
             si = idx * self.phoneme_vocab_size
             ei = si + self.phoneme_vocab_size
             codebook_logits = all_code_logits_t[:, si:ei]  # (B, num_tokens_per_codebook)
+            # Replace NaN/inf then clamp to prevent extreme values causing NaN in softmax
+            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
             codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0]  # (B, topk)
             indices_to_remove = codebook_logits < codebook_logits_topk[:, -1].unsqueeze(
                 -1
@@ -2145,11 +2166,11 @@ class EasyMagpieTTSModel(ModelPT):
         if self.run_val_inference:
             infer_output = self.infer_batch(
                 batch,
-                max_decoder_steps=220,
+                max_decoder_steps=300,
                 temperature=0.7,
                 topk=80,
                 use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR,
-                use_cfg=True,
+                use_cfg=self.cfg.get('inference_use_cfg_in_val', True),
                 cfg_scale=2.5
             )
 
@@ -2610,6 +2631,7 @@ class EasyMagpieTTSModel(ModelPT):
         gt_phoneme_tokens_lens: Optional[torch.Tensor] = None,
         gt_audio_codes: Optional[torch.Tensor] = None,
         gt_audio_codes_lens: Optional[torch.Tensor] = None,
+        use_inference_mode: bool = True,
     ) -> StreamingState:
         """
         Initialize streaming TTS inference state.
@@ -2655,7 +2677,8 @@ class EasyMagpieTTSModel(ModelPT):
         Returns:
             StreamingState: Initial state for streaming inference.
         """
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             batch_size = context_audio_codes.size(0)
             device = context_audio_codes.device
 
@@ -2785,6 +2808,7 @@ class EasyMagpieTTSModel(ModelPT):
         state: StreamingState,
         text_tokens: Optional[torch.Tensor] = None,
         force_dropout_text: bool = False,
+        use_inference_mode: bool = True,
     ) -> Tuple[StreamingState, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform one streaming inference step with batch support.
@@ -2827,7 +2851,8 @@ class EasyMagpieTTSModel(ModelPT):
         if state.finished.all():
             return state, None, None
 
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             device = state.device
             batch_size = state.batch_size
             streaming_speech_delay = state.training_mode.streaming_speech_delay
@@ -3200,6 +3225,7 @@ class EasyMagpieTTSModel(ModelPT):
     def streaming_finalize(
         self,
         state: StreamingState,
+        use_inference_mode: bool = True,
     ) -> StreamingFinalizeOutput:
         """
         Finalize streaming and return the complete generated audio and phoneme predictions.
@@ -3249,7 +3275,8 @@ class EasyMagpieTTSModel(ModelPT):
                 phoneme_text=phoneme_text_list,
             )
 
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             # Concatenate all predictions - each is (B, C, S), concat gives (B, C, T_total_frames)
             all_codes = torch.cat(state.all_predictions, dim=-1)  # (B, C, T_total_frames)
             total_frames = all_codes.size(-1)
@@ -3317,6 +3344,7 @@ class EasyMagpieTTSModel(ModelPT):
         phoneme_sampling_method: str = 'argmax',
         force_dropout_text: bool = False,
         use_teacher_forced: bool = False,
+        use_inference_mode: bool = True,
     ) -> InferBatchOutput:
         """
         Batch inference using streaming infrastructure.
@@ -3352,7 +3380,8 @@ class EasyMagpieTTSModel(ModelPT):
         Returns:
             InferBatchOutput containing predicted audio, codes, and RTF metrics.
         """
-        with torch.inference_mode():
+        grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
+        with grad_ctx():
             start_time = time.time()
 
             # Extract tensors from batch
@@ -3440,6 +3469,7 @@ class EasyMagpieTTSModel(ModelPT):
                 gt_phoneme_tokens_lens=gt_phoneme_tokens_lens,
                 gt_audio_codes=gt_audio_codes_for_init,
                 gt_audio_codes_lens=gt_audio_codes_lens_for_init,
+                use_inference_mode=use_inference_mode,
             )
 
             time_to_first_prediction = None
@@ -3447,7 +3477,12 @@ class EasyMagpieTTSModel(ModelPT):
             device = text.device
 
             # Generate until all items are finished or max steps reached
+            print("Generation started")
+            gen_step = 0
             while not state.finished.all() and len(state.all_predictions) < max_decoder_steps:
+                gen_step += 1
+                if gen_step % 10 == 0:
+                    print(f"Generation step {gen_step} ")
                 # Gather the correct text token for each batch item based on text_tokens_seen
                 # Items in context phase will have their token ignored by streaming_step
                 positions = state.text_tokens_seen.clamp(max=text.size(1) - 1)
@@ -3463,6 +3498,7 @@ class EasyMagpieTTSModel(ModelPT):
                     state=state,
                     text_tokens=current_tokens,
                     force_dropout_text=force_dropout_text,
+                    use_inference_mode=use_inference_mode,
                 )
 
                 # Record time to first audio prediction
@@ -3472,7 +3508,7 @@ class EasyMagpieTTSModel(ModelPT):
             tts_generation_time = time.time() - generation_start_time
 
             # Finalize and decode audio
-            finalize_output = self.streaming_finalize(state)
+            finalize_output = self.streaming_finalize(state, use_inference_mode=use_inference_mode)
 
             end_time = time.time()
             total_time = end_time - start_time
