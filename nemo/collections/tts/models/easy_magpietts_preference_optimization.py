@@ -16,7 +16,7 @@ import copy
 import os
 import random
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -136,9 +136,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.best_cer_threshold = self.cfg.get('best_cer_threshold', 1.0)
         self.worst_cer_threshold = self.cfg.get('worst_cer_threshold', 1.0)
 
+        if self.trainer is not None and str(self.trainer.precision) in ("32", "32-true"):
+            self.decoder.float()
+
     def _get_trainable_module_groups(self) -> Dict[str, List[torch.nn.Parameter]]:
-        """Return a dict mapping module-group name → list of trainable parameters.
-        Used for per-module gradient / weight diagnostics."""
+        """Return a dict mapping module-group name → list of trainable parameters."""
         modules_to_exclude = {
             '_speaker_verification_model', '_codec_model', '_eval_asr_model',
             '_eval_speaker_verification_model', '_reference_model',
@@ -155,82 +157,38 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     @torch.no_grad()
     def _compute_grad_and_weight_metrics(self) -> Dict[str, float]:
-        """Compute per-module and global gradient / weight statistics."""
+        """Compute per-module grad_norm, weight_norm, and global aggregates."""
         module_groups = self._get_trainable_module_groups()
         metrics: Dict[str, float] = {}
-
-        all_grad_norms = []
-        all_weight_norms = []
-        total_params = 0
-        zero_grad_params = 0
-        nan_grad_params = 0
-        none_grad_params = 0  # params where p.grad is None
+        all_grad_norms, all_weight_norms = [], []
 
         for group_name, params in module_groups.items():
-            grad_norms = []
-            weight_norms = []
-            n_params_total = len(params)
-            n_params_with_grad = 0
-            n_params_none_grad = 0
+            grad_norms, weight_norms = [], []
             for p in params:
-                w_norm = p.data.norm(2).item()
-                weight_norms.append(w_norm)
+                weight_norms.append(p.data.norm(2).item())
                 if p.grad is not None:
-                    g_norm = p.grad.data.norm(2).item()
-                    grad_norms.append(g_norm)
-                    total_params += 1
-                    n_params_with_grad += 1
-                    if g_norm == 0.0:
-                        zero_grad_params += 1
-                    if not np.isfinite(g_norm):
-                        nan_grad_params += 1
-                else:
-                    none_grad_params += 1
-                    n_params_none_grad += 1
+                    grad_norms.append(p.grad.data.norm(2).item())
 
-            # Always record weight norms for every module
-            if weight_norms:
-                module_weight_norm = float(np.sqrt(sum(w**2 for w in weight_norms)))
-                metrics[f'weight_norm/{group_name}'] = module_weight_norm
-                all_weight_norms.extend(weight_norms)
+            module_weight_norm = float(np.sqrt(sum(w ** 2 for w in weight_norms)))
+            metrics[f'weight_norm/{group_name}'] = module_weight_norm
+            all_weight_norms.extend(weight_norms)
 
-            # Record grad norms (may be empty if module gets no gradients)
             if grad_norms:
-                module_grad_norm = float(np.sqrt(sum(g**2 for g in grad_norms)))
+                module_grad_norm = float(np.sqrt(sum(g ** 2 for g in grad_norms)))
                 metrics[f'grad_norm/{group_name}'] = module_grad_norm
-                metrics[f'grad_norm_mean/{group_name}'] = float(np.mean(grad_norms))
-                metrics[f'grad_norm_max/{group_name}'] = float(np.max(grad_norms))
                 all_grad_norms.extend(grad_norms)
             else:
-                # Explicitly record zero grad norm for modules with no gradients
                 metrics[f'grad_norm/{group_name}'] = 0.0
-                metrics[f'grad_norm_mean/{group_name}'] = 0.0
-                metrics[f'grad_norm_max/{group_name}'] = 0.0
 
-            # Per-module param counts
-            metrics[f'grad_diagnostics/params_with_grad/{group_name}'] = float(n_params_with_grad)
-            metrics[f'grad_diagnostics/params_none_grad/{group_name}'] = float(n_params_none_grad)
-            metrics[f'grad_diagnostics/params_total/{group_name}'] = float(n_params_total)
-
-        # Global aggregates
         if all_grad_norms:
-            metrics['grad_norm/global'] = float(np.sqrt(sum(g**2 for g in all_grad_norms)))
-            metrics['grad_norm_mean/global'] = float(np.mean(all_grad_norms))
-            metrics['grad_norm_max/global'] = float(np.max(all_grad_norms))
+            metrics['grad_norm/global'] = float(np.sqrt(sum(g ** 2 for g in all_grad_norms)))
         if all_weight_norms:
-            metrics['weight_norm/global'] = float(np.sqrt(sum(w**2 for w in all_weight_norms)))
-        metrics['grad_diagnostics/total_params_with_grad'] = float(total_params)
-        metrics['grad_diagnostics/zero_grad_params'] = float(zero_grad_params)
-        metrics['grad_diagnostics/nan_grad_params'] = float(nan_grad_params)
-        metrics['grad_diagnostics/none_grad_params'] = float(none_grad_params)
-
+            metrics['weight_norm/global'] = float(np.sqrt(sum(w ** 2 for w in all_weight_norms)))
         return metrics
 
     @torch.no_grad()
-    def _compute_weight_update_metrics(
-        self, prev_weights: Dict[int, torch.Tensor]
-    ) -> Dict[str, float]:
-        """Compute per-module weight delta norms (how much weights actually changed)."""
+    def _compute_weight_update_metrics(self, prev_weights: Dict[int, torch.Tensor]) -> Dict[str, float]:
+        """Compute per-module weight delta norms (how much weights changed after optimizer step)."""
         metrics: Dict[str, float] = {}
         module_groups = self._get_trainable_module_groups()
         all_deltas = []
@@ -239,70 +197,42 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             for p in params:
                 pid = id(p)
                 if pid in prev_weights:
-                    delta = (p.data - prev_weights[pid]).norm(2).item()
-                    deltas.append(delta)
+                    deltas.append((p.data - prev_weights[pid]).norm(2).item())
             if deltas:
-                module_delta_norm = float(np.sqrt(sum(d**2 for d in deltas)))
-                metrics[f'weight_delta/{group_name}'] = module_delta_norm
+                metrics[f'weight_delta/{group_name}'] = float(np.sqrt(sum(d ** 2 for d in deltas)))
                 all_deltas.extend(deltas)
         if all_deltas:
-            metrics['weight_delta/global'] = float(np.sqrt(sum(d**2 for d in all_deltas)))
+            metrics['weight_delta/global'] = float(np.sqrt(sum(d ** 2 for d in all_deltas)))
         return metrics
 
     @torch.no_grad()
     def _snapshot_trainable_weights(self) -> Dict[int, torch.Tensor]:
         """Take a snapshot of all trainable parameter values (by param id)."""
         snapshot = {}
-        module_groups = self._get_trainable_module_groups()
-        for params in module_groups.values():
+        for params in self._get_trainable_module_groups().values():
             for p in params:
                 snapshot[id(p)] = p.data.clone()
         return snapshot
 
     def _print_grad_weight_summary(self, metrics: Dict[str, float], step: int) -> None:
-        """Print a concise summary of gradient and weight diagnostics."""
+        """Print a compact per-module summary of grad_norm / weight_norm / weight_delta."""
         if not getattr(self.trainer, "is_global_zero", True):
             return
 
-        lines = [f"\n[grad/weight diagnostics] step={step}"]
+        lines = [f"\n[grad/weight] step={step}  "
+                 f"grad={metrics.get('grad_norm/global', 0.0):.6f}  "
+                 f"w={metrics.get('weight_norm/global', 0.0):.4f}  "
+                 f"Δw={metrics.get('weight_delta/global', 0.0):.8f}"]
 
-        # Global summary
-        lines.append(
-            f"  global grad_norm={metrics.get('grad_norm/global', 0.0):.6f}  "
-            f"weight_norm={metrics.get('weight_norm/global', 0.0):.4f}  "
-            f"weight_delta={metrics.get('weight_delta/global', 0.0):.8f}"
-        )
-        lines.append(
-            f"  zero_grad_params={int(metrics.get('grad_diagnostics/zero_grad_params', 0))} / "
-            f"{int(metrics.get('grad_diagnostics/total_params_with_grad', 0))}  "
-            f"nan_grad_params={int(metrics.get('grad_diagnostics/nan_grad_params', 0))}  "
-            f"none_grad_params={int(metrics.get('grad_diagnostics/none_grad_params', 0))}"
-        )
-
-        # Per-module summary — show ALL modules (keyed by weight_norm which is always recorded)
         module_names = sorted(
-            set(
-                k.split('/')[1]
-                for k in metrics
-                if '/' in k and k.startswith('weight_norm/') and k != 'weight_norm/global'
-            )
+            k.split('/')[1] for k in metrics
+            if k.startswith('weight_norm/') and k != 'weight_norm/global'
         )
-        if module_names:
-            lines.append("  per-module:")
-            for name in module_names:
-                gn = metrics.get(f'grad_norm/{name}', 0.0)
-                wn = metrics.get(f'weight_norm/{name}', 0.0)
-                wd = metrics.get(f'weight_delta/{name}', 0.0)
-                gm = metrics.get(f'grad_norm_max/{name}', 0.0)
-                n_with = int(metrics.get(f'grad_diagnostics/params_with_grad/{name}', 0))
-                n_none = int(metrics.get(f'grad_diagnostics/params_none_grad/{name}', 0))
-                n_total = int(metrics.get(f'grad_diagnostics/params_total/{name}', 0))
-                grad_status = "NO_GRAD" if n_with == 0 else f"{n_with}/{n_total}"
-                lines.append(
-                    f"    {name:40s}  grad_norm={gn:.6f}  grad_max={gm:.6f}  "
-                    f"weight_norm={wn:.4f}  weight_delta={wd:.8f}  "
-                    f"grad_params={grad_status}"
-                )
+        for name in module_names:
+            gn = metrics.get(f'grad_norm/{name}', 0.0)
+            wn = metrics.get(f'weight_norm/{name}', 0.0)
+            wd = metrics.get(f'weight_delta/{name}', 0.0)
+            lines.append(f"  {name:40s}  grad={gn:.6f}  w={wn:.4f}  Δw={wd:.8f}")
 
         summary = "\n".join(lines)
         print(summary)
@@ -741,8 +671,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 + pesq_reward * pesq_reward_weight
             )
             if (item_metrics['codes_len'] >= max_valid_codes_len) or (item_metrics['codes_len'] <= min_valid_codes_len):
-                # reward = 0.0
-                pass
+                item_metrics['_needs_group_min_reward'] = True
+            else:
+                item_metrics['_needs_group_min_reward'] = False
 
             item_metrics['cer_reward'] = float(cer_reward)
             item_metrics['spk_similarity_reward'] = float(spk_similarity_reward)
@@ -750,7 +681,17 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             item_metrics['reward'] = float(reward)
             batch_metrics.append(item_metrics)
 
+        # Second pass: replace rewards for items with invalid code lengths with the group minimum reward
         num_groups = len(batch['raw_texts'])
+        for group_idx in range(num_groups):
+            group_start_idx = group_idx * num_generations_per_item
+            group_end_idx = group_start_idx + num_generations_per_item
+            group_rewards = [batch_metrics[idx]['reward'] for idx in range(group_start_idx, group_end_idx)]
+            group_min_reward = min(group_rewards)
+            for idx in range(group_start_idx, group_end_idx):
+                if batch_metrics[idx]['_needs_group_min_reward']:
+                    batch_metrics[idx]['reward'] = float(group_min_reward)
+
         all_groups_mean_reward = 0.0
         all_groups_std_reward = 0.0
         group_validities = []
@@ -991,152 +932,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'used_gt_phoneme_input': float(rollout_phoneme_input_type == 'gt'),
         }
 
-    @staticmethod
-    def _trace_grad_graph(tensor, target_param_ids: set, max_depth: int = 500) -> List[str]:
-        """Walk the autograd graph from `tensor` and report whether any target param ids are found."""
-        visited = set()
-        found_params = []
-        path_info = []
-        depth_limited_count = 0
-        node_type_counts = {}  # Track node types for debugging
-        max_depth_reached = 0
-
-        def _walk(node, depth):
-            nonlocal depth_limited_count, max_depth_reached
-            if node is None or id(node) in visited:
-                return
-            if depth > max_depth:
-                depth_limited_count += 1
-                return
-            visited.add(id(node))
-            max_depth_reached = max(max_depth_reached, depth)
-
-            node_type = type(node).__name__
-            node_type_counts[node_type] = node_type_counts.get(node_type, 0) + 1
-
-            # AccumulateGrad nodes hold the .variable (leaf parameter)
-            if hasattr(node, 'variable'):
-                var = node.variable
-                pid = id(var)
-                tag = "TARGET" if pid in target_param_ids else "other"
-                found_params.append((tag, pid, var.shape, var.dtype))
-                if len(found_params) <= 20:  # cap output
-                    path_info.append(f"    depth={depth} AccumulateGrad param shape={list(var.shape)} dtype={var.dtype} [{tag}]")
-            for child_fn, _ in node.next_functions:
-                _walk(child_fn, depth + 1)
-
-        if tensor is not None and tensor.grad_fn is not None:
-            _walk(tensor.grad_fn, 0)
-
-        n_target = sum(1 for t in found_params if t[0] == "TARGET")
-        n_other = sum(1 for t in found_params if t[0] == "other")
-        summary = (
-            f"  grad_graph: visited {len(visited)} nodes, max_depth_reached={max_depth_reached}, "
-            f"depth_limited={depth_limited_count}, "
-            f"found {n_target} TARGET params, {n_other} other params"
-        )
-        # Show top node types
-        top_types = sorted(node_type_counts.items(), key=lambda x: -x[1])[:15]
-        type_str = f"  node_types (top 15): {dict(top_types)}"
-        return [summary, type_str] + path_info
-
-    def _diagnose_local_transformer_out_projections(self, loss_tensor, policy_output, advantages, step_info: str):
-        """Deep diagnostic for local_transformer_out_projections gradient flow.
-        
-        Called BEFORE backward to inspect the computation graph, and can be called
-        AFTER backward to inspect populated gradients.
-        """
-        if not getattr(self.trainer, "is_global_zero", True):
-            return
-
-        lines = [f"\n[LOCAL_TRANSFORMER_OUT_PROJ DIAGNOSTIC] {step_info}"]
-
-        # 1. Check if local_transformer_out_projections exists and has params
-        if not hasattr(self, 'local_transformer_out_projections'):
-            lines.append("  ERROR: self.local_transformer_out_projections does not exist!")
-            msg = "\n".join(lines)
-            print(msg)
-            logging.info(msg)
-            return
-
-        lt_out_projs = self.local_transformer_out_projections
-        lines.append(f"  num projection layers: {len(lt_out_projs)}")
-
-        # Collect target param ids for graph tracing
-        target_param_ids = set()
-        for proj in lt_out_projs:
-            target_param_ids.add(id(proj.weight))
-            if proj.bias is not None:
-                target_param_ids.add(id(proj.bias))
-
-        # 2. Check requires_grad, dtype, and grad on each projection layer
-        for i, proj in enumerate(lt_out_projs):
-            w = proj.weight
-            b = proj.bias if proj.bias is not None else None
-            w_rg = w.requires_grad
-            b_rg = b.requires_grad if b is not None else "N/A"
-            w_grad = "None" if w.grad is None else f"norm={w.grad.data.norm(2).item():.8f}, dtype={w.grad.dtype}"
-            b_grad = "None" if (b is None or b.grad is None) else f"norm={b.grad.data.norm(2).item():.8f}, dtype={b.grad.dtype}"
-            lines.append(
-                f"  proj[{i}] weight: requires_grad={w_rg}, dtype={w.dtype}, grad={w_grad}, "
-                f"weight_norm={w.data.norm(2).item():.6f} | "
-                f"bias: requires_grad={b_rg}, dtype={b.dtype if b is not None else 'N/A'}, grad={b_grad}"
-            )
-
-        # 3. Check the logits tensor from policy_output (shape, dtype, grad_fn)
-        lt_logits = policy_output.local_transformer_logits if policy_output is not None else None
-        if lt_logits is not None:
-            lines.append(
-                f"  local_transformer_logits: shape={list(lt_logits.shape)}, dtype={lt_logits.dtype}, "
-                f"requires_grad={lt_logits.requires_grad}, "
-                f"grad_fn={lt_logits.grad_fn}, "
-                f"is_leaf={lt_logits.is_leaf}"
-            )
-        else:
-            lines.append("  local_transformer_logits: None (USING FALLBACK logits!)")
-
-        # 4. Check the loss tensor
-        if loss_tensor is not None:
-            lines.append(
-                f"  loss: value={loss_tensor.item():.8f}, dtype={loss_tensor.dtype}, "
-                f"requires_grad={loss_tensor.requires_grad}, "
-                f"grad_fn={loss_tensor.grad_fn}"
-            )
-            # Trace the autograd graph from loss to see if out_proj params are reachable
-            lines.append("  --- Tracing autograd graph from loss ---")
-            lines.extend(self._trace_grad_graph(loss_tensor, target_param_ids))
-
-        # 5. Check advantages
-        if advantages is not None:
-            lines.append(
-                f"  advantages: mean={advantages.mean().item():.6f}, std={advantages.std().item():.6f}, "
-                f"abs_mean={advantages.abs().mean().item():.6f}, all_zero={bool((advantages == 0).all())}"
-            )
-
-        # 6. Check other modules in the local transformer path (grad status + dtype)
-        for attr_name in ['local_transformer', 'local_transformer_in_projection',
-                          'local_transformer_audio_out_projection']:
-            if hasattr(self, attr_name):
-                mod = getattr(self, attr_name)
-                params = list(mod.parameters())
-                n_with_grad = sum(1 for p in params if p.grad is not None)
-                n_total = len(params)
-                grad_norms = [p.grad.data.norm(2).item() for p in params if p.grad is not None]
-                max_grad = max(grad_norms) if grad_norms else 0.0
-                dtypes = set(str(p.dtype) for p in params)
-                lines.append(
-                    f"  {attr_name}: {n_with_grad}/{n_total} params have grad, "
-                    f"max_grad_norm={max_grad:.8f}, param_dtypes={dtypes}"
-                )
-
-        # 7. Check if torch.is_grad_enabled()
-        lines.append(f"  torch.is_grad_enabled()={torch.is_grad_enabled()}")
-        lines.append(f"  torch.is_autocast_enabled('cuda')={torch.is_autocast_enabled('cuda')}")
-
-        msg = "\n".join(lines)
-        print(msg)
-        logging.info(msg)
-
     def _run_teacher_forced_chunked_po(
         self,
         generated_codes_and_metrics: Dict,
@@ -1154,8 +949,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         accumulated_phoneme_aux_loss = torch.tensor(0.0, device=self.device)
         accumulated_kl_loss = torch.tensor(0.0, device=self.device)
         used_gt_phoneme_input = 0.0
-
-        is_first_chunk = True  # Only run deep diagnostic on first chunk to avoid spam
 
         for group_start_idx, group_end_idx in self._iter_group_ranges(num_groups, groups_per_subbatch):
             item_start_idx = group_start_idx * n_generations_per_item
@@ -1199,101 +992,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 rollout_phoneme_input_type=rollout_phoneme_input_type,
             )
 
-            # Deep diagnostic BEFORE backward (check computation graph)
-            if is_first_chunk and do_backward:
-                self._diagnose_local_transformer_out_projections(
-                    loss_tensor=chunk_outputs['loss'] * group_weight,
-                    policy_output=policy_output,
-                    advantages=advantages_sub,
-                    step_info=f"BEFORE backward, step={self.global_step}",
-                )
-
-                # --- DEFINITIVE GRADIENT CONNECTIVITY TEST ---
-                # Test 1: Check if the PO loss connects to out_proj params
-                loss_for_test = chunk_outputs['loss'] * group_weight
-                test_params = []
-                test_names = []
-                for i, proj in enumerate(self.local_transformer_out_projections):
-                    test_params.append(proj.weight)
-                    test_names.append(f"out_proj[{i}].weight")
-                try:
-                    test_grads = torch.autograd.grad(
-                        loss_for_test, test_params,
-                        retain_graph=True, allow_unused=True,
-                    )
-                    grad_test_lines = [f"\n[AUTOGRAD.GRAD TEST 1: PO loss → out_proj] step={self.global_step}"]
-                    for name, g in zip(test_names, test_grads):
-                        if g is None:
-                            grad_test_lines.append(f"  {name}: grad=None (NOT CONNECTED)")
-                        else:
-                            grad_test_lines.append(
-                                f"  {name}: grad_norm={g.norm(2).item():.8f}, dtype={g.dtype}"
-                            )
-                    grad_test_msg = "\n".join(grad_test_lines)
-                    print(grad_test_msg)
-                    logging.info(grad_test_msg)
-                except Exception as e:
-                    err_msg = f"\n[AUTOGRAD.GRAD TEST 1] ERROR: {e}"
-                    print(err_msg)
-                    logging.info(err_msg)
-
-                # Test 2: Check if a SIMPLE CE loss on local_transformer_logits connects to out_proj params
-                # This isolates whether the problem is in the GRPO formula or in the logits tensor itself
-                try:
-                    lt_logits = policy_output.local_transformer_logits
-                    dummy_targets = policy_output.audio_codes_target[:, 0, :].long()  # first codebook
-                    simple_ce_loss = torch.nn.functional.cross_entropy(
-                        lt_logits[:, :, :self.num_all_tokens_per_codebook].reshape(-1, self.num_all_tokens_per_codebook),
-                        dummy_targets.reshape(-1),
-                    )
-                    test_grads_ce = torch.autograd.grad(
-                        simple_ce_loss, [self.local_transformer_out_projections[0].weight],
-                        retain_graph=True, allow_unused=True,
-                    )
-                    g = test_grads_ce[0]
-                    if g is None:
-                        ce_msg = f"\n[AUTOGRAD.GRAD TEST 2: CE loss → out_proj[0]] grad=None (NOT CONNECTED — logits tensor is detached!)"
-                    else:
-                        ce_msg = f"\n[AUTOGRAD.GRAD TEST 2: CE loss → out_proj[0]] grad_norm={g.norm(2).item():.8f} (CONNECTED!)"
-                    print(ce_msg)
-                    logging.info(ce_msg)
-                except Exception as e:
-                    err_msg = f"\n[AUTOGRAD.GRAD TEST 2] ERROR: {e}"
-                    print(err_msg)
-                    logging.info(err_msg)
-
-                # Test 3: Check if PO loss connects to the decoder (main transformer)
-                try:
-                    decoder_param = next(self.decoder.parameters())
-                    test_grads_dec = torch.autograd.grad(
-                        loss_for_test, [decoder_param],
-                        retain_graph=True, allow_unused=True,
-                    )
-                    g = test_grads_dec[0]
-                    if g is None:
-                        dec_msg = f"\n[AUTOGRAD.GRAD TEST 3: PO loss → decoder] grad=None (NOT CONNECTED)"
-                    else:
-                        dec_msg = f"\n[AUTOGRAD.GRAD TEST 3: PO loss → decoder] grad_norm={g.norm(2).item():.8f} (CONNECTED)"
-                    print(dec_msg)
-                    logging.info(dec_msg)
-                except Exception as e:
-                    err_msg = f"\n[AUTOGRAD.GRAD TEST 3] ERROR: {e}"
-                    print(err_msg)
-                    logging.info(err_msg)
-                # --- END CONNECTIVITY TESTS ---
-
             if do_backward:
                 self.manual_backward(chunk_outputs['loss'] * group_weight)
-
-            # Deep diagnostic AFTER backward (check populated gradients)
-            if is_first_chunk and do_backward:
-                self._diagnose_local_transformer_out_projections(
-                    loss_tensor=None,
-                    policy_output=policy_output,
-                    advantages=advantages_sub,
-                    step_info=f"AFTER backward, step={self.global_step}",
-                )
-                is_first_chunk = False
 
             accumulated_loss = accumulated_loss + chunk_outputs['loss'].detach() * group_weight
             accumulated_po_loss = accumulated_po_loss + chunk_outputs['po_loss'].detach() * group_weight
@@ -1339,7 +1039,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         )
         teacher_forced_time_sec = time.perf_counter() - teacher_forced_start_time
 
-        # Compute gradient metrics BEFORE optimizer.step() clears them.
+        # Compute gradient/weight metrics BEFORE optimizer.step() clears gradients.
         grad_weight_metrics = self._compute_grad_and_weight_metrics()
 
         optimizer.step()
@@ -1353,24 +1053,13 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             else:
                 lr_schedulers.step()
 
-        # Compute weight update (delta) metrics AFTER optimizer.step().
-        weight_delta_metrics = self._compute_weight_update_metrics(prev_weights)
-        grad_weight_metrics.update(weight_delta_metrics)
+        # Compute weight delta metrics AFTER optimizer.step().
+        grad_weight_metrics.update(self._compute_weight_update_metrics(prev_weights))
 
-        # Also log advantage statistics for diagnosing flat rewards.
-        advantages = generated_codes_and_metrics['advantages']
-        grad_weight_metrics['advantages/mean'] = float(advantages.mean().item())
-        grad_weight_metrics['advantages/std'] = float(advantages.std().item())
-        grad_weight_metrics['advantages/max'] = float(advantages.max().item())
-        grad_weight_metrics['advantages/min'] = float(advantages.min().item())
-        grad_weight_metrics['advantages/abs_mean'] = float(advantages.abs().mean().item())
-        valid_frac = float(generated_codes_and_metrics['group_validities'].mean().item())
-        grad_weight_metrics['group_validity_fraction'] = valid_frac
+        # Log learning rate.
+        self.log('learning_rate', optimizer.param_groups[0]['lr'], prog_bar=False, sync_dist=True)
 
-        # Log learning rate
-        current_lr = optimizer.param_groups[0]['lr']
-        self.log('learning_rate', current_lr, prog_bar=False, sync_dist=True)
-
+        # Core training metrics.
         self.log('train_loss', po_outputs['loss'], prog_bar=True, sync_dist=True)
         self.log('train_po_loss', po_outputs['po_loss'], prog_bar=True, sync_dist=True)
         self.log('train_phoneme_aux_loss', po_outputs['phoneme_aux_loss'], prog_bar=True, sync_dist=True)
@@ -1379,30 +1068,18 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.log('train_mean_reward', generated_codes_and_metrics['mean_reward'], prog_bar=True, sync_dist=True)
         self.log('train_std_reward', generated_codes_and_metrics['std_reward'], prog_bar=True, sync_dist=True)
 
-        # Log all gradient / weight / advantage diagnostics to wandb.
+        # Gradient / weight diagnostics to wandb.
         for metric_name, metric_value in grad_weight_metrics.items():
             self.log(f'train_{metric_name}', metric_value, prog_bar=False, sync_dist=True)
 
-        # Print human-readable summary to stdout / log file.
+        # Compact summary to stdout / log file.
         self._print_grad_weight_summary(grad_weight_metrics, step=self.global_step)
 
+        # Timing metrics.
         timings = generated_codes_and_metrics.get('timings', {})
-        audio_generation_time_sec = float(timings.get('audio_generation_time_sec', 0.0))
-        audio_save_time_sec = float(timings.get('audio_save_time_sec', 0.0))
-        rewarding_time_sec = float(timings.get('rewarding_time_sec', 0.0))
-        self.log('train_audio_generation_time_sec', audio_generation_time_sec, prog_bar=False, sync_dist=True)
-        self.log('train_audio_save_time_sec', audio_save_time_sec, prog_bar=False, sync_dist=True)
-        self.log('train_rewarding_time_sec', rewarding_time_sec, prog_bar=False, sync_dist=True)
+        for tkey in ('audio_generation_time_sec', 'audio_save_time_sec', 'rewarding_time_sec'):
+            self.log(f'train_{tkey}', float(timings.get(tkey, 0.0)), prog_bar=False, sync_dist=True)
         self.log('train_teacher_forced_time_sec', teacher_forced_time_sec, prog_bar=False, sync_dist=True)
-        timing_msg = (
-            f"[training_step_timing] step={self.global_step} batch_idx={batch_idx} "
-            f"audio_gen={audio_generation_time_sec:.4f}s "
-            f"audio_save={audio_save_time_sec:.4f}s "
-            f"rewarding={rewarding_time_sec:.4f}s "
-            f"teacher_forced={teacher_forced_time_sec:.4f}s"
-        )
-        print(timing_msg)
-        logging.info(timing_msg)
 
     # def validation_step(self, batch, batch_idx):
     #     val_n_generations_per_item = self.cfg.get('val_n_generations_per_item', 1)
