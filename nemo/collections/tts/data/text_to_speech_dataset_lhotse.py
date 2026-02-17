@@ -244,7 +244,10 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                 raise ValueError(f"Invalid format in cut.supervisions[0].speaker: {speaker}")
             dataset_name = speaker.strip().split()[2].split(":")[-1]
             dataset_name_list.append(dataset_name)
-            language = cut.supervisions[0].language if cut.supervisions[0].has_custom("language") else "en"
+            if cut.has_custom("lang"):
+                language = cut.lang
+            else:
+                language = cut.supervisions[0].language if cut.supervisions[0].has_custom("language") else "en"
             language_list.append(language)
 
             # target audio or target codes
