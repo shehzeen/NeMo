@@ -132,9 +132,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         if reward_asr_model == 'whisper' and self._normalize_whisper_transcript:
             self._normalizer_cache = {}
 
+        # Entropy bonus coefficient – encourages exploration and prevents mode collapse.
+        # Set to 0.0 to disable. Typical range: 0.001–0.01.
+        self.entropy_coeff = self.cfg.get('entropy_coeff', 0.0)
+
         # Filter out poor groups for stable optimization.
         self.best_cer_threshold = self.cfg.get('best_cer_threshold', 1.0)
         self.worst_cer_threshold = self.cfg.get('worst_cer_threshold', 1.0)
+
+
 
         if self.trainer is not None and str(self.trainer.precision) in ("32", "32-true"):
             self.decoder.float()
@@ -871,6 +877,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         n_codebooks = audio_codes_target.size(1)
         total_loss = None
         total_kl = None
+        total_entropy = None
         for codebook_idx in range(n_codebooks):
             si = codebook_idx * self.num_all_tokens_per_codebook
             ei = si + self.num_all_tokens_per_codebook
@@ -881,6 +888,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             with torch.cuda.amp.autocast(enabled=False):
                 per_token_loss = -(torch.exp(per_token_logps.float() - per_token_logps.float().detach()) * advantages.float().unsqueeze(1))
                 per_token_loss = per_token_loss * group_validities.float().unsqueeze(1)
+
+            # Per-token entropy of the policy distribution (always computed for logging).
+            with torch.cuda.amp.autocast(enabled=False):
+                logits_fp32 = codebook_logits.float()
+                log_probs = logits_fp32.log_softmax(-1)          # [B, T, V]
+                probs = log_probs.exp()                           # [B, T, V]
+                per_token_entropy = -(probs * log_probs).sum(-1)  # [B, T]
+            codebook_entropy = (
+                (per_token_entropy * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
+            ).mean()
 
             if not self.reference_free and ref_logits is not None:
                 with torch.no_grad():
@@ -912,23 +929,31 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             if total_loss is None:
                 total_loss = codebook_loss
                 total_kl = codebook_kl_loss_mean
+                total_entropy = codebook_entropy
             else:
                 total_loss += codebook_loss
                 total_kl += codebook_kl_loss_mean
+                total_entropy += codebook_entropy
 
         total_po_loss = total_loss / n_codebooks
         total_kl = total_kl / n_codebooks
+        total_entropy = total_entropy / n_codebooks
 
         phoneme_aux_loss = policy_output.phoneme_loss if rollout_phoneme_input_type == 'gt' else None
         if phoneme_aux_loss is None:
             phoneme_aux_loss = torch.tensor(0.0, device=self.device)
+
+        # Subtracting entropy encourages higher entropy (more exploration / prevents mode collapse).
         total_loss = total_po_loss + self.aux_phoneme_loss_weight * phoneme_aux_loss
+        if self.entropy_coeff > 0:
+            total_loss = total_loss - self.entropy_coeff * total_entropy
 
         return {
             'loss': total_loss,
             'po_loss': total_po_loss,
             'phoneme_aux_loss': phoneme_aux_loss,
             'kl_loss': total_kl,
+            'entropy': total_entropy,
             'used_gt_phoneme_input': float(rollout_phoneme_input_type == 'gt'),
         }
 
@@ -948,6 +973,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         accumulated_po_loss = torch.tensor(0.0, device=self.device)
         accumulated_phoneme_aux_loss = torch.tensor(0.0, device=self.device)
         accumulated_kl_loss = torch.tensor(0.0, device=self.device)
+        accumulated_entropy = torch.tensor(0.0, device=self.device)
         used_gt_phoneme_input = 0.0
 
         for group_start_idx, group_end_idx in self._iter_group_ranges(num_groups, groups_per_subbatch):
@@ -1001,6 +1027,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 accumulated_phoneme_aux_loss + chunk_outputs['phoneme_aux_loss'].detach() * group_weight
             )
             accumulated_kl_loss = accumulated_kl_loss + chunk_outputs['kl_loss'].detach() * group_weight
+            accumulated_entropy = accumulated_entropy + chunk_outputs['entropy'].detach() * group_weight
             used_gt_phoneme_input = max(used_gt_phoneme_input, chunk_outputs['used_gt_phoneme_input'])
 
         return {
@@ -1008,6 +1035,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'po_loss': accumulated_po_loss,
             'phoneme_aux_loss': accumulated_phoneme_aux_loss,
             'kl_loss': accumulated_kl_loss,
+            'entropy': accumulated_entropy,
             'used_gt_phoneme_input': used_gt_phoneme_input,
         }
 
@@ -1039,7 +1067,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         )
         teacher_forced_time_sec = time.perf_counter() - teacher_forced_start_time
 
-        # Compute gradient/weight metrics BEFORE optimizer.step() clears gradients.
+        # Clip gradients to prevent catastrophic updates from outlier batches.
+        max_grad_norm = self.cfg.get('max_grad_norm', 1.0)
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in self.parameters() if p.requires_grad and p.grad is not None],
+                max_norm=max_grad_norm,
+            )
+
+        # Compute gradient/weight metrics AFTER clipping but BEFORE optimizer.step() clears them.
         grad_weight_metrics = self._compute_grad_and_weight_metrics()
 
         optimizer.step()
@@ -1064,6 +1100,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.log('train_po_loss', po_outputs['po_loss'], prog_bar=True, sync_dist=True)
         self.log('train_phoneme_aux_loss', po_outputs['phoneme_aux_loss'], prog_bar=True, sync_dist=True)
         self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_entropy', po_outputs['entropy'], prog_bar=True, sync_dist=True)
         self.log('train_used_gt_phoneme_input', po_outputs['used_gt_phoneme_input'], prog_bar=True, sync_dist=True)
         self.log('train_mean_reward', generated_codes_and_metrics['mean_reward'], prog_bar=True, sync_dist=True)
         self.log('train_std_reward', generated_codes_and_metrics['std_reward'], prog_bar=True, sync_dist=True)
