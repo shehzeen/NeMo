@@ -52,6 +52,13 @@ except (ImportError, ModuleNotFoundError):
     Normalizer = None
     PYNINI_AVAILABLE = False
 
+try:
+    from nemo.collections.tts.modules.utmosv2 import UTMOSv2Calculator
+
+    HAVE_UTMOSV2 = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_UTMOSV2 = False
+
 
 class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
     """
@@ -59,7 +66,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     Training flow:
     1. Sample multiple generations per prompt.
-    2. Compute rewards (CER/SSIM/PESQ).
+    2. Compute rewards (CER/SSIM/PESQ/UTMOSv2).
     3. Compute group-normalized advantages.
     4. Run teacher-forced policy forward on generated codes and optimize GRPO objective.
     5. Add auxiliary phoneme loss from the same forward pass with GT phoneme tokens.
@@ -118,6 +125,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             assert HAVE_TORCHAUDIO, "torchaudio is required for PESQ reward."
             self.squim_objective_model = SQUIM_OBJECTIVE.get_model()
 
+        self.use_utmos = self.cfg.get('use_utmos', False)
+        if self.use_utmos:
+            assert HAVE_UTMOSV2, (
+                "UTMOSv2 is required for the UTMOS reward but is not installed. "
+                "Install it with: pip install git+https://github.com/sarulab-speech/UTMOSv2.git@v1.2.1"
+            )
+            # Initialize on CPU; we score from saved wav files so no GPU needed.
+            self._utmos_calculator = UTMOSv2Calculator(device='cpu')
+            logging.info("UTMOSv2 calculator initialized for naturalness reward")
+
         self.loss_type = self.cfg.get('loss_type', 'grpo')
         if self.loss_type not in ['grpo', 'dr_grpo']:
             raise ValueError(
@@ -151,6 +168,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             '_speaker_verification_model', '_codec_model', '_eval_asr_model',
             '_eval_speaker_verification_model', '_reference_model',
             'whisper_model', 'whisper_processor', 'squim_objective_model',
+            '_utmos_calculator',
         }
         groups: Dict[str, List[torch.nn.Parameter]] = {}
         for name, module in self.named_children():
@@ -259,6 +277,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             '_reference_model',
             'whisper_model',
             'whisper_processor',
+            '_utmos_calculator',
             # These modules are not used by the PO loss and receive no gradients.
             # Including them would only apply weight decay, degrading their weights.
             'final_proj',
@@ -277,7 +296,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
-        keys_substrings_to_exclude = ['_reference_model']
+        keys_substrings_to_exclude = ['_reference_model', '_utmos_calculator']
         for key in list(state_dict.keys()):
             if any(substring in key for substring in keys_substrings_to_exclude):
                 del state_dict[key]
@@ -496,12 +515,13 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                     f"{item_metrics['cer_gt']:.4f}",
                     f"{item_metrics['wer_gt']:.4f}",
                     f"{item_metrics['spk_similarity']:.4f}",
+                    f"{item_metrics.get('utmos', 0.0):.4f}",
                     f"{item_metrics['reward']:.4f}",
                     f"{item_metrics.get('advantage', 0.0):.4f}",
                 ]
             )
 
-        table = self._format_text_table(headers=["item", "cer", "wer", "ssim", "reward", "advantage"], rows=rows)
+        table = self._format_text_table(headers=["item", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows)
         print(
             f"[generate_and_reward] group={group_idx} valid={is_group_valid} "
             f"mean_reward={mean_reward:.4f} std_reward={std_reward:.4f}\n"
@@ -612,10 +632,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         cer_reward_weight = self.cfg.get('cer_reward_weight', 0.5)
         ssim_reward_weight = self.cfg.get('ssim_reward_weight', 0.5)
         pesq_reward_weight = self.cfg.get('pesq_reward_weight', 0.0)
+        utmos_reward_weight = self.cfg.get('utmos_reward_weight', 0.0)
         min_valid_codes_len = self.cfg.get('min_valid_codes_len', 4)
         max_valid_codes_len = self.cfg.get(
             'max_valid_codes_len', self.max_decoder_steps * self.frame_stacking_factor - 1
         )
+
+        # UTMOSv2 reward shaping parameters (MOS scale is 1–5).
+        mean_utmos_dataset = self.cfg.get('mean_utmos_dataset', 3.5)
+        best_utmos_achievable = self.cfg.get('best_utmos_achievable', 4.5)
 
         for idx in range(predicted_audio.size(0)):
             pred_transcript = pred_transcripts[idx]
@@ -641,6 +666,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             else:
                 pesq_hyp = 0.0
 
+            # UTMOSv2 naturalness score (predicted MOS on 1–5 scale).
+            if self.use_utmos:
+                try:
+                    utmos_score = float(self._utmos_calculator(predicted_audio_paths[idx]))
+                except Exception as e:
+                    logging.warning(f"UTMOSv2 scoring failed for {predicted_audio_paths[idx]}: {e}")
+                    utmos_score = 0.0
+            else:
+                utmos_score = 0.0
+
             item_metrics = {
                 'cer_gt': float(cer_gt),
                 'wer_gt': float(wer_gt),
@@ -650,6 +685,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 'gt_transcript': gt_transcript,
                 'codes_len': int(predicted_codes_lens[idx].item()),
                 'pesq': float(pesq_hyp),
+                'utmos': float(utmos_score),
             }
 
             best_ssim_achievable = self.cfg.get('best_ssim_achievable', 0.9)
@@ -671,10 +707,27 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 spk_similarity_reward = 0.5 - 0.5 * (mean_ssim_dataset - item_ssim) / max(mean_ssim_dataset, 1e-8)
 
             pesq_reward = item_metrics['pesq'] / 4.5 if use_pesq else 0.0
+
+            # UTMOSv2 reward: piecewise linear shaping centered on mean_utmos_dataset,
+            # analogous to the CER and SSIM reward shaping.
+            if self.use_utmos:
+                item_utmos = max(min(utmos_score, best_utmos_achievable), 1.0)
+                if item_utmos >= mean_utmos_dataset:
+                    utmos_reward = 0.5 + 0.5 * (item_utmos - mean_utmos_dataset) / max(
+                        best_utmos_achievable - mean_utmos_dataset, 1e-8
+                    )
+                else:
+                    utmos_reward = 0.5 - 0.5 * (mean_utmos_dataset - item_utmos) / max(
+                        mean_utmos_dataset - 1.0, 1e-8
+                    )
+            else:
+                utmos_reward = 0.0
+
             reward = (
                 cer_reward * cer_reward_weight
                 + spk_similarity_reward * ssim_reward_weight
                 + pesq_reward * pesq_reward_weight
+                + utmos_reward * utmos_reward_weight
             )
             if (item_metrics['codes_len'] >= max_valid_codes_len) or (item_metrics['codes_len'] <= min_valid_codes_len):
                 item_metrics['_needs_group_min_reward'] = True
@@ -684,6 +737,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             item_metrics['cer_reward'] = float(cer_reward)
             item_metrics['spk_similarity_reward'] = float(spk_similarity_reward)
             item_metrics['pesq_reward'] = float(pesq_reward)
+            item_metrics['utmos_reward'] = float(utmos_reward)
             item_metrics['reward'] = float(reward)
             batch_metrics.append(item_metrics)
 
