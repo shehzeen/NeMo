@@ -898,6 +898,7 @@ class NemotronHTopkRouter(nn.Module):
 
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, config.hidden_size), dtype=torch.float32))
         self.register_buffer("e_score_correction_bias", torch.zeros(self.n_routed_experts, dtype=torch.float32))
+        nn.init.normal_(self.weight, mean=0.0, std=config.initializer_range)
 
     @torch.no_grad()
     def get_topk_indices(self, scores: torch.Tensor) -> torch.Tensor:
@@ -1176,13 +1177,11 @@ class NemotronHModel(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, std=self.config.initializer_range)
 
-        # Rescale prenorm residual weights for better training stability
-        # Following GPT-2 paper: scale by 1/sqrt(2 * n_layer)
+        # Rescale residual-branch output projections for better training stability.
+        # Apply 1/sqrt(num_hidden_layers) to Mamba, attention, and MLP/MoE branches.
         if self.config.rescale_prenorm_residual:
             for name, p in self.named_parameters():
-                if "out_proj.weight" in name:
-                    # Special Scaled Initialization for residual projections
-                    # Scale by 1/sqrt(num_hidden_layers)
+                if any(k in name for k in ("out_proj.weight", "o_proj.weight", "down_proj.weight")):
                     with torch.no_grad():
                         p /= math.sqrt(self.config.num_hidden_layers)
 
