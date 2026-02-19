@@ -60,6 +60,13 @@ from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging
 
+try:
+    from nemo.collections.tts.modules.utmosv2 import UTMOSv2Calculator
+
+    HAVE_UTMOSV2 = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_UTMOSV2 = False
+
 
 @dataclass
 class TrainingMode:
@@ -560,6 +567,16 @@ class EasyMagpieTTSModel(ModelPT):
             self._eval_speaker_verification_model.freeze()
             logging.info("Eval models loaded successfully.")
 
+        # UTMOSv2 naturalness scoring for validation (optional)
+        self.use_utmos = cfg.get('use_utmos', False)
+        if self.use_utmos:
+            assert HAVE_UTMOSV2, (
+                "UTMOSv2 is required for UTMOS scoring but is not installed. "
+                "Install it with: pip install git+https://github.com/sarulab-speech/UTMOSv2.git@v1.2.1"
+            )
+            self._utmos_calculator = UTMOSv2Calculator(device='cpu')
+            logging.info("UTMOSv2 calculator initialized for validation naturalness scoring")
+
     def setup_optimizer_param_groups(self):
         """
         Override to exclude frozen eval/inference-only models from the optimizer.
@@ -573,6 +590,7 @@ class EasyMagpieTTSModel(ModelPT):
             '_eval_speaker_verification_model',
             'whisper_model',
             'whisper_processor',
+            '_utmos_calculator',
         }
 
         # Collect parameter ids to exclude
@@ -608,6 +626,7 @@ class EasyMagpieTTSModel(ModelPT):
             '_eval_speaker_verification_model',
             'whisper_model',
             'whisper_processor',
+            '_utmos_calculator',
         ]
         for key in list(state_dict.keys()):
             if any([substring in key for substring in keys_substrings_to_exclude]):
@@ -631,6 +650,7 @@ class EasyMagpieTTSModel(ModelPT):
                 '_eval_speaker_verification_model',
                 'whisper_model',
                 'whisper_processor',
+                '_utmos_calculator',
             ]:
                 continue
             if any(param.numel() > 0 for param in child.parameters()):
@@ -2280,7 +2300,7 @@ class EasyMagpieTTSModel(ModelPT):
                         pred_embeddings = ctx_embeddings = None
 
                     # Compute per-sample metrics for successful cases only
-                    batch_cer, batch_wer, batch_ssim = [], [], []
+                    batch_cer, batch_wer, batch_ssim, batch_utmos = [], [], [], []
                     for idx in range(len(predicted_audio_paths)):
                         if pred_transcripts[idx] is None:
                             continue
@@ -2295,9 +2315,20 @@ class EasyMagpieTTSModel(ModelPT):
                             ctx_emb = ctx_embeddings[idx].cpu().float().numpy()
                             ssim = float(np.dot(pred_emb, ctx_emb) / (np.linalg.norm(pred_emb) * np.linalg.norm(ctx_emb)))
                             batch_ssim.append(ssim)
+
+                        # UTMOSv2 naturalness score (MOS on 1-5 scale)
+                        utmos_score = None
+                        if getattr(self, 'use_utmos', False) and hasattr(self, '_utmos_calculator'):
+                            try:
+                                utmos_score = float(self._utmos_calculator(predicted_audio_paths[idx]))
+                                batch_utmos.append(utmos_score)
+                            except Exception as e:
+                                logging.warning(f"UTMOSv2 scoring failed for {predicted_audio_paths[idx]}: {e}")
+
+                        utmos_str = f", UTMOS={utmos_score:.4f}" if utmos_score is not None else ""
                         logging.info(
                             f"[Val] rank{self.global_rank}_batch{batch_idx}_idx{idx}: "
-                            f"CER={cer:.4f}, WER={wer:.4f} | GT: '{gt_transcript[:50]}...' | Pred: '{pred_transcripts[idx][:50]}...'"
+                            f"CER={cer:.4f}, WER={wer:.4f}{utmos_str} | GT: '{gt_transcript[:50]}...' | Pred: '{pred_transcripts[idx][:50]}...'"
                         )
 
                         # Save per-audio metrics JSON file alongside the audio file
@@ -2306,6 +2337,7 @@ class EasyMagpieTTSModel(ModelPT):
                                 'cer': float(cer),
                                 'wer': float(wer),
                                 'ssim': ssim,
+                                'utmos': utmos_score,
                                 'gt_transcript': gt_transcript,
                                 'pred_transcript': pred_transcripts[idx],
                                 'audio_path': predicted_audio_paths[idx],
@@ -2330,6 +2362,8 @@ class EasyMagpieTTSModel(ModelPT):
                             val_output['val_wer_list'] = batch_wer
                     if batch_ssim:
                         val_output['val_ssim'] = torch.tensor(np.mean(batch_ssim), device=self.device)
+                    if batch_utmos:
+                        val_output['val_utmos'] = torch.tensor(np.mean(batch_utmos), device=self.device)
 
         self.validation_step_outputs.append(val_output)
 
@@ -2362,6 +2396,7 @@ class EasyMagpieTTSModel(ModelPT):
             val_cer = collect_if_exists("val_cer")
             val_wer = collect_if_exists("val_wer")
             val_ssim = collect_if_exists("val_ssim")
+            val_utmos = collect_if_exists("val_utmos")
 
             if val_cer is not None:
                 self.log("val/cer", val_cer, prog_bar=True, sync_dist=True)
@@ -2369,6 +2404,8 @@ class EasyMagpieTTSModel(ModelPT):
                 self.log("val/wer", val_wer, prog_bar=True, sync_dist=True)
             if val_ssim is not None:
                 self.log("val/ssim", val_ssim, prog_bar=True, sync_dist=True)
+            if val_utmos is not None:
+                self.log("val/utmos", val_utmos, prog_bar=True, sync_dist=True)
 
             if self.use_multilingual_asr:
                 lang_cer = {}
