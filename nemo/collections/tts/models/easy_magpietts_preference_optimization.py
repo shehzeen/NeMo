@@ -33,6 +33,7 @@ from nemo.collections.tts.parts.utils.helpers import (
     get_speaker_embeddings_from_filepaths,
     process_text_for_cer,
     transcribe_with_whisper,
+    transcribe_with_whisper_from_filepaths,
 )
 from nemo.utils import logging
 
@@ -595,25 +596,31 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             pred_transcripts = [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
         else:
             self.whisper_model.to(self.device)
-            pred_transcripts = []
+            pred_transcripts = [""] * len(predicted_audio_paths)
             langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
+            language_groups = {}
             for item_idx, audio_path in enumerate(predicted_audio_paths):
                 language = langs[item_idx] if item_idx < len(langs) else 'en'
+                language_groups.setdefault(language, []).append((item_idx, audio_path))
+
+            for language, grouped_items in language_groups.items():
                 normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
-                print(f"Transcribing audio {audio_path} with language {language}")
-                transcript = transcribe_with_whisper(
-                    audio_filepath=audio_path,
+                grouped_paths = [audio_path for _, audio_path in grouped_items]
+                group_transcripts = transcribe_with_whisper_from_filepaths(
+                    audio_filepaths=grouped_paths,
                     language=language,
                     whisper_processor=self.whisper_processor,
                     whisper_model=self.whisper_model,
                     device=self.device,
                     normalizer=normalizer,
                 )
-                print(f"Pred Transcript: {transcript}")
-                print(f"Normalized Pred Text: {process_text_for_cer(transcript)}")
-                print(f"Raw Text: {batch_repeated['raw_texts'][item_idx]}")
-                print("--------------------------------")
-                pred_transcripts.append(process_text_for_cer(transcript))
+                for (item_idx, audio_path), transcript in zip(grouped_items, group_transcripts):
+                    print(f"Transcribing audio {audio_path} with language {language}")
+                    pred_transcripts[item_idx] = process_text_for_cer(transcript)
+                    print(f"Pred Transcript: {transcript}")
+                    print(f"Normalized Pred Text: {pred_transcripts[item_idx]}")
+                    print(f"Raw Text: {batch_repeated['raw_texts'][item_idx]}")
+                    print("--------------------------------")
 
         reference_audio_paths = self._get_reference_audio_paths(batch_repeated)
         try:

@@ -55,6 +55,7 @@ from nemo.collections.tts.parts.utils.helpers import (
     get_speaker_embeddings_from_filepaths,
     process_text_for_cer,
     transcribe_with_whisper,
+    transcribe_with_whisper_from_filepaths,
 )
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
@@ -2262,21 +2263,34 @@ class EasyMagpieTTSModel(ModelPT):
                         languages = batch.get('languages', None)
                         if languages is None:
                             languages = ['en'] * len(predicted_audio_paths)
-                        pred_transcripts = []
-                        for audio_path, lang in zip(predicted_audio_paths, languages):
-                            try:
-                                transcript = transcribe_with_whisper(
-                                    audio_path,
-                                    lang,
-                                    self.whisper_processor,
-                                    self.whisper_model,
-                                    self.device,
-                                    normalizer=None,
-                                )
-                                pred_transcripts.append(process_text_for_cer(transcript))
-                            except Exception as e:
-                                logging.warning(f"Val ASR transcription failed for {audio_path}: {e}")
-                                pred_transcripts.append(None)
+                        try:
+                            transcripts = transcribe_with_whisper_from_filepaths(
+                                audio_filepaths=predicted_audio_paths,
+                                language=languages,
+                                whisper_processor=self.whisper_processor,
+                                whisper_model=self.whisper_model,
+                                device=self.device,
+                                normalizer=None,
+                            )
+                            pred_transcripts = [process_text_for_cer(transcript) for transcript in transcripts]
+                        except Exception as e:
+                            logging.warning(f"Val batched ASR transcription failed, falling back to per-file mode: {e}")
+                            pred_transcripts = []
+                            for item_idx, audio_path in enumerate(predicted_audio_paths):
+                                lang = languages[item_idx] if item_idx < len(languages) else 'en'
+                                try:
+                                    transcript = transcribe_with_whisper(
+                                        audio_path,
+                                        lang,
+                                        self.whisper_processor,
+                                        self.whisper_model,
+                                        self.device,
+                                        normalizer=None,
+                                    )
+                                    pred_transcripts.append(process_text_for_cer(transcript))
+                                except Exception as inner_e:
+                                    logging.warning(f"Val ASR transcription failed for {audio_path}: {inner_e}")
+                                    pred_transcripts.append(None)
                     else:
                         pred_transcripts = self._eval_asr_model.transcribe(
                             predicted_audio_paths,
