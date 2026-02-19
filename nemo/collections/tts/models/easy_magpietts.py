@@ -376,6 +376,7 @@ class EasyMagpieTTSModel(ModelPT):
         self.phoneme_corruption_batch_prob = cfg.get('phoneme_corruption_batch_prob', 0.0)
         self.phoneme_corruption_timestep_ratio = cfg.get('phoneme_corruption_timestep_ratio', 0.0)
         self.phoneme_corruption_unk_mode_prob = cfg.get('phoneme_corruption_unk_mode_prob', 0.5)
+        self.phoneme_loss_weight = cfg.get('phoneme_loss_weight', 1.0)
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
@@ -1980,7 +1981,7 @@ class EasyMagpieTTSModel(ModelPT):
             else:
                 phoneme_loss = torch.tensor(0.0, device=logits.device)
 
-            loss = loss + phoneme_loss
+            loss = loss + self.phoneme_loss_weight * phoneme_loss
 
         return ProcessBatchOutput(
             loss=loss,
