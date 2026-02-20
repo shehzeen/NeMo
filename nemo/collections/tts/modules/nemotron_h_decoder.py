@@ -63,11 +63,19 @@ except ImportError:
     CAUSAL_CONV1D_AVAILABLE = False
 
 try:
-    from flash_attn import flash_attn_func
+    from transformers.utils.import_utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
-    FLASH_ATTN_AVAILABLE = True
+    if is_flash_attn_2_available():
+        from transformers.modeling_flash_attention_utils import _flash_attention_forward
+
+        FLASH_ATTN_AVAILABLE = True
+    else:
+        _flash_attention_forward = None
+        FLASH_ATTN_AVAILABLE = False
 except ImportError:
-    flash_attn_func = None
+    is_flash_attn_2_available = None
+    is_flash_attn_greater_or_equal_2_10 = None
+    _flash_attention_forward = None
     FLASH_ATTN_AVAILABLE = False
 
 
@@ -858,6 +866,101 @@ class NemotronHAttention(nn.Module):
         return attn_output, None, past_key_value
 
 
+class NemotronHFlashAttention2(NemotronHAttention):
+    """
+    FlashAttention2 path for NemotronH attention.
+
+    Falls back to eager/SDPA attention if flash-attn is not installed.
+    """
+
+    def __init__(self, config: NemotronHConfig, layer_idx: int):
+        super().__init__(config=config, layer_idx=layer_idx)
+        self._flash_attn_uses_top_left_mask = (
+            not is_flash_attn_greater_or_equal_2_10() if is_flash_attn_greater_or_equal_2_10 is not None else True
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[HybridMambaAttentionDynamicCache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if not FLASH_ATTN_AVAILABLE or _flash_attention_forward is None:
+            return super().forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
+
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        # Query is [B, T, H, D] for flash-attn helper.
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+        # Keep key/value as [B, H_kv, T, D] while updating cache.
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        if past_key_value is not None:
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
+
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            elif hasattr(self.config, "_pre_quantization_dtype"):
+                target_dtype = self.config._pre_quantization_dtype
+            else:
+                target_dtype = self.q_proj.weight.dtype
+
+            query_states = query_states.to(target_dtype)
+            key_states = key_states.to(target_dtype)
+            value_states = value_states.to(target_dtype)
+
+        # Convert key/value to [B, T, H, D] for flash-attn helper.
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
+            sliding_window=getattr(self.config, "sliding_window", None),
+            is_causal=self.is_causal,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        )
+
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim).contiguous()
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
+
+
+NEMOTRONH_ATTENTION_CLASSES = {
+    "eager": NemotronHAttention,
+    "sdpa": NemotronHAttention,
+    "flash_attention_2": NemotronHFlashAttention2,
+}
+
+
 class NemotronHMLP(nn.Module):
     """MLP layer for NemotronH."""
 
@@ -1082,7 +1185,15 @@ class NemotronHBlock(nn.Module):
         if self.block_type == "mamba":
             self.mixer = NemotronHMamba2Mixer(config, layer_idx=layer_idx)
         elif self.block_type == "attention":
-            self.mixer = NemotronHAttention(config, layer_idx=layer_idx)
+            attn_impl = config._attn_implementation
+            if attn_impl == "flash_attention_2" and not FLASH_ATTN_AVAILABLE:
+                logging.warning(
+                    "NemotronH requested _attn_implementation='flash_attention_2' but flash-attn is unavailable. "
+                    "Falling back to sdpa."
+                )
+                attn_impl = "sdpa"
+            attn_cls = NEMOTRONH_ATTENTION_CLASSES.get(attn_impl, NemotronHAttention)
+            self.mixer = attn_cls(config, layer_idx=layer_idx)
         elif self.block_type == "mlp":
             self.mixer = NemotronHMLP(config, layer_idx=layer_idx)
         elif self.block_type == "moe":
@@ -1119,7 +1230,12 @@ class NemotronHBlock(nn.Module):
         if self.block_type == "mamba":
             hidden_states = self.mixer(hidden_states, cache_params=cache_params, cache_position=cache_position)
         elif self.block_type == "attention":
-            hidden_states = self.mixer(hidden_states, cache_position=cache_position, past_key_value=cache_params)
+            hidden_states = self.mixer(
+                hidden_states,
+                attention_mask=attention_mask,
+                cache_position=cache_position,
+                past_key_value=cache_params,
+            )
             hidden_states = hidden_states[0]
         elif self.block_type in ("mlp", "moe"):
             hidden_states = self.mixer(hidden_states)
@@ -1284,6 +1400,11 @@ class NemotronHModel(nn.Module):
 
     def _create_causal_mask(self, attention_mask, input_tensor, cache_position):
         """Create causal attention mask."""
+        if self.config._attn_implementation == "flash_attention_2":
+            if attention_mask is not None and torch.any(attention_mask == 0):
+                return attention_mask
+            return None
+
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]

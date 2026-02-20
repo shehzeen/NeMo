@@ -377,6 +377,8 @@ class EasyMagpieTTSModel(ModelPT):
         self.phoneme_corruption_timestep_ratio = cfg.get('phoneme_corruption_timestep_ratio', 0.0)
         self.phoneme_corruption_unk_mode_prob = cfg.get('phoneme_corruption_unk_mode_prob', 0.5)
         self.phoneme_loss_weight = cfg.get('phoneme_loss_weight', 1.0)
+        self.parallel_codebook_loss_scale = cfg.get('parallel_codebook_loss_scale', 1.0)
+        self.local_transformer_loss_scale = cfg.get('local_transformer_loss_scale', 1.0)
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
@@ -1942,7 +1944,7 @@ class EasyMagpieTTSModel(ModelPT):
 
         # Compute codebook loss
         codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
-        loss = codebook_loss
+        loss = self.parallel_codebook_loss_scale * codebook_loss
 
         # Compute local transformer loss if applicable
         local_transformer_loss = None
@@ -1955,8 +1957,7 @@ class EasyMagpieTTSModel(ModelPT):
             local_transformer_loss, _ = self.compute_loss(
                 local_transformer_logits, audio_codes_target, audio_codes_lens_target
             )
-            local_transformer_loss_scale = self.cfg.get('local_transformer_loss_scale', 1.0)
-            loss = loss + local_transformer_loss_scale * local_transformer_loss
+            loss = loss + self.local_transformer_loss_scale * local_transformer_loss
 
         # Compute phoneme loss if applicable
         phoneme_loss = None
@@ -2167,7 +2168,7 @@ class EasyMagpieTTSModel(ModelPT):
         if self.run_val_inference:
             infer_output = self.infer_batch(
                 batch,
-                max_decoder_steps=300,
+                max_decoder_steps=330,
                 temperature=0.7,
                 topk=80,
                 use_local_transformer_for_inference=self.local_transformer_type == LocalTransformerType.AR,
