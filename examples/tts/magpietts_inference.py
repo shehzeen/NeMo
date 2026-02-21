@@ -545,7 +545,7 @@ def main():
         # Use longform steps if any text appears long (will be checked in runner)
         max_decoder_steps = args.longform_max_decoder_steps
     elif args.is_decoder_only_model:
-        max_decoder_steps = 220
+        max_decoder_steps = 300
     else:  # 'never'
         max_decoder_steps = 440
     model_inference_parameters = {}
