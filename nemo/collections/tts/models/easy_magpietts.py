@@ -3556,6 +3556,131 @@ class EasyMagpieTTSModel(ModelPT):
                 phoneme_prediction_start_idx=state.phoneme_prediction_start_idx.clone() if ib_phoneme_tokens is not None else None,
             )
 
+    @staticmethod
+    def _load_audio_for_inference(audio_path: str, target_sample_rate: int) -> torch.Tensor:
+        """
+        Load context audio and resample if needed.
+        Returns tensor of shape (1, num_samples).
+        """
+        audio, sr = sf.read(audio_path, dtype='float32')
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+        if sr != target_sample_rate:
+            import librosa
+
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sample_rate)
+        return torch.from_numpy(audio).unsqueeze(0)
+
+    @staticmethod
+    def _adjust_audio_to_duration_for_inference(
+        audio: torch.Tensor,
+        sample_rate: int,
+        target_duration: float,
+        codec_model_samples_per_frame: int,
+    ) -> torch.Tensor:
+        """
+        Match the same duration-alignment logic used in magpietts_streaming_inference.py.
+        """
+        num_codec_frames = int(target_duration * sample_rate / codec_model_samples_per_frame)
+        target_num_samples = num_codec_frames * codec_model_samples_per_frame
+        current_num_samples = audio.size(1)
+
+        if current_num_samples >= target_num_samples:
+            audio = audio[:, :target_num_samples]
+        else:
+            num_repeats = int(np.ceil(target_num_samples / current_num_samples))
+            audio_repeated = audio.repeat(1, num_repeats)
+            audio = audio_repeated[:, :target_num_samples]
+        return audio
+
+    def do_tts(
+        self,
+        transcript: str,
+        context_audio_file_path: Optional[str] = None,
+        context_text: str = "[NO TEXT CONTEXT]",
+        main_tokenizer_name: Optional[str] = None,
+        context_audio_duration: float = 5.0,
+        use_cfg: bool = True,
+        cfg_scale: float = 2.5,
+        use_local_transformer: bool = True,
+        temperature: float = 0.7,
+        topk: int = 80,
+        max_steps: int = 330,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generate speech from transcript using EasyMagpie inference with optional context text/audio.
+        """
+        if transcript is None or transcript.strip() == "":
+            raise ValueError("`transcript` must be a non-empty string.")
+
+        device = next(self.parameters()).device
+        transcript = transcript.strip()
+        context_text = (context_text or "[NO TEXT CONTEXT]").strip()
+
+        if main_tokenizer_name is None:
+            # Match model init behavior: default to first configured tokenizer.
+            main_tokenizer_name = list(self.cfg.text_tokenizers.keys())[0]
+        if main_tokenizer_name not in self.tokenizer.tokenizers:
+            raise ValueError(
+                f"Unknown main_tokenizer_name='{main_tokenizer_name}'. "
+                f"Available tokenizers: {list(self.tokenizer.tokenizers.keys())}"
+            )
+
+        text_tokens = self.tokenizer.encode(transcript, tokenizer_name=main_tokenizer_name) + [self.eos_id]
+        text = torch.tensor([text_tokens], dtype=torch.long, device=device)
+        text_lens = torch.tensor([len(text_tokens)], dtype=torch.long, device=device)
+
+        context_text_tokens = self.tokenizer.encode(context_text, tokenizer_name=self.text_conditioning_tokenizer_name)
+        context_text_tensor = torch.tensor([context_text_tokens], dtype=torch.long, device=device)
+        context_text_lens = torch.tensor([len(context_text_tokens)], dtype=torch.long, device=device)
+
+        if context_audio_file_path is not None and context_audio_file_path.strip() != "":
+            context_audio = self._load_audio_for_inference(context_audio_file_path, self.sample_rate)
+            context_audio = self._adjust_audio_to_duration_for_inference(
+                context_audio,
+                self.sample_rate,
+                context_audio_duration,
+                self.codec_model_samples_per_frame,
+            )
+            context_audio = context_audio.to(device)
+            context_audio_lens = torch.tensor([context_audio.size(1)], dtype=torch.long, device=device)
+            with torch.inference_mode():
+                context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
+        else:
+            context_audio_codes = torch.zeros(
+                1,
+                self.data_num_audio_codebooks,
+                0,
+                dtype=torch.long,
+                device=device,
+            )
+            context_audio_codes_lens = torch.zeros(1, dtype=torch.long, device=device)
+
+        batch = {
+            'text': text,
+            'text_lens': text_lens,
+            'context_text_tokens': context_text_tensor,
+            'context_text_tokens_lens': context_text_lens,
+            'context_audio_codes': context_audio_codes,
+            'context_audio_codes_lens': context_audio_codes_lens,
+        }
+
+        with torch.inference_mode():
+            output = self.infer_batch(
+                batch=batch,
+                max_decoder_steps=max_steps,
+                temperature=temperature,
+                topk=topk,
+                use_cfg=use_cfg,
+                cfg_scale=cfg_scale,
+                use_local_transformer_for_inference=use_local_transformer,
+                phoneme_input_type='pred',
+                phoneme_sampling_method='argmax',
+                use_teacher_forced=False,
+                use_inference_mode=True,
+            )
+        return output.predicted_audio, output.predicted_audio_lens
+
     @classmethod
     def list_available_models(cls) -> List[PretrainedModelInfo]:
         return []

@@ -558,7 +558,7 @@ def main(argv=None):
         if args.longform_mode in {'always', 'auto'}:
             model_inference_parameters["max_decoder_steps"] = args.longform_max_decoder_steps
         elif args.is_decoder_only_model:
-            model_inference_parameters["max_decoder_steps"] = 220
+            model_inference_parameters["max_decoder_steps"] = 300
         else:
             model_inference_parameters["max_decoder_steps"] = 440
 
