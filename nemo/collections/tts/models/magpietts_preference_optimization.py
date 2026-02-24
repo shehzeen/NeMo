@@ -30,6 +30,7 @@ from nemo.collections.tts.parts.utils.helpers import (
     get_speaker_embeddings_from_filepaths,
     process_text_for_cer,
     transcribe_with_whisper,
+    transcribe_with_whisper_from_filepaths,
 )
 from nemo.utils import logging
 
@@ -661,14 +662,25 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
                 )
                 pred_transcripts = [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
             elif self.cfg.get("reward_asr_model", "nemo") == "whisper":
-                pred_transcripts = []
+                pred_transcripts = [""] * len(predicted_audio_paths)
+                language_groups = {}
                 for item_idx, audio_path in enumerate(predicted_audio_paths):
                     language = batch_repeated['languages'][item_idx]
+                    language_groups.setdefault(language, []).append((item_idx, audio_path))
+
+                for language, grouped_items in language_groups.items():
                     normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
-                    transcript = transcribe_with_whisper(
-                        audio_path, language, self.whisper_processor, self.whisper_model, self.device, normalizer
+                    grouped_paths = [audio_path for _, audio_path in grouped_items]
+                    grouped_transcripts = transcribe_with_whisper_from_filepaths(
+                        audio_filepaths=grouped_paths,
+                        language=language,
+                        whisper_processor=self.whisper_processor,
+                        whisper_model=self.whisper_model,
+                        device=self.device,
+                        normalizer=normalizer,
                     )
-                    pred_transcripts.append(transcript)
+                    for (item_idx, _), transcript in zip(grouped_items, grouped_transcripts):
+                        pred_transcripts[item_idx] = transcript
                 pred_transcripts = [process_text_for_cer(transcript) for transcript in pred_transcripts]
             else:
                 # Address CodeQL issue where pred_transcripts might be undefined for future code

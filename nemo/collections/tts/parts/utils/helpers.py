@@ -43,8 +43,12 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import string
+import os
+import shutil
+import tempfile
 from enum import Enum
-from typing import Any, Optional, Tuple
+from collections import defaultdict
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import librosa
 import matplotlib.pylab as plt
@@ -845,19 +849,69 @@ def transcribe_with_whisper(
     """
     Transcribe audio with Whisper. Optionally normalize the transcript if a normalizer is provided.
     """
-    speech_array, sampling_rate = librosa.load(audio_filepath, sr=16000)
-    forced_decoder_ids = (
-        whisper_processor.get_decoder_prompt_ids(language=language, task="transcribe") if language else None
+    transcripts = transcribe_with_whisper_from_filepaths(
+        audio_filepaths=[audio_filepath],
+        language=language,
+        whisper_processor=whisper_processor,
+        whisper_model=whisper_model,
+        device=device,
+        normalizer=normalizer,
     )
-    inputs = whisper_processor(speech_array, sampling_rate=sampling_rate, return_tensors="pt").input_features
-    inputs = inputs.to(device)
-    with torch.no_grad():
-        predicted_ids = whisper_model.generate(inputs, forced_decoder_ids=forced_decoder_ids)
-    transcription = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)
-    result = transcription[0]
-    if normalizer is not None:
-        result = normalizer.normalize(result)
-    return result
+    return transcripts[0]
+
+
+def transcribe_with_whisper_from_filepaths(
+    audio_filepaths: Sequence[str],
+    language: Optional[Union[str, Sequence[Optional[str]]]],
+    whisper_processor: Any,
+    whisper_model: Any,
+    device: torch.device,
+    normalizer: Optional[Any] = None,
+    batch_size: Optional[int] = None,
+) -> List[str]:
+    """
+    Transcribe a list of audios with Whisper using batched inference.
+    Supports a single language for all files or per-file language values.
+    """
+    if len(audio_filepaths) == 0:
+        return []
+
+    if batch_size is None:
+        batch_size = len(audio_filepaths)
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be > 0, but received: {batch_size}")
+
+    if isinstance(language, str) or language is None:
+        languages = [language] * len(audio_filepaths)
+    else:
+        if len(language) != len(audio_filepaths):
+            raise ValueError(
+                f"Expected len(language) == len(audio_filepaths), but got {len(language)} and {len(audio_filepaths)}."
+            )
+        languages = list(language)
+
+    grouped_indices = defaultdict(list)
+    for idx, lang in enumerate(languages):
+        grouped_indices[lang].append(idx)
+
+    transcripts = [""] * len(audio_filepaths)
+    for lang, indices in grouped_indices.items():
+        forced_decoder_ids = whisper_processor.get_decoder_prompt_ids(language=lang, task="transcribe") if lang else None
+        for start_idx in range(0, len(indices), batch_size):
+            batch_indices = indices[start_idx : start_idx + batch_size]
+            speech_arrays = [librosa.load(audio_filepaths[idx], sr=16000)[0] for idx in batch_indices]
+            inputs = whisper_processor(
+                speech_arrays, sampling_rate=16000, return_tensors="pt", padding=True
+            ).input_features.to(device)
+            with torch.no_grad():
+                predicted_ids = whisper_model.generate(inputs, forced_decoder_ids=forced_decoder_ids)
+            batch_transcripts = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)
+            if normalizer is not None:
+                batch_transcripts = [normalizer.normalize(text) for text in batch_transcripts]
+            for idx, text in zip(batch_indices, batch_transcripts):
+                transcripts[idx] = text
+
+    return transcripts
 
 
 def get_speaker_embeddings_from_filepaths(filepaths, speaker_verification_model, device):
@@ -883,3 +937,59 @@ def get_speaker_embeddings_from_filepaths(filepaths, speaker_verification_model,
     )
 
     return speaker_embeddings
+
+
+def compute_utmos_scores_from_filepaths(
+    audio_filepaths: Sequence[str],
+    utmos_calculator: Any,
+    batch_size: int = 8,
+    num_workers: int = 0,
+    rank_tag: str = "0",
+) -> List[float]:
+    """
+    Compute UTMOS scores in strict batched mode for a list of wav filepaths.
+
+    Expected UTMOS batch output schema (per item):
+      {'file_path': <path>, 'predicted_mos': <float>}
+    """
+    if len(audio_filepaths) == 0:
+        return []
+
+    batch_size = max(int(batch_size), 1)
+    num_workers = max(int(num_workers), 0)
+    scores = [0.0] * len(audio_filepaths)
+
+    with tempfile.TemporaryDirectory(prefix=f"utmos_rank{rank_tag}_") as tmp_dir:
+        file_to_idx = {}
+        for idx, src_path in enumerate(audio_filepaths):
+            tmp_name = f"{idx:06d}.wav"
+            tmp_path = os.path.join(tmp_dir, tmp_name)
+            try:
+                os.symlink(src_path, tmp_path)
+            except OSError:
+                try:
+                    os.link(src_path, tmp_path)
+                except OSError:
+                    shutil.copy2(src_path, tmp_path)
+            file_to_idx[tmp_name] = idx
+
+        batch_results = utmos_calculator.process_directory(tmp_dir, batch_size=batch_size, num_workers=num_workers)
+        if not isinstance(batch_results, list):
+            raise RuntimeError(f"Unexpected UTMOSv2 output type: {type(batch_results)}")
+
+        for item in batch_results:
+            if not isinstance(item, dict):
+                raise RuntimeError(f"Unexpected UTMOSv2 batch item type: {type(item)}")
+            if 'file_path' not in item or 'predicted_mos' not in item:
+                raise RuntimeError(
+                    "Unexpected UTMOSv2 batch item schema. Expected keys: 'file_path' and 'predicted_mos'. "
+                    f"Got keys: {list(item.keys())}"
+                )
+            idx = file_to_idx.get(os.path.basename(str(item['file_path'])))
+            if idx is None:
+                raise RuntimeError(
+                    f"UTMOSv2 returned unknown file path '{item['file_path']}' that does not map to this batch."
+                )
+            scores[idx] = float(item['predicted_mos'])
+
+    return scores

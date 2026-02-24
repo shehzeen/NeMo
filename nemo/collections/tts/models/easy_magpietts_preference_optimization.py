@@ -29,10 +29,11 @@ from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
 from nemo.collections.tts.parts.utils.helpers import (
+    compute_utmos_scores_from_filepaths,
     get_mask_from_lengths,
     get_speaker_embeddings_from_filepaths,
     process_text_for_cer,
-    transcribe_with_whisper,
+    transcribe_with_whisper_from_filepaths,
 )
 from nemo.utils import logging
 
@@ -52,6 +53,13 @@ except (ImportError, ModuleNotFoundError):
     Normalizer = None
     PYNINI_AVAILABLE = False
 
+try:
+    from nemo.collections.tts.modules.utmosv2 import UTMOSv2Calculator
+
+    HAVE_UTMOSV2 = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_UTMOSV2 = False
+
 
 class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
     """
@@ -59,7 +67,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     Training flow:
     1. Sample multiple generations per prompt.
-    2. Compute rewards (CER/SSIM/PESQ).
+    2. Compute rewards (CER/SSIM/PESQ/UTMOSv2).
     3. Compute group-normalized advantages.
     4. Run teacher-forced policy forward on generated codes and optimize GRPO objective.
     5. Add auxiliary phoneme loss from the same forward pass with GT phoneme tokens.
@@ -118,6 +126,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             assert HAVE_TORCHAUDIO, "torchaudio is required for PESQ reward."
             self.squim_objective_model = SQUIM_OBJECTIVE.get_model()
 
+        self.use_utmos = self.cfg.get('use_utmos', False)
+        if self.use_utmos:
+            assert HAVE_UTMOSV2, (
+                "UTMOSv2 is required for the UTMOS reward but is not installed. "
+                "Install it with: pip install git+https://github.com/sarulab-speech/UTMOSv2.git@v1.2.1"
+            )
+            # Initialize on CPU; we score from saved wav files so no GPU needed.
+            self._utmos_calculator = UTMOSv2Calculator(device='cpu')
+            logging.info("UTMOSv2 calculator initialized for naturalness reward")
+
         self.loss_type = self.cfg.get('loss_type', 'grpo')
         if self.loss_type not in ['grpo', 'dr_grpo']:
             raise ValueError(
@@ -151,6 +169,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             '_speaker_verification_model', '_codec_model', '_eval_asr_model',
             '_eval_speaker_verification_model', '_reference_model',
             'whisper_model', 'whisper_processor', 'squim_objective_model',
+            '_utmos_calculator',
         }
         groups: Dict[str, List[torch.nn.Parameter]] = {}
         for name, module in self.named_children():
@@ -259,6 +278,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             '_reference_model',
             'whisper_model',
             'whisper_processor',
+            '_utmos_calculator',
             # These modules are not used by the PO loss and receive no gradients.
             # Including them would only apply weight decay, degrading their weights.
             'final_proj',
@@ -277,7 +297,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
-        keys_substrings_to_exclude = ['_reference_model']
+        keys_substrings_to_exclude = ['_reference_model', '_utmos_calculator']
         for key in list(state_dict.keys()):
             if any(substring in key for substring in keys_substrings_to_exclude):
                 del state_dict[key]
@@ -496,16 +516,84 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                     f"{item_metrics['cer_gt']:.4f}",
                     f"{item_metrics['wer_gt']:.4f}",
                     f"{item_metrics['spk_similarity']:.4f}",
+                    f"{item_metrics.get('utmos', 0.0):.4f}",
                     f"{item_metrics['reward']:.4f}",
                     f"{item_metrics.get('advantage', 0.0):.4f}",
                 ]
             )
 
-        table = self._format_text_table(headers=["item", "cer", "wer", "ssim", "reward", "advantage"], rows=rows)
+        table = self._format_text_table(headers=["item", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows)
         print(
             f"[generate_and_reward] group={group_idx} valid={is_group_valid} "
             f"mean_reward={mean_reward:.4f} std_reward={std_reward:.4f}\n"
             f"prompt: {prompt_text}\n{table}\n"
+        )
+
+    def _compute_pred_transcripts(self, predicted_audio_paths: List[str], batch_repeated: Dict, reward_asr_model: str) -> List[str]:
+        if reward_asr_model == 'nemo':
+            pred_transcripts = self._eval_asr_model.transcribe(
+                predicted_audio_paths,
+                batch_size=len(predicted_audio_paths),
+                override_config=TranscribeConfig(use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0),
+            )
+            return [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
+
+        self.whisper_model.to(self.device)
+        pred_transcripts = [""] * len(predicted_audio_paths)
+        langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
+        language_groups = {}
+        for item_idx, audio_path in enumerate(predicted_audio_paths):
+            language = langs[item_idx] if item_idx < len(langs) else 'en'
+            language_groups.setdefault(language, []).append((item_idx, audio_path))
+
+        for language, grouped_items in language_groups.items():
+            normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+            grouped_paths = [audio_path for _, audio_path in grouped_items]
+            group_transcripts = transcribe_with_whisper_from_filepaths(
+                audio_filepaths=grouped_paths,
+                language=language,
+                whisper_processor=self.whisper_processor,
+                whisper_model=self.whisper_model,
+                device=self.device,
+                normalizer=normalizer,
+            )
+            for (item_idx, _), transcript in zip(grouped_items, group_transcripts):
+                pred_transcripts[item_idx] = process_text_for_cer(transcript)
+        return pred_transcripts
+
+    def _compute_speaker_embeddings_parallel(
+        self, predicted_audio_paths: List[str], batch: Dict, num_generations_per_item: int
+    ):
+        reference_audio_paths = self._get_reference_audio_paths(batch)
+        pred_speaker_embeddings = get_speaker_embeddings_from_filepaths(
+            predicted_audio_paths, self._eval_speaker_verification_model, self.device
+        )
+        gt_speaker_embeddings = get_speaker_embeddings_from_filepaths(
+            reference_audio_paths, self._eval_speaker_verification_model, self.device
+        )
+        if num_generations_per_item > 1:
+            gt_speaker_embeddings = gt_speaker_embeddings.repeat_interleave(num_generations_per_item, dim=0)
+
+        if gt_speaker_embeddings.size(0) != pred_speaker_embeddings.size(0):
+            raise RuntimeError(
+                f"Speaker embedding size mismatch. GT={gt_speaker_embeddings.size(0)}, "
+                f"Pred={pred_speaker_embeddings.size(0)}."
+            )
+        return pred_speaker_embeddings, gt_speaker_embeddings
+
+    def _compute_utmos_scores_batched(self, predicted_audio_paths: List[str]) -> List[float]:
+        if not self.use_utmos:
+            return [0.0] * len(predicted_audio_paths)
+        if len(predicted_audio_paths) == 0:
+            return []
+        utmos_batch_size = max(int(self.cfg.get('utmos_batch_size', len(predicted_audio_paths))), 1)
+        utmos_num_workers = max(int(self.cfg.get('utmos_num_workers', 0)), 0)
+        return compute_utmos_scores_from_filepaths(
+            audio_filepaths=predicted_audio_paths,
+            utmos_calculator=self._utmos_calculator,
+            batch_size=utmos_batch_size,
+            num_workers=utmos_num_workers,
+            rank_tag=str(self.global_rank),
         )
 
     def generate_and_reward(
@@ -566,56 +654,30 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         audio_durations = [int(predicted_audio_lens[idx].item()) / self.output_sample_rate for idx in range(predicted_audio.size(0))]
 
         rewarding_start_time = time.perf_counter()
-        if reward_asr_model == 'nemo':
-            pred_transcripts = self._eval_asr_model.transcribe(
-                predicted_audio_paths,
-                batch_size=len(predicted_audio_paths),
-                override_config=TranscribeConfig(use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0),
-            )
-            pred_transcripts = [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
-        else:
-            self.whisper_model.to(self.device)
-            pred_transcripts = []
-            langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
-            for item_idx, audio_path in enumerate(predicted_audio_paths):
-                language = langs[item_idx] if item_idx < len(langs) else 'en'
-                normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
-                print(f"Transcribing audio {audio_path} with language {language}")
-                transcript = transcribe_with_whisper(
-                    audio_filepath=audio_path,
-                    language=language,
-                    whisper_processor=self.whisper_processor,
-                    whisper_model=self.whisper_model,
-                    device=self.device,
-                    normalizer=normalizer,
-                )
-                print(f"Pred Transcript: {transcript}")
-                print(f"Normalized Pred Text: {process_text_for_cer(transcript)}")
-                print(f"Raw Text: {batch_repeated['raw_texts'][item_idx]}")
-                print("--------------------------------")
-                pred_transcripts.append(process_text_for_cer(transcript))
-
-        reference_audio_paths = self._get_reference_audio_paths(batch_repeated)
+        pred_transcripts = self._compute_pred_transcripts(predicted_audio_paths, batch_repeated, reward_asr_model)
         try:
-            pred_speaker_embeddings = get_speaker_embeddings_from_filepaths(
-                predicted_audio_paths, self._eval_speaker_verification_model, self.device
-            )
-            gt_speaker_embeddings = get_speaker_embeddings_from_filepaths(
-                reference_audio_paths, self._eval_speaker_verification_model, self.device
+            pred_speaker_embeddings, gt_speaker_embeddings = self._compute_speaker_embeddings_parallel(
+                predicted_audio_paths, batch, num_generations_per_item
             )
         except Exception as e:
             logging.warning(f"Speaker-embedding reward failed. Falling back to zero SSIM reward. Error: {e}")
             pred_speaker_embeddings = None
             gt_speaker_embeddings = None
+        utmos_scores = self._compute_utmos_scores_batched(predicted_audio_paths)
 
         batch_metrics = []
         cer_reward_weight = self.cfg.get('cer_reward_weight', 0.5)
         ssim_reward_weight = self.cfg.get('ssim_reward_weight', 0.5)
         pesq_reward_weight = self.cfg.get('pesq_reward_weight', 0.0)
+        utmos_reward_weight = self.cfg.get('utmos_reward_weight', 0.0)
         min_valid_codes_len = self.cfg.get('min_valid_codes_len', 4)
         max_valid_codes_len = self.cfg.get(
             'max_valid_codes_len', self.max_decoder_steps * self.frame_stacking_factor - 1
         )
+
+        # UTMOSv2 reward shaping parameters (MOS scale is 1–5).
+        mean_utmos_dataset = self.cfg.get('mean_utmos_dataset', 3.5)
+        best_utmos_achievable = self.cfg.get('best_utmos_achievable', 4.5)
 
         for idx in range(predicted_audio.size(0)):
             pred_transcript = pred_transcripts[idx]
@@ -641,6 +703,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             else:
                 pesq_hyp = 0.0
 
+            utmos_score = utmos_scores[idx]
+
             item_metrics = {
                 'cer_gt': float(cer_gt),
                 'wer_gt': float(wer_gt),
@@ -650,6 +714,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 'gt_transcript': gt_transcript,
                 'codes_len': int(predicted_codes_lens[idx].item()),
                 'pesq': float(pesq_hyp),
+                'utmos': float(utmos_score),
             }
 
             best_ssim_achievable = self.cfg.get('best_ssim_achievable', 0.9)
@@ -671,10 +736,27 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 spk_similarity_reward = 0.5 - 0.5 * (mean_ssim_dataset - item_ssim) / max(mean_ssim_dataset, 1e-8)
 
             pesq_reward = item_metrics['pesq'] / 4.5 if use_pesq else 0.0
+
+            # UTMOSv2 reward: piecewise linear shaping centered on mean_utmos_dataset,
+            # analogous to the CER and SSIM reward shaping.
+            if self.use_utmos:
+                item_utmos = max(min(utmos_score, best_utmos_achievable), 1.0)
+                if item_utmos >= mean_utmos_dataset:
+                    utmos_reward = 0.5 + 0.5 * (item_utmos - mean_utmos_dataset) / max(
+                        best_utmos_achievable - mean_utmos_dataset, 1e-8
+                    )
+                else:
+                    utmos_reward = 0.5 - 0.5 * (mean_utmos_dataset - item_utmos) / max(
+                        mean_utmos_dataset - 1.0, 1e-8
+                    )
+            else:
+                utmos_reward = 0.0
+
             reward = (
                 cer_reward * cer_reward_weight
                 + spk_similarity_reward * ssim_reward_weight
                 + pesq_reward * pesq_reward_weight
+                + utmos_reward * utmos_reward_weight
             )
             if (item_metrics['codes_len'] >= max_valid_codes_len) or (item_metrics['codes_len'] <= min_valid_codes_len):
                 item_metrics['_needs_group_min_reward'] = True
@@ -684,6 +766,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             item_metrics['cer_reward'] = float(cer_reward)
             item_metrics['spk_similarity_reward'] = float(spk_similarity_reward)
             item_metrics['pesq_reward'] = float(pesq_reward)
+            item_metrics['utmos_reward'] = float(utmos_reward)
             item_metrics['reward'] = float(reward)
             batch_metrics.append(item_metrics)
 
