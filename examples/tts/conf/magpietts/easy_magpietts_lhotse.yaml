@@ -99,6 +99,7 @@ model:
   phoneme_corruption_batch_prob: 0.1
   phoneme_corruption_timestep_ratio: 0.15
   phoneme_corruption_unk_mode_prob: 0.5
+  phoneme_corruption_type: "repeat_skip_unk" # "repeat_skip_unk" or "complete_channel"
   
   phoneme_tokenizer:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPABPETokenizer

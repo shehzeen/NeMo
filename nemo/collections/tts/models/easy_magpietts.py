@@ -385,6 +385,7 @@ class EasyMagpieTTSModel(ModelPT):
         self.phoneme_corruption_batch_prob = cfg.get('phoneme_corruption_batch_prob', 0.0)
         self.phoneme_corruption_timestep_ratio = cfg.get('phoneme_corruption_timestep_ratio', 0.0)
         self.phoneme_corruption_unk_mode_prob = cfg.get('phoneme_corruption_unk_mode_prob', 0.5)
+        self.phoneme_corruption_type = cfg.get('phoneme_corruption_type', 'repeat_skip_unk')
         self.phoneme_loss_weight = cfg.get('phoneme_loss_weight', 1.0)
         self.parallel_codebook_loss_scale = cfg.get('parallel_codebook_loss_scale', 1.0)
         self.local_transformer_loss_scale = cfg.get('local_transformer_loss_scale', 1.0)
@@ -1847,8 +1848,8 @@ class EasyMagpieTTSModel(ModelPT):
         dropout_complete_phoneme_channel = False
         if self.phoneme_tokenizer is not None and phoneme_tokens is not None:
             # Corrupt phonemes only when text input is not dropped.
-            apply_phoneme_corruption = mode == 'train' and (not dropout_text_input) and (not dropout_conditional_input)
-            dropout_complete_phoneme_channel = dropout_conditional_input
+            apply_phoneme_corruption = mode == 'train' and (not dropout_text_input) and (not dropout_conditional_input) and self.phoneme_corruption_type == 'repeat_skip_unk'
+            dropout_complete_phoneme_channel = mode == 'train' and ( dropout_conditional_input or (self.phoneme_corruption_type == 'complete_channel' and torch.rand(1).item() < self.phoneme_corruption_batch_prob))
             (
                 phoneme_channel_embedding,
                 phoneme_channel_lens,
