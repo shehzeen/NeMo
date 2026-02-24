@@ -29,10 +29,10 @@ from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
 from nemo.collections.tts.parts.utils.helpers import (
+    compute_utmos_scores_from_filepaths,
     get_mask_from_lengths,
     get_speaker_embeddings_from_filepaths,
     process_text_for_cer,
-    transcribe_with_whisper,
     transcribe_with_whisper_from_filepaths,
 )
 from nemo.utils import logging
@@ -529,6 +529,73 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             f"prompt: {prompt_text}\n{table}\n"
         )
 
+    def _compute_pred_transcripts(self, predicted_audio_paths: List[str], batch_repeated: Dict, reward_asr_model: str) -> List[str]:
+        if reward_asr_model == 'nemo':
+            pred_transcripts = self._eval_asr_model.transcribe(
+                predicted_audio_paths,
+                batch_size=len(predicted_audio_paths),
+                override_config=TranscribeConfig(use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0),
+            )
+            return [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
+
+        self.whisper_model.to(self.device)
+        pred_transcripts = [""] * len(predicted_audio_paths)
+        langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
+        language_groups = {}
+        for item_idx, audio_path in enumerate(predicted_audio_paths):
+            language = langs[item_idx] if item_idx < len(langs) else 'en'
+            language_groups.setdefault(language, []).append((item_idx, audio_path))
+
+        for language, grouped_items in language_groups.items():
+            normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+            grouped_paths = [audio_path for _, audio_path in grouped_items]
+            group_transcripts = transcribe_with_whisper_from_filepaths(
+                audio_filepaths=grouped_paths,
+                language=language,
+                whisper_processor=self.whisper_processor,
+                whisper_model=self.whisper_model,
+                device=self.device,
+                normalizer=normalizer,
+            )
+            for (item_idx, _), transcript in zip(grouped_items, group_transcripts):
+                pred_transcripts[item_idx] = process_text_for_cer(transcript)
+        return pred_transcripts
+
+    def _compute_speaker_embeddings_parallel(
+        self, predicted_audio_paths: List[str], batch: Dict, num_generations_per_item: int
+    ):
+        reference_audio_paths = self._get_reference_audio_paths(batch)
+        pred_speaker_embeddings = get_speaker_embeddings_from_filepaths(
+            predicted_audio_paths, self._eval_speaker_verification_model, self.device
+        )
+        gt_speaker_embeddings = get_speaker_embeddings_from_filepaths(
+            reference_audio_paths, self._eval_speaker_verification_model, self.device
+        )
+        if num_generations_per_item > 1:
+            gt_speaker_embeddings = gt_speaker_embeddings.repeat_interleave(num_generations_per_item, dim=0)
+
+        if gt_speaker_embeddings.size(0) != pred_speaker_embeddings.size(0):
+            raise RuntimeError(
+                f"Speaker embedding size mismatch. GT={gt_speaker_embeddings.size(0)}, "
+                f"Pred={pred_speaker_embeddings.size(0)}."
+            )
+        return pred_speaker_embeddings, gt_speaker_embeddings
+
+    def _compute_utmos_scores_batched(self, predicted_audio_paths: List[str]) -> List[float]:
+        if not self.use_utmos:
+            return [0.0] * len(predicted_audio_paths)
+        if len(predicted_audio_paths) == 0:
+            return []
+        utmos_batch_size = max(int(self.cfg.get('utmos_batch_size', len(predicted_audio_paths))), 1)
+        utmos_num_workers = max(int(self.cfg.get('utmos_num_workers', 0)), 0)
+        return compute_utmos_scores_from_filepaths(
+            audio_filepaths=predicted_audio_paths,
+            utmos_calculator=self._utmos_calculator,
+            batch_size=utmos_batch_size,
+            num_workers=utmos_num_workers,
+            rank_tag=str(self.global_rank),
+        )
+
     def generate_and_reward(
         self,
         batch: Dict,
@@ -587,53 +654,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         audio_durations = [int(predicted_audio_lens[idx].item()) / self.output_sample_rate for idx in range(predicted_audio.size(0))]
 
         rewarding_start_time = time.perf_counter()
-        if reward_asr_model == 'nemo':
-            pred_transcripts = self._eval_asr_model.transcribe(
-                predicted_audio_paths,
-                batch_size=len(predicted_audio_paths),
-                override_config=TranscribeConfig(use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0),
-            )
-            pred_transcripts = [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
-        else:
-            self.whisper_model.to(self.device)
-            pred_transcripts = [""] * len(predicted_audio_paths)
-            langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
-            language_groups = {}
-            for item_idx, audio_path in enumerate(predicted_audio_paths):
-                language = langs[item_idx] if item_idx < len(langs) else 'en'
-                language_groups.setdefault(language, []).append((item_idx, audio_path))
-
-            for language, grouped_items in language_groups.items():
-                normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
-                grouped_paths = [audio_path for _, audio_path in grouped_items]
-                group_transcripts = transcribe_with_whisper_from_filepaths(
-                    audio_filepaths=grouped_paths,
-                    language=language,
-                    whisper_processor=self.whisper_processor,
-                    whisper_model=self.whisper_model,
-                    device=self.device,
-                    normalizer=normalizer,
-                )
-                for (item_idx, audio_path), transcript in zip(grouped_items, group_transcripts):
-                    print(f"Transcribing audio {audio_path} with language {language}")
-                    pred_transcripts[item_idx] = process_text_for_cer(transcript)
-                    print(f"Pred Transcript: {transcript}")
-                    print(f"Normalized Pred Text: {pred_transcripts[item_idx]}")
-                    print(f"Raw Text: {batch_repeated['raw_texts'][item_idx]}")
-                    print("--------------------------------")
-
-        reference_audio_paths = self._get_reference_audio_paths(batch_repeated)
+        pred_transcripts = self._compute_pred_transcripts(predicted_audio_paths, batch_repeated, reward_asr_model)
         try:
-            pred_speaker_embeddings = get_speaker_embeddings_from_filepaths(
-                predicted_audio_paths, self._eval_speaker_verification_model, self.device
-            )
-            gt_speaker_embeddings = get_speaker_embeddings_from_filepaths(
-                reference_audio_paths, self._eval_speaker_verification_model, self.device
+            pred_speaker_embeddings, gt_speaker_embeddings = self._compute_speaker_embeddings_parallel(
+                predicted_audio_paths, batch, num_generations_per_item
             )
         except Exception as e:
             logging.warning(f"Speaker-embedding reward failed. Falling back to zero SSIM reward. Error: {e}")
             pred_speaker_embeddings = None
             gt_speaker_embeddings = None
+        utmos_scores = self._compute_utmos_scores_batched(predicted_audio_paths)
 
         batch_metrics = []
         cer_reward_weight = self.cfg.get('cer_reward_weight', 0.5)
@@ -673,15 +703,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             else:
                 pesq_hyp = 0.0
 
-            # UTMOSv2 naturalness score (predicted MOS on 1–5 scale).
-            if self.use_utmos:
-                try:
-                    utmos_score = float(self._utmos_calculator(predicted_audio_paths[idx]))
-                except Exception as e:
-                    logging.warning(f"UTMOSv2 scoring failed for {predicted_audio_paths[idx]}: {e}")
-                    utmos_score = 0.0
-            else:
-                utmos_score = 0.0
+            utmos_score = utmos_scores[idx]
 
             item_metrics = {
                 'cer_gt': float(cer_gt),

@@ -51,6 +51,7 @@ from nemo.collections.tts.modules.magpietts_modules import (
     cosine_schedule,
 )
 from nemo.collections.tts.parts.utils.helpers import (
+    compute_utmos_scores_from_filepaths,
     get_mask_from_lengths,
     get_speaker_embeddings_from_filepaths,
     process_text_for_cer,
@@ -2313,6 +2314,21 @@ class EasyMagpieTTSModel(ModelPT):
                         logging.warning(f"Val speaker embeddings failed: {e}")
                         pred_embeddings = ctx_embeddings = None
 
+                    utmos_scores = None
+                    if getattr(self, 'use_utmos', False) and hasattr(self, '_utmos_calculator'):
+                        utmos_batch_size = max(int(self.cfg.get('utmos_batch_size', len(predicted_audio_paths))), 1)
+                        utmos_num_workers = max(int(self.cfg.get('utmos_num_workers', 0)), 0)
+                        try:
+                            utmos_scores = compute_utmos_scores_from_filepaths(
+                                audio_filepaths=predicted_audio_paths,
+                                utmos_calculator=self._utmos_calculator,
+                                batch_size=utmos_batch_size,
+                                num_workers=utmos_num_workers,
+                                rank_tag=str(self.global_rank),
+                            )
+                        except Exception as e:
+                            raise RuntimeError(f"Val UTMOSv2 batched scoring failed: {e}") from e
+
                     # Compute per-sample metrics for successful cases only
                     batch_cer, batch_wer, batch_ssim, batch_utmos = [], [], [], []
                     for idx in range(len(predicted_audio_paths)):
@@ -2331,13 +2347,9 @@ class EasyMagpieTTSModel(ModelPT):
                             batch_ssim.append(ssim)
 
                         # UTMOSv2 naturalness score (MOS on 1-5 scale)
-                        utmos_score = None
-                        if getattr(self, 'use_utmos', False) and hasattr(self, '_utmos_calculator'):
-                            try:
-                                utmos_score = float(self._utmos_calculator(predicted_audio_paths[idx]))
-                                batch_utmos.append(utmos_score)
-                            except Exception as e:
-                                logging.warning(f"UTMOSv2 scoring failed for {predicted_audio_paths[idx]}: {e}")
+                        utmos_score = None if utmos_scores is None else float(utmos_scores[idx])
+                        if utmos_score is not None:
+                            batch_utmos.append(utmos_score)
 
                         utmos_str = f", UTMOS={utmos_score:.4f}" if utmos_score is not None else ""
                         logging.info(
