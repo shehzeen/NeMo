@@ -3670,9 +3670,11 @@ class EasyMagpieTTSModel(ModelPT):
         temperature: float = 0.7,
         topk: int = 80,
         max_steps: int = 330,
+        gt_phoneme_text: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Generate speech from transcript using EasyMagpie inference with optional context text/audio.
+        Optionally accepts ground-truth phoneme text (IPA string) for decoder-only inference.
         """
         if transcript is None or transcript.strip() == "":
             raise ValueError("`transcript` must be a non-empty string.")
@@ -3728,6 +3730,19 @@ class EasyMagpieTTSModel(ModelPT):
             'context_audio_codes': context_audio_codes,
             'context_audio_codes_lens': context_audio_codes_lens,
         }
+        phoneme_input_type = 'pred'
+        if gt_phoneme_text is not None:
+            if self.phoneme_tokenizer is None:
+                raise ValueError("Model does not have a phoneme tokenizer configured, but gt_phoneme_text was provided.")
+            gt_phoneme_text = gt_phoneme_text.strip()
+            if gt_phoneme_text == "":
+                raise ValueError("`gt_phoneme_text` must be a non-empty string when provided.")
+            gt_phoneme_tokens = self.phoneme_tokenizer.encode(gt_phoneme_text)
+            if len(gt_phoneme_tokens) == 0:
+                raise ValueError("Failed to encode `gt_phoneme_text` into phoneme tokens.")
+            batch['phoneme_tokens'] = torch.tensor([gt_phoneme_tokens], dtype=torch.long, device=device)
+            batch['phoneme_tokens_lens'] = torch.tensor([len(gt_phoneme_tokens)], dtype=torch.long, device=device)
+            phoneme_input_type = 'gt'
 
         with torch.inference_mode():
             output = self.infer_batch(
@@ -3738,7 +3753,7 @@ class EasyMagpieTTSModel(ModelPT):
                 use_cfg=use_cfg,
                 cfg_scale=cfg_scale,
                 use_local_transformer_for_inference=use_local_transformer,
-                phoneme_input_type='pred',
+                phoneme_input_type=phoneme_input_type,
                 phoneme_sampling_method='argmax',
                 use_teacher_forced=False,
                 use_inference_mode=True,
