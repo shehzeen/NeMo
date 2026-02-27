@@ -3738,6 +3738,7 @@ class EasyMagpieTTSModel(ModelPT):
             if gt_phoneme_text == "":
                 raise ValueError("`gt_phoneme_text` must be a non-empty string when provided.")
             gt_phoneme_tokens = self.phoneme_tokenizer.encode(gt_phoneme_text)
+            gt_phoneme_tokens = [self.phoneme_tokenizer.bos_token_id] + gt_phoneme_tokens + [self.phoneme_tokenizer.eos_token_id]
             if len(gt_phoneme_tokens) == 0:
                 raise ValueError("Failed to encode `gt_phoneme_text` into phoneme tokens.")
             batch['phoneme_tokens'] = torch.tensor([gt_phoneme_tokens], dtype=torch.long, device=device)
