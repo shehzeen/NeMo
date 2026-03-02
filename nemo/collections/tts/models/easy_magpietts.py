@@ -2477,6 +2477,7 @@ class EasyMagpieTTSModel(ModelPT):
             pad_context_text_to_max_duration=self.pad_context_text_to_max_duration,
             context_duration_min=self.cfg.context_duration_min,
             context_duration_max=self.cfg.context_duration_max,
+            ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
         )
         dataset.load_16khz_audio = False
         dataset.tokenizer_config = (
@@ -2506,6 +2507,7 @@ class EasyMagpieTTSModel(ModelPT):
             text_conditioning_tokenizer_name=self.text_conditioning_tokenizer_name,
             tokenizer_config=self.cfg.text_tokenizers,
             phoneme_tokenizer_config=self.cfg.get("phoneme_tokenizer", None),
+            ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
         )
 
         data_loader = get_lhotse_dataloader_from_config(

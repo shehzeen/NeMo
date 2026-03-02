@@ -151,6 +151,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         text_context_remapping: Dict[str, str] = None,
         text_context_remapping_prob: float = 0.0,
         phoneme_tokenizer_config: DictConfig = None,
+        ignore_phoneme_languages: List[str] = None,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -175,6 +176,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         self.text_context_remapping = text_context_remapping
         self.text_context_remapping_prob = text_context_remapping_prob
         self.phoneme_tokenizer_config = phoneme_tokenizer_config
+        self.ignore_phoneme_languages = ignore_phoneme_languages or []
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
         num_codec_frames = int(duration * sample_rate / self.codec_model_samples_per_frame)
@@ -436,6 +438,9 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                             f"Cut ID: {cut.id}, Text: {text_str}"
                         )
                     phoneme_text = cut.supervisions[0].ipa
+                    if language in self.ignore_phoneme_languages:
+                        # Ignore phoneme tokenization for this language
+                        phoneme_text = ""
                 else:
                     phoneme_text = text_str
                 phoneme_tokens = self.phoneme_tokenizer.encode(phoneme_text)

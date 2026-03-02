@@ -379,6 +379,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         context_duration_max: float = 10.0,
         text_context_remapping: Dict[str, str] = None,
         text_context_remapping_prob: float = 0.0,
+        ignore_phoneme_languages: List[str] = None,
     ):
         super().__init__(
             dataset_meta=dataset_meta,
@@ -412,6 +413,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         self.context_duration_max = context_duration_max
         self.text_context_remapping = text_context_remapping
         self.text_context_remapping_prob = text_context_remapping_prob
+        self.ignore_phoneme_languages = ignore_phoneme_languages or []
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
         num_codec_frames = int(duration * sample_rate / self.codec_model_samples_per_frame)
@@ -430,6 +432,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         if data.tokenizer_names is not None:
             # Pick a random tokenizer from the list of tokenizers
             tokenizer_name = random.choice(data.tokenizer_names)
+        language = data.manifest_entry.get('language', 'en')
         tokens = self.text_tokenizer.encode(text=data.text, tokenizer_name=tokenizer_name)
         tokens = tokens + [self.eos_id]  # Not adding BOS id
         tokens = torch.tensor(tokens, dtype=torch.int32)
@@ -450,6 +453,9 @@ class MagpieTTSDataset(TextToSpeechDataset):
                         f"Text: {data.text}"
                     )
                 phoneme_text = data.manifest_entry['ipa']
+                if language in self.ignore_phoneme_languages:
+                    # Ignore phoneme tokenization for this language.
+                    phoneme_text = ""
             else:
                 phoneme_text = data.text
             phoneme_tokens = self.phoneme_tokenizer.encode(phoneme_text)
@@ -628,7 +634,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         else:
             example['raw_text'] = data.text
 
-        example['language'] = data.manifest_entry.get('language', 'en')
+        example['language'] = language
 
         if "reward" in data.manifest_entry:
             example["reward"] = data.manifest_entry["reward"]
