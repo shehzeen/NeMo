@@ -145,6 +145,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.max_decoder_steps = self.cfg.get('max_decoder_steps', 220)
         self.aux_phoneme_loss_weight = self.cfg.get('aux_phoneme_loss_weight', 1.0)
         self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
+        self.batch_size_for_chunked_tf = self.cfg.get('batch_size_for_chunked_tf', 4)
 
         self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
         if reward_asr_model == 'whisper' and self._normalize_whisper_transcript:
@@ -1049,8 +1050,14 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         n_generations_per_item: int,
         do_backward: bool,
     ):
-        num_groups = len(batch_repeated['raw_texts']) // n_generations_per_item
-        groups_per_subbatch = max(self.po_groups_per_subbatch, 1)
+        total_items = len(batch_repeated['raw_texts'])
+        if self.batch_size_for_chunked_tf is not None:
+            chunk_size = self.batch_size_for_chunked_tf
+        else:
+            # Backward compatibility: preserve previous effective item-chunk size
+            # when the new explicit batch-size chunking config is not set.
+            chunk_size = max(self.po_groups_per_subbatch, 1) * max(n_generations_per_item, 1)
+        chunk_size = max(int(chunk_size), 1)
 
         accumulated_loss = torch.tensor(0.0, device=self.device)
         accumulated_po_loss = torch.tensor(0.0, device=self.device)
@@ -1059,10 +1066,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         accumulated_entropy = torch.tensor(0.0, device=self.device)
         used_gt_phoneme_input = 0.0
 
-        for group_start_idx, group_end_idx in self._iter_group_ranges(num_groups, groups_per_subbatch):
-            item_start_idx = group_start_idx * n_generations_per_item
-            item_end_idx = group_end_idx * n_generations_per_item
-            group_weight = float(group_end_idx - group_start_idx) / max(float(num_groups), 1.0)
+        for item_start_idx in range(0, total_items, chunk_size):
+            item_end_idx = min(item_start_idx + chunk_size, total_items)
+            chunk_weight = float(item_end_idx - item_start_idx) / max(float(total_items), 1.0)
 
             batch_sub = self._slice_batch_range(batch_repeated, item_start_idx, item_end_idx)
             predicted_codes_sub = predicted_codes[item_start_idx:item_end_idx]
@@ -1102,15 +1108,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             )
 
             if do_backward:
-                self.manual_backward(chunk_outputs['loss'] * group_weight)
+                self.manual_backward(chunk_outputs['loss'] * chunk_weight)
 
-            accumulated_loss = accumulated_loss + chunk_outputs['loss'].detach() * group_weight
-            accumulated_po_loss = accumulated_po_loss + chunk_outputs['po_loss'].detach() * group_weight
+            accumulated_loss = accumulated_loss + chunk_outputs['loss'].detach() * chunk_weight
+            accumulated_po_loss = accumulated_po_loss + chunk_outputs['po_loss'].detach() * chunk_weight
             accumulated_phoneme_aux_loss = (
-                accumulated_phoneme_aux_loss + chunk_outputs['phoneme_aux_loss'].detach() * group_weight
+                accumulated_phoneme_aux_loss + chunk_outputs['phoneme_aux_loss'].detach() * chunk_weight
             )
-            accumulated_kl_loss = accumulated_kl_loss + chunk_outputs['kl_loss'].detach() * group_weight
-            accumulated_entropy = accumulated_entropy + chunk_outputs['entropy'].detach() * group_weight
+            accumulated_kl_loss = accumulated_kl_loss + chunk_outputs['kl_loss'].detach() * chunk_weight
+            accumulated_entropy = accumulated_entropy + chunk_outputs['entropy'].detach() * chunk_weight
             used_gt_phoneme_input = max(used_gt_phoneme_input, chunk_outputs['used_gt_phoneme_input'])
 
         return {
@@ -1151,7 +1157,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         teacher_forced_time_sec = time.perf_counter() - teacher_forced_start_time
 
         # Clip gradients to prevent catastrophic updates from outlier batches.
-        max_grad_norm = self.cfg.get('max_grad_norm', 1.0)
+        max_grad_norm = self.cfg.get('max_grad_norm', 0.0)
         if max_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(
                 [p for p in self.parameters() if p.requires_grad and p.grad is not None],
