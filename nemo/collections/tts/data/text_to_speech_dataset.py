@@ -380,6 +380,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         text_context_remapping: Dict[str, str] = None,
         text_context_remapping_prob: float = 0.0,
         ignore_phoneme_languages: List[str] = None,
+        add_language_to_context_text: bool = False,
     ):
         super().__init__(
             dataset_meta=dataset_meta,
@@ -414,6 +415,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         self.text_context_remapping = text_context_remapping
         self.text_context_remapping_prob = text_context_remapping_prob
         self.ignore_phoneme_languages = ignore_phoneme_languages or []
+        self.add_language_to_context_text = add_language_to_context_text
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
         num_codec_frames = int(duration * sample_rate / self.codec_model_samples_per_frame)
@@ -602,7 +604,11 @@ class MagpieTTSDataset(TextToSpeechDataset):
                 context_tokens = self.text_tokenizer.encode(context_text, self.text_conditioning_tokenizer_name)
                 example['has_text_context'] = True
             else:
-                context_tokens = self.text_tokenizer.encode("[NO TEXT CONTEXT]", self.text_conditioning_tokenizer_name)
+                if self.add_language_to_context_text:
+                    context_text = f"[{language.upper()}]"
+                else:
+                    context_text = "[NO TEXT CONTEXT]"
+                context_tokens = self.text_tokenizer.encode(context_text, self.text_conditioning_tokenizer_name)
                 example['has_text_context'] = False
             if self.pad_context_text_to_max_duration:
                 _required_len = (

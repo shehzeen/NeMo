@@ -152,6 +152,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         text_context_remapping_prob: float = 0.0,
         phoneme_tokenizer_config: DictConfig = None,
         ignore_phoneme_languages: List[str] = None,
+        add_language_to_context_text: bool = False,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -177,6 +178,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         self.text_context_remapping_prob = text_context_remapping_prob
         self.phoneme_tokenizer_config = phoneme_tokenizer_config
         self.ignore_phoneme_languages = ignore_phoneme_languages or []
+        self.add_language_to_context_text = add_language_to_context_text
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
         num_codec_frames = int(duration * sample_rate / self.codec_model_samples_per_frame)
@@ -388,8 +390,13 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                     )
                     has_text_context = True
                 else:
+                    if self.add_language_to_context_text:
+                        context_text = f"[{language.upper()}]"
+                    else:
+                        context_text = "[NO TEXT CONTEXT]"
+
                     context_text_tokens = self.text_tokenizer.encode(
-                        "[NO TEXT CONTEXT]", tokenizer_name=self.text_conditioning_tokenizer_name
+                        context_text, tokenizer_name=self.text_conditioning_tokenizer_name
                     )
                     has_text_context = False
                 if self.pad_context_text_to_max_duration:

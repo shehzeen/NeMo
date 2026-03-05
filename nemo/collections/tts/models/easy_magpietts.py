@@ -402,6 +402,7 @@ class EasyMagpieTTSModel(ModelPT):
             self.phoneme_confidence_unk_threshold = cfg.get('phoneme_confidence_unk_threshold', 0.0)
 
         self.pad_context_text_to_max_duration = False
+        self.add_language_to_context_text = cfg.get('add_language_to_context_text', False)
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -2475,6 +2476,7 @@ class EasyMagpieTTSModel(ModelPT):
             use_text_conditioning_tokenizer=True,
             text_conditioning_tokenizer_name=self.text_conditioning_tokenizer_name,
             pad_context_text_to_max_duration=self.pad_context_text_to_max_duration,
+            add_language_to_context_text=self.add_language_to_context_text,
             context_duration_min=self.cfg.context_duration_min,
             context_duration_max=self.cfg.context_duration_max,
             ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
@@ -2508,6 +2510,7 @@ class EasyMagpieTTSModel(ModelPT):
             tokenizer_config=self.cfg.text_tokenizers,
             phoneme_tokenizer_config=self.cfg.get("phoneme_tokenizer", None),
             ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
+            add_language_to_context_text=self.add_language_to_context_text,
         )
 
         data_loader = get_lhotse_dataloader_from_config(
