@@ -90,10 +90,10 @@ model:
   # Multi-mode training configuration
   # The model will randomly select one of the modes for each batch during training.
   # Each mode has its own task embedding that is prepended to the context.
-  # During inference, you can specify which mode to use via the 'inference_mode' parameter.
+  # During inference, you can specify which mode to use via the derived
+  # 'inference_mode' string: "{text_input_mode}_{streaming_phonemes_delay}_{streaming_speech_delay}".
   training_modes:
-    - name: "streaming_0_1"
-      text_input_mode: "streaming" # Options: "full", "streaming"
+    - text_input_mode: "streaming" # Options: "full", "streaming"
       streaming_phonemes_delay: 0
       streaming_speech_delay: 1
   

@@ -73,7 +73,6 @@ def build_minimal_config(codecmodel_path: str) -> OmegaConf:
         # Training modes (single streaming mode)
         'training_modes': [
             {
-                'name': 'streaming_4_8',
                 'text_input_mode': 'streaming',
                 'streaming_phonemes_delay': 4,
                 'streaming_speech_delay': 8,

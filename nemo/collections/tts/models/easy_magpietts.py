@@ -76,18 +76,23 @@ class TrainingMode:
     Configuration for a training mode in multi-mode training.
 
     Attributes:
-        name: Unique identifier for this mode (e.g., "full", "streaming_4_8")
         text_input_mode: Either "full" or "streaming"
         streaming_phonemes_delay: Delay for phoneme stream (only used in streaming mode)
         streaming_speech_delay: Delay for speech stream (only used in streaming mode)
         mode_idx: Index of this mode in the list of modes (used for task embedding lookup)
     """
 
-    name: str
     text_input_mode: str
     streaming_phonemes_delay: int
     streaming_speech_delay: int
     mode_idx: int
+
+    @property
+    def name(self) -> str:
+        """Derived identifier used for inference selection and logging."""
+        return (
+            f"{self.text_input_mode}_{self.streaming_phonemes_delay}_{self.streaming_speech_delay}"
+        )
 
 
 @dataclass
@@ -335,7 +340,6 @@ class EasyMagpieTTSModel(ModelPT):
             # Create a default training mode for backward compatibility
             self.training_modes = [
                 TrainingMode(
-                    name="streaming_4_8",
                     text_input_mode="streaming",
                     streaming_phonemes_delay=4,
                     streaming_speech_delay=8,
@@ -347,7 +351,6 @@ class EasyMagpieTTSModel(ModelPT):
             self.training_modes = []
             for mode_idx, mode_cfg in enumerate(training_modes_cfg):
                 mode = TrainingMode(
-                    name=mode_cfg.name,
                     text_input_mode=mode_cfg.text_input_mode,
                     streaming_phonemes_delay=mode_cfg.get('streaming_phonemes_delay', 0),
                     streaming_speech_delay=mode_cfg.get('streaming_speech_delay', 0),
