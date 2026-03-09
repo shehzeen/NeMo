@@ -14,11 +14,13 @@
 # limitations under the License.
 
 import itertools
+import os
 import string
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import List, Optional, Union
 
+from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerBase
 
 from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import (
@@ -1180,10 +1182,6 @@ class IPABPETokenizer:
     """
 
     def __init__(self, tokenizer_path: str):
-        import os
-
-        from tokenizers import Tokenizer
-
         if os.path.isdir(tokenizer_path):
             tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
         else:
