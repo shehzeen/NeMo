@@ -21,8 +21,8 @@ layer types (Mamba, Attention, MLP, MoE) via the hybrid_override_pattern config.
 """
 
 import math
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
