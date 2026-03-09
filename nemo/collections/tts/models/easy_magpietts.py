@@ -90,9 +90,7 @@ class TrainingMode:
     @property
     def name(self) -> str:
         """Derived identifier used for inference selection and logging."""
-        return (
-            f"{self.text_input_mode}_{self.streaming_phonemes_delay}_{self.streaming_speech_delay}"
-        )
+        return f"{self.text_input_mode}_{self.streaming_phonemes_delay}_{self.streaming_speech_delay}"
 
 
 @dataclass
