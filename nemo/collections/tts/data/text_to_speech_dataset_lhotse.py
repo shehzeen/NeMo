@@ -205,10 +205,8 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
             self.eos_id = self.bos_id + 1
             self.pad_id = self.text_tokenizer.pad
 
+        # initialize the phoneme tokenizer once per dataset/worker when config is available.
         if self.phoneme_tokenizer is None and self.phoneme_tokenizer_config is not None:
-            worker_info = torch.utils.data.get_worker_info()
-            worker_id = worker_info.id if worker_info is not None else 0
-            logging.info(f"Worker {worker_id} initializing phoneme tokenizer...")
             self.phoneme_tokenizer = instantiate_phoneme_tokenizer(self.phoneme_tokenizer_config)
 
         # define list to store batched information
