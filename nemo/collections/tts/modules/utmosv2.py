@@ -77,7 +77,7 @@ class UTMOSv2Calculator:
         """
         if num_workers is None:
             num_workers = batch_size
-            
+
         with torch.inference_mode():
             # UTMOSV2 tends to launch many of OpenMP threads which overloads the machine's CPUs
             # while actually slowing down the prediction. Limit the number of threads here.

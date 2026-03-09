@@ -65,6 +65,7 @@ TITANET_SAMPLE_RATE = 16000
 # YAML / shar helpers
 # ---------------------------------------------------------------------------
 
+
 def parse_master_yaml(yaml_path: str) -> Dict[str, List[Dict]]:
     """
     Parse the master multilingual YAML and each per-language YAML it references.
@@ -90,7 +91,9 @@ def parse_master_yaml(yaml_path: str) -> Dict[str, List[Dict]]:
         for ce in child_entries:
             shar_path = ce.get("shar_path", {})
             if "context_audio" not in shar_path:
-                logging.debug(f"Skipping text-context-only entry (no context_audio): {shar_path.get('cuts', 'unknown')}")
+                logging.debug(
+                    f"Skipping text-context-only entry (no context_audio): {shar_path.get('cuts', 'unknown')}"
+                )
                 continue
             lang_to_shar_entries[lang].append(ce)
 
@@ -108,8 +111,8 @@ def expand_shar_range(pattern: str) -> List[str]:
     start_idx = int(match.group(1))
     end_idx = int(match.group(2))
     width = len(match.group(1))
-    prefix = pattern[:match.start()]
-    suffix = pattern[match.end():]
+    prefix = pattern[: match.start()]
+    suffix = pattern[match.end() :]
     return [f"{prefix}{i:0{width}d}{suffix}" for i in range(start_idx, end_idx + 1)]
 
 
@@ -127,6 +130,7 @@ def parse_speaker_field(speaker_str: str) -> Tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 # Stage 1: Build speaker embedding index
 # ---------------------------------------------------------------------------
+
 
 def discover_speakers_from_cuts(
     lang_to_shar_entries: Dict[str, List[Dict]],
@@ -183,7 +187,9 @@ def discover_speakers_from_cuts(
                 except Exception as e:
                     logging.warning(f"Error reading {cuts_file}: {e}")
 
-    logging.info(f"[Stage 1] Discovered {len(speaker_info)} unique speakers across {len(lang_to_shar_entries)} languages")
+    logging.info(
+        f"[Stage 1] Discovered {len(speaker_info)} unique speakers across {len(lang_to_shar_entries)} languages"
+    )
     for lang in sorted(lang_to_shar_entries.keys()):
         n = sum(1 for v in speaker_info.values() if v["language"] == lang)
         logging.info(f"  {lang}: {n} speakers")
@@ -210,7 +216,7 @@ def compute_speaker_embeddings(
         if not cut_metas:
             continue
         grouped_by_shar_and_shard: Dict[str, Dict[int, List]] = defaultdict(lambda: defaultdict(list))
-        for (se, shard_idx, cut_json) in cut_metas:
+        for se, shard_idx, cut_json in cut_metas:
             shar_key = json.dumps(se["shar_path"], sort_keys=True)
             grouped_by_shar_and_shard[shar_key][shard_idx].append((se, cut_json))
         speakers_needing_audio[spk] = {
@@ -228,7 +234,7 @@ def compute_speaker_embeddings(
     for spk, data in speakers_needing_audio.items():
         for shar_key, shard_map in data["grouped"].items():
             for shard_idx, items in shard_map.items():
-                for (se, cut_json) in items:
+                for se, cut_json in items:
                     cut_id = cut_json.get("id", "")
                     shar_shard_to_speakers[(shar_key, shard_idx)].append((spk, cut_id))
 
@@ -368,6 +374,7 @@ def run_stage1(
 # Stage 2: Cross-lingual speaker matching + language-balanced sampling
 # ---------------------------------------------------------------------------
 
+
 def build_crosslingual_map(speaker_embeddings: Dict[str, Dict]) -> Dict[str, Tuple[str, float]]:
     """
     For each speaker S in language L, find the closest speaker S' from a different
@@ -435,7 +442,9 @@ def sample_balanced_cuts(
     # Collect 3x the target to allow shuffling diversity
     collect_secs_per_lang = secs_per_lang * 3
 
-    logging.info(f"[Stage 2] Sampling ~{hours_per_lang:.2f}h per language ({num_langs} languages, {target_hours}h total)")
+    logging.info(
+        f"[Stage 2] Sampling ~{hours_per_lang:.2f}h per language ({num_langs} languages, {target_hours}h total)"
+    )
 
     all_matched_speakers = set(v[0] for v in cross_lingual_map.values())
 
@@ -456,8 +465,7 @@ def sample_balanced_cuts(
             if max_shards_per_dataset > 0 and len(cuts_files) > max_shards_per_dataset:
                 cuts_files = cuts_files[:max_shards_per_dataset]
                 logging.info(
-                    f"  Limiting to {max_shards_per_dataset} shards for dataset: "
-                    f"{se['shar_path']['cuts']}"
+                    f"  Limiting to {max_shards_per_dataset} shards for dataset: " f"{se['shar_path']['cuts']}"
                 )
             for cuts_file in cuts_files:
                 if lang_done:
@@ -514,6 +522,7 @@ def sample_balanced_cuts(
 # Stage 3: Extract audio + write NeMo manifest
 # ---------------------------------------------------------------------------
 
+
 def run_stage3(
     target_cuts_by_lang: Dict[str, List[Dict]],
     context_pool_by_speaker: Dict[str, List],
@@ -546,21 +555,25 @@ def run_stage3(
             matched_spk, ssim = cross_lingual_map[spk]
             ctx_pool = context_pool_by_speaker.get(matched_spk, [])
             if not ctx_pool:
-                logging.warning(f"No context pool for matched speaker {matched_spk}, skipping cut {cut_json.get('id', '')}")
+                logging.warning(
+                    f"No context pool for matched speaker {matched_spk}, skipping cut {cut_json.get('id', '')}"
+                )
                 continue
             ctx_se, ctx_shard_idx, ctx_cut_json = rng.choice(ctx_pool)
-            assignments.append({
-                "target_cut_json": cut_json,
-                "target_shar_entry": cut_json["_shar_entry"],
-                "target_shard_idx": cut_json["_shard_idx"],
-                "target_speaker": spk,
-                "context_cut_json": ctx_cut_json,
-                "context_shar_entry": ctx_se,
-                "context_shard_idx": ctx_shard_idx,
-                "context_speaker": matched_spk,
-                "ssim": ssim,
-                "lang": lang,
-            })
+            assignments.append(
+                {
+                    "target_cut_json": cut_json,
+                    "target_shar_entry": cut_json["_shar_entry"],
+                    "target_shard_idx": cut_json["_shard_idx"],
+                    "target_speaker": spk,
+                    "context_cut_json": ctx_cut_json,
+                    "context_shar_entry": ctx_se,
+                    "context_shard_idx": ctx_shard_idx,
+                    "context_speaker": matched_spk,
+                    "ssim": ssim,
+                    "lang": lang,
+                }
+            )
 
     logging.info(f"[Stage 3] Total assignments: {len(assignments)}")
 
@@ -628,7 +641,9 @@ def run_stage3(
                         safe_id = cut.id.replace("/", "_")
                         out_file = os.path.join(out_subdir, f"{safe_id}.wav")
                         sf.write(out_file, audio_np, sample_rate)
-                        out_paths_array[assign_idx] = os.path.relpath(out_file, os.path.join(output_dir, "extracted_audio"))
+                        out_paths_array[assign_idx] = os.path.relpath(
+                            out_file, os.path.join(output_dir, "extracted_audio")
+                        )
                         del needed_cut_ids[cut.id]
                         if not needed_cut_ids:
                             break
@@ -638,15 +653,23 @@ def run_stage3(
     # Extract target audio
     logging.info(f"[Stage 3] Extracting target audio from {len(target_loads)} shards...")
     _save_audio_from_shard(
-        target_loads, assignments, "target_cut_json",
-        target_audio_dir, target_audio_paths, "target_audio",
+        target_loads,
+        assignments,
+        "target_cut_json",
+        target_audio_dir,
+        target_audio_paths,
+        "target_audio",
     )
 
     # Extract context audio
     logging.info(f"[Stage 3] Extracting context audio from {len(context_loads)} shards...")
     _save_audio_from_shard(
-        context_loads, assignments, "context_cut_json",
-        context_audio_dir, context_audio_paths, "context_audio",
+        context_loads,
+        assignments,
+        "context_cut_json",
+        context_audio_dir,
+        context_audio_paths,
+        "context_audio",
     )
 
     # Write manifest
@@ -691,9 +714,11 @@ def run_stage3(
 
             # Carry over any additional custom fields from the target supervision
             _exclude_custom_keys = {
-                "target_audio_codes_path", "context_audio_codes_path",
-                "context_audio_text", "context_audio_normalized_text",
-                "context_audio_offset"
+                "target_audio_codes_path",
+                "context_audio_codes_path",
+                "context_audio_text",
+                "context_audio_normalized_text",
+                "context_audio_offset",
             }
             for k, v in t_sup.get("custom", {}).items():
                 if k not in entry and k not in _exclude_custom_keys:
@@ -709,6 +734,7 @@ def run_stage3(
 # ---------------------------------------------------------------------------
 # YAML config generation (post Stage 4)
 # ---------------------------------------------------------------------------
+
 
 def generate_yaml_config(lhotse_shar_dir: str, output_yaml_path: str, data_mount_prefix: str = "/data"):
     """
@@ -775,16 +801,18 @@ def generate_yaml_config(lhotse_shar_dir: str, output_yaml_path: str, data_mount
                     context_codes_dir, f"codes.{{{cc_first:0{cc_width}d}..{cc_last:0{cc_width}d}}}.tar"
                 )
 
-    yaml_entry = [{
-        "type": "lhotse_shar",
-        "shar_path": shar_path,
-        "weight": 1.0,
-        "tags": {
-            "task": "tts",
-            "lang": "crosslingual",
-            "tokenizer_names": ["nemotron_nano_30b"],
-        },
-    }]
+    yaml_entry = [
+        {
+            "type": "lhotse_shar",
+            "shar_path": shar_path,
+            "weight": 1.0,
+            "tags": {
+                "task": "tts",
+                "lang": "crosslingual",
+                "tokenizer_names": ["nemotron_nano_30b"],
+            },
+        }
+    ]
 
     os.makedirs(os.path.dirname(output_yaml_path) or ".", exist_ok=True)
     with open(output_yaml_path, 'w') as f:
@@ -796,56 +824,77 @@ def generate_yaml_config(lhotse_shar_dir: str, output_yaml_path: str, data_mount
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description="Create a cross-lingual context TTS dataset from multilingual lhotse shar data.",
     )
     parser.add_argument(
-        "--master-yaml", required=True, type=str,
+        "--master-yaml",
+        required=True,
+        type=str,
         help="Path to the master multilingual YAML (e.g. train_25fpsSpectralCodecBWE_en_de_es_fr_hi_it_vi_zh_with_ipa.yaml).",
     )
     parser.add_argument(
-        "--output-dir", required=True, type=str,
+        "--output-dir",
+        required=True,
+        type=str,
         help="Base directory for all outputs (extracted audio, manifest, speaker index).",
     )
     parser.add_argument(
-        "--target-hours", type=float, default=50.0,
+        "--target-hours",
+        type=float,
+        default=50.0,
         help="Total hours of target audio to sample (split equally across languages).",
     )
     parser.add_argument(
-        "--samples-per-speaker", type=int, default=5,
+        "--samples-per-speaker",
+        type=int,
+        default=5,
         help="Number of utterances per speaker to use for computing the average TitaNet embedding.",
     )
     parser.add_argument(
-        "--sample-rate", type=int, default=24000,
+        "--sample-rate",
+        type=int,
+        default=24000,
         help="Sample rate for saving extracted audio files.",
     )
     parser.add_argument(
-        "--embedding-batch-size", type=int, default=16,
+        "--embedding-batch-size",
+        type=int,
+        default=16,
         help="Batch size for TitaNet embedding computation.",
     )
     parser.add_argument(
-        "--max-shards-per-dataset", type=int, default=0,
+        "--max-shards-per-dataset",
+        type=int,
+        default=0,
         help="Max number of .jsonl.gz shard files to scan per dataset during "
-             "speaker discovery (Stage 1). 0 means scan all shards. "
-             "Setting this to e.g. 10 dramatically speeds up discovery while "
-             "still finding most speakers.",
+        "speaker discovery (Stage 1). 0 means scan all shards. "
+        "Setting this to e.g. 10 dramatically speeds up discovery while "
+        "still finding most speakers.",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
+        "--seed",
+        type=int,
+        default=42,
         help="Random seed for reproducibility.",
     )
     parser.add_argument(
-        "--log-level", type=str, default="INFO",
+        "--log-level",
+        type=str,
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level.",
     )
     parser.add_argument(
-        "--generate-yaml", type=str, default=None,
+        "--generate-yaml",
+        type=str,
+        default=None,
         help="If provided, skip stages 1-3 and instead generate a YAML config "
-             "pointing to the lhotse shar in OUTPUT_DIR/lhotse_shar. "
-             "Value is the output YAML file path.",
+        "pointing to the lhotse shar in OUTPUT_DIR/lhotse_shar. "
+        "Value is the output YAML file path.",
     )
     args = parser.parse_args()
 
@@ -893,15 +942,22 @@ def main():
     # --- Stage 2: Cross-lingual matching + balanced sampling ---
     cross_lingual_map = build_crosslingual_map(speaker_embeddings)
     target_cuts_by_lang, context_pool_by_speaker = sample_balanced_cuts(
-        lang_to_shar_entries, cross_lingual_map,
-        target_hours=args.target_hours, seed=args.seed,
+        lang_to_shar_entries,
+        cross_lingual_map,
+        target_hours=args.target_hours,
+        seed=args.seed,
         max_shards_per_dataset=args.max_shards_per_dataset,
     )
 
     # --- Stage 3: Extract audio + write manifest ---
     manifest_path = run_stage3(
-        target_cuts_by_lang, context_pool_by_speaker, cross_lingual_map,
-        speaker_embeddings, args.output_dir, args.sample_rate, args.seed,
+        target_cuts_by_lang,
+        context_pool_by_speaker,
+        cross_lingual_map,
+        speaker_embeddings,
+        args.output_dir,
+        args.sample_rate,
+        args.seed,
     )
 
     # --- Summary ---

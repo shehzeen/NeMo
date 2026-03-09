@@ -75,8 +75,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg, trainer)
-        
-        self.run_val_inference = True # Always run validation inference in PO.
+
+        self.run_val_inference = True  # Always run validation inference in PO.
         self.automatic_optimization = False
 
         ref_model_cfg = copy.deepcopy(cfg)
@@ -138,9 +138,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
         self.loss_type = self.cfg.get('loss_type', 'grpo')
         if self.loss_type not in ['grpo', 'dr_grpo']:
-            raise ValueError(
-                f"Received loss_type={self.loss_type}. Supported values: ['grpo', 'dr_grpo']."
-            )
+            raise ValueError(f"Received loss_type={self.loss_type}. Supported values: ['grpo', 'dr_grpo'].")
         self.scale_rewards = self.cfg.get('scale_rewards', True)
         self.max_decoder_steps = self.cfg.get('max_decoder_steps', 220)
         self.aux_phoneme_loss_weight = self.cfg.get('aux_phoneme_loss_weight', 1.0)
@@ -159,17 +157,20 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.best_cer_threshold = self.cfg.get('best_cer_threshold', 1.0)
         self.worst_cer_threshold = self.cfg.get('worst_cer_threshold', 1.0)
 
-
-
         if self.trainer is not None and str(self.trainer.precision) in ("32", "32-true"):
             self.decoder.float()
 
     def _get_trainable_module_groups(self) -> Dict[str, List[torch.nn.Parameter]]:
         """Return a dict mapping module-group name → list of trainable parameters."""
         modules_to_exclude = {
-            '_speaker_verification_model', '_codec_model', '_eval_asr_model',
-            '_eval_speaker_verification_model', '_reference_model',
-            'whisper_model', 'whisper_processor', 'squim_objective_model',
+            '_speaker_verification_model',
+            '_codec_model',
+            '_eval_asr_model',
+            '_eval_speaker_verification_model',
+            '_reference_model',
+            'whisper_model',
+            'whisper_processor',
+            'squim_objective_model',
             '_utmos_calculator',
         }
         groups: Dict[str, List[torch.nn.Parameter]] = {}
@@ -195,21 +196,21 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 if p.grad is not None:
                     grad_norms.append(p.grad.data.norm(2).item())
 
-            module_weight_norm = float(np.sqrt(sum(w ** 2 for w in weight_norms)))
+            module_weight_norm = float(np.sqrt(sum(w**2 for w in weight_norms)))
             metrics[f'weight_norm/{group_name}'] = module_weight_norm
             all_weight_norms.extend(weight_norms)
 
             if grad_norms:
-                module_grad_norm = float(np.sqrt(sum(g ** 2 for g in grad_norms)))
+                module_grad_norm = float(np.sqrt(sum(g**2 for g in grad_norms)))
                 metrics[f'grad_norm/{group_name}'] = module_grad_norm
                 all_grad_norms.extend(grad_norms)
             else:
                 metrics[f'grad_norm/{group_name}'] = 0.0
 
         if all_grad_norms:
-            metrics['grad_norm/global'] = float(np.sqrt(sum(g ** 2 for g in all_grad_norms)))
+            metrics['grad_norm/global'] = float(np.sqrt(sum(g**2 for g in all_grad_norms)))
         if all_weight_norms:
-            metrics['weight_norm/global'] = float(np.sqrt(sum(w ** 2 for w in all_weight_norms)))
+            metrics['weight_norm/global'] = float(np.sqrt(sum(w**2 for w in all_weight_norms)))
         return metrics
 
     @torch.no_grad()
@@ -225,10 +226,10 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 if pid in prev_weights:
                     deltas.append((p.data - prev_weights[pid]).norm(2).item())
             if deltas:
-                metrics[f'weight_delta/{group_name}'] = float(np.sqrt(sum(d ** 2 for d in deltas)))
+                metrics[f'weight_delta/{group_name}'] = float(np.sqrt(sum(d**2 for d in deltas)))
                 all_deltas.extend(deltas)
         if all_deltas:
-            metrics['weight_delta/global'] = float(np.sqrt(sum(d ** 2 for d in all_deltas)))
+            metrics['weight_delta/global'] = float(np.sqrt(sum(d**2 for d in all_deltas)))
         return metrics
 
     @torch.no_grad()
@@ -245,14 +246,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         if not getattr(self.trainer, "is_global_zero", True):
             return
 
-        lines = [f"\n[grad/weight] step={step}  "
-                 f"grad={metrics.get('grad_norm/global', 0.0):.6f}  "
-                 f"w={metrics.get('weight_norm/global', 0.0):.4f}  "
-                 f"Δw={metrics.get('weight_delta/global', 0.0):.8f}"]
+        lines = [
+            f"\n[grad/weight] step={step}  "
+            f"grad={metrics.get('grad_norm/global', 0.0):.6f}  "
+            f"w={metrics.get('weight_norm/global', 0.0):.4f}  "
+            f"Δw={metrics.get('weight_delta/global', 0.0):.8f}"
+        ]
 
         module_names = sorted(
-            k.split('/')[1] for k in metrics
-            if k.startswith('weight_norm/') and k != 'weight_norm/global'
+            k.split('/')[1] for k in metrics if k.startswith('weight_norm/') and k != 'weight_norm/global'
         )
         for name in module_names:
             gn = metrics.get(f'grad_norm/{name}', 0.0)
@@ -317,7 +319,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 self._normalizer_cache[lang_key] = None
         return self._normalizer_cache[lang_key]
 
-    def _get_per_token_logps(self, logits: torch.Tensor, labels: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+    def _get_per_token_logps(
+        self, logits: torch.Tensor, labels: torch.Tensor, loss_mask: torch.Tensor
+    ) -> torch.Tensor:
         # Force fp32 for log_softmax to avoid bf16 precision issues that sever the
         # gradient path through the GRPO "exp(logps - logps.detach())" trick.
         # Under bf16 autocast, the tiny gradient signal through this identity-like
@@ -327,7 +331,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             per_token_logps = torch.gather(logits_fp32.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
             per_token_logps = per_token_logps * loss_mask.float()
         return per_token_logps
-
 
     def compute_local_transformer_logits(self, dec_out, audio_codes_target, targets_offset_by_one=False):
         """
@@ -428,7 +431,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 context_codes[short_context_mask] = target_codes[short_context_mask]
                 context_lens[short_context_mask] = target_lens[short_context_mask]
                 # Slice to the actual max length needed
-                context_codes = context_codes[..., :context_lens.max()]
+                context_codes = context_codes[..., : context_lens.max()]
 
             if self._codec_converter is not None:
                 context_codes = self._codec_converter.convert_original_to_new(
@@ -523,19 +526,25 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 ]
             )
 
-        table = self._format_text_table(headers=["item", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows)
+        table = self._format_text_table(
+            headers=["item", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows
+        )
         print(
             f"[generate_and_reward] group={group_idx} valid={is_group_valid} "
             f"mean_reward={mean_reward:.4f} std_reward={std_reward:.4f}\n"
             f"prompt: {prompt_text}\n{table}\n"
         )
 
-    def _compute_pred_transcripts(self, predicted_audio_paths: List[str], batch_repeated: Dict, reward_asr_model: str) -> List[str]:
+    def _compute_pred_transcripts(
+        self, predicted_audio_paths: List[str], batch_repeated: Dict, reward_asr_model: str
+    ) -> List[str]:
         if reward_asr_model == 'nemo':
             pred_transcripts = self._eval_asr_model.transcribe(
                 predicted_audio_paths,
                 batch_size=len(predicted_audio_paths),
-                override_config=TranscribeConfig(use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0),
+                override_config=TranscribeConfig(
+                    use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0
+                ),
             )
             return [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
 
@@ -652,7 +661,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             sample_rate=self.output_sample_rate,
         )
         audio_save_time_sec = time.perf_counter() - save_start_time
-        audio_durations = [int(predicted_audio_lens[idx].item()) / self.output_sample_rate for idx in range(predicted_audio.size(0))]
+        audio_durations = [
+            int(predicted_audio_lens[idx].item()) / self.output_sample_rate for idx in range(predicted_audio.size(0))
+        ]
 
         rewarding_start_time = time.perf_counter()
         pred_transcripts = self._compute_pred_transcripts(predicted_audio_paths, batch_repeated, reward_asr_model)
@@ -747,9 +758,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                         best_utmos_achievable - mean_utmos_dataset, 1e-8
                     )
                 else:
-                    utmos_reward = 0.5 - 0.5 * (mean_utmos_dataset - item_utmos) / max(
-                        mean_utmos_dataset - 1.0, 1e-8
-                    )
+                    utmos_reward = 0.5 - 0.5 * (mean_utmos_dataset - item_utmos) / max(mean_utmos_dataset - 1.0, 1e-8)
             else:
                 utmos_reward = 0.0
 
@@ -759,7 +768,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 + pesq_reward * pesq_reward_weight
                 + utmos_reward * utmos_reward_weight
             )
-            if (item_metrics['codes_len'] >= max_valid_codes_len) or (item_metrics['codes_len'] <= min_valid_codes_len):
+            if (item_metrics['codes_len'] >= max_valid_codes_len) or (
+                item_metrics['codes_len'] <= min_valid_codes_len
+            ):
                 item_metrics['_needs_group_min_reward'] = True
             else:
                 item_metrics['_needs_group_min_reward'] = False
@@ -843,10 +854,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         }
 
     def process_batch_online_po(self, batch: Dict, n_generations_per_item: int, mode: str = 'train'):
-        generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens = self._prepare_online_po_inputs(
-            batch=batch,
-            n_generations_per_item=n_generations_per_item,
-            mode=mode,
+        generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens = (
+            self._prepare_online_po_inputs(
+                batch=batch,
+                n_generations_per_item=n_generations_per_item,
+                mode=mode,
+            )
         )
         chunked_outputs = self._run_teacher_forced_chunked_po(
             generated_codes_and_metrics=generated_codes_and_metrics,
@@ -970,14 +983,17 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             per_token_logps = self._get_per_token_logps(codebook_logits, codebook_labels, audio_loss_mask)
             # Ensure the GRPO policy gradient trick stays in fp32 to preserve gradient signal
             with torch.cuda.amp.autocast(enabled=False):
-                per_token_loss = -(torch.exp(per_token_logps.float() - per_token_logps.float().detach()) * advantages.float().unsqueeze(1))
+                per_token_loss = -(
+                    torch.exp(per_token_logps.float() - per_token_logps.float().detach())
+                    * advantages.float().unsqueeze(1)
+                )
                 per_token_loss = per_token_loss * group_validities.float().unsqueeze(1)
 
             # Per-token entropy of the policy distribution (always computed for logging).
             with torch.cuda.amp.autocast(enabled=False):
                 logits_fp32 = codebook_logits.float()
-                log_probs = logits_fp32.log_softmax(-1)          # [B, T, V]
-                probs = log_probs.exp()                           # [B, T, V]
+                log_probs = logits_fp32.log_softmax(-1)  # [B, T, V]
+                probs = log_probs.exp()  # [B, T, V]
                 per_token_entropy = -(probs * log_probs).sum(-1)  # [B, T]
             codebook_entropy = (
                 (per_token_entropy * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
@@ -991,7 +1007,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                     )
                 with torch.cuda.amp.autocast(enabled=False):
                     per_token_kl = (
-                        torch.exp(per_token_ref_logps.float() - per_token_logps.float()) - (per_token_ref_logps.float() - per_token_logps.float()) - 1
+                        torch.exp(per_token_ref_logps.float() - per_token_logps.float())
+                        - (per_token_ref_logps.float() - per_token_logps.float())
+                        - 1
                     )
                     per_token_loss = per_token_loss + self.cfg.get('grpo_beta', 0.0) * per_token_kl
                 codebook_kl_loss_mean = (
@@ -1140,10 +1158,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         # Snapshot weights before optimizer step to measure weight deltas.
         prev_weights = self._snapshot_trainable_weights()
 
-        generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens = self._prepare_online_po_inputs(
-            batch=batch,
-            n_generations_per_item=n_generations_per_item,
-            mode='train',
+        generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens = (
+            self._prepare_online_po_inputs(
+                batch=batch,
+                n_generations_per_item=n_generations_per_item,
+                mode='train',
+            )
         )
         teacher_forced_start_time = time.perf_counter()
         po_outputs = self._run_teacher_forced_chunked_po(

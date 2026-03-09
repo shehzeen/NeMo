@@ -84,6 +84,7 @@ class InferenceConfig:
     longform_word_threshold: int = 40  # Word threshold for auto-detection
 
     is_decoder_only_model: bool = False
+
     def build_identifier(self) -> str:
         """Build a unique identifier string for this configuration.
 
@@ -374,6 +375,7 @@ class MagpieInferenceRunner:
                 item_idx += 1
 
         return all_rtf_metrics, generated_audio_paths, codec_file_paths
+
     @staticmethod
     def _batch_to_cuda(batch: dict) -> dict:
         """Move batch tensors to CUDA device."""

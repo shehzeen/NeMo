@@ -111,9 +111,15 @@ def main():
                 decoded_target, decoded_target_len = codec_model.decode(
                     tokens=target_codes_t, tokens_len=target_codes_len
                 )
-            decoded_target_np = decoded_target[0, :decoded_target_len[0]].cpu().float().numpy()
-            sf.write(os.path.join(sample_dir, "target_decoded_from_codes.wav"), decoded_target_np, codec_model.output_sample_rate)
-            logging.info(f"  Saved target_decoded_from_codes.wav ({len(decoded_target_np)/codec_model.output_sample_rate:.2f}s), codes shape: {target_codes_np.shape}")
+            decoded_target_np = decoded_target[0, : decoded_target_len[0]].cpu().float().numpy()
+            sf.write(
+                os.path.join(sample_dir, "target_decoded_from_codes.wav"),
+                decoded_target_np,
+                codec_model.output_sample_rate,
+            )
+            logging.info(
+                f"  Saved target_decoded_from_codes.wav ({len(decoded_target_np)/codec_model.output_sample_rate:.2f}s), codes shape: {target_codes_np.shape}"
+            )
         else:
             logging.warning(f"  No target_codes found for cut {cut.id}")
 
@@ -123,12 +129,16 @@ def main():
             ctx_codes_t = torch.from_numpy(ctx_codes_np).unsqueeze(0).to(device)  # (1, C, T)
             ctx_codes_len = torch.tensor([ctx_codes_t.shape[2]], device=device)
             with torch.inference_mode():
-                decoded_ctx, decoded_ctx_len = codec_model.decode(
-                    tokens=ctx_codes_t, tokens_len=ctx_codes_len
-                )
-            decoded_ctx_np = decoded_ctx[0, :decoded_ctx_len[0]].cpu().float().numpy()
-            sf.write(os.path.join(sample_dir, "context_decoded_from_codes.wav"), decoded_ctx_np, codec_model.output_sample_rate)
-            logging.info(f"  Saved context_decoded_from_codes.wav ({len(decoded_ctx_np)/codec_model.output_sample_rate:.2f}s), codes shape: {ctx_codes_np.shape}")
+                decoded_ctx, decoded_ctx_len = codec_model.decode(tokens=ctx_codes_t, tokens_len=ctx_codes_len)
+            decoded_ctx_np = decoded_ctx[0, : decoded_ctx_len[0]].cpu().float().numpy()
+            sf.write(
+                os.path.join(sample_dir, "context_decoded_from_codes.wav"),
+                decoded_ctx_np,
+                codec_model.output_sample_rate,
+            )
+            logging.info(
+                f"  Saved context_decoded_from_codes.wav ({len(decoded_ctx_np)/codec_model.output_sample_rate:.2f}s), codes shape: {ctx_codes_np.shape}"
+            )
         else:
             logging.warning(f"  No context_codes found for cut {cut.id}")
 

@@ -142,7 +142,7 @@ def create_synthetic_batch(
     text = torch.zeros(batch_size, max_text_len, dtype=torch.long, device=device)
     for b in range(batch_size):
         tl = text_lens_list[b]
-        text[b, :tl - 1] = torch.randint(0, text_vocab_size, (tl - 1,), device=device)
+        text[b, : tl - 1] = torch.randint(0, text_vocab_size, (tl - 1,), device=device)
         text[b, tl - 1] = model.eos_id  # EOS as last valid token
     text_lens = torch.tensor(text_lens_list, dtype=torch.long, device=device)
 
@@ -161,7 +161,9 @@ def create_synthetic_batch(
     audio_codes_lens = torch.tensor(audio_frames_list, dtype=torch.long, device=device)
 
     # Context audio codes (raw, without BOS/EOS)
-    context_audio_codes = torch.zeros(batch_size, num_codebooks, max_context_audio_frames, dtype=torch.long, device=device)
+    context_audio_codes = torch.zeros(
+        batch_size, num_codebooks, max_context_audio_frames, dtype=torch.long, device=device
+    )
     for b in range(batch_size):
         caf = context_audio_frames_list[b]
         context_audio_codes[b, :, :caf] = torch.randint(0, codebook_size, (num_codebooks, caf), device=device)
@@ -249,8 +251,10 @@ def compare_audio_codes(model, pb_output, ib_output, batch):
             num_show = min(10, mismatch_positions.size(0))
             for i in range(num_show):
                 cb, t = mismatch_positions[i].tolist()
-                print(f"    Mismatch at codebook={cb}, time={t}: "
-                      f"pb={pb_codes_b[cb, t].item()}, ib={ib_codes_b[cb, t].item()}")
+                print(
+                    f"    Mismatch at codebook={cb}, time={t}: "
+                    f"pb={pb_codes_b[cb, t].item()}, ib={ib_codes_b[cb, t].item()}"
+                )
 
     return all_match
 
@@ -308,7 +312,7 @@ def compare_phoneme_predictions(model, pb_output, ib_output, batch):
 
         # infer_batch phoneme preds: slice from start_idx for this batch item
         start = max(0, ib_start_idx[b].item())
-        ib_ph_b = ib_phoneme_preds[b, :, start:start + compare_len]
+        ib_ph_b = ib_phoneme_preds[b, :, start : start + compare_len]
 
         matches = (pb_ph_b == ib_ph_b).all()
         num_matching = (pb_ph_b == ib_ph_b).sum().item()
@@ -325,8 +329,10 @@ def compare_phoneme_predictions(model, pb_output, ib_output, batch):
             num_show = min(10, mismatch_positions.size(0))
             for i in range(num_show):
                 sf, t = mismatch_positions[i].tolist()
-                print(f"    Mismatch at stacking_factor={sf}, time={t}: "
-                      f"pb={pb_ph_b[sf, t].item()}, ib={ib_ph_b[sf, t].item()}")
+                print(
+                    f"    Mismatch at stacking_factor={sf}, time={t}: "
+                    f"pb={pb_ph_b[sf, t].item()}, ib={ib_ph_b[sf, t].item()}"
+                )
 
     return all_match
 

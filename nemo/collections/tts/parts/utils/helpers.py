@@ -42,12 +42,12 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import string
 import os
 import shutil
+import string
 import tempfile
-from enum import Enum
 from collections import defaultdict
+from enum import Enum
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import librosa
@@ -61,7 +61,6 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.collections.tts.torch.tts_data_types import DATA_STR2DATA_CLASS, MAIN_DATA_TYPES, WithLens
 from nemo.utils import logging
 from nemo.utils.decorators import deprecated
-
 
 try:
     from lightning.pytorch.utilities import rank_zero_only
@@ -896,7 +895,9 @@ def transcribe_with_whisper_from_filepaths(
 
     transcripts = [""] * len(audio_filepaths)
     for lang, indices in grouped_indices.items():
-        forced_decoder_ids = whisper_processor.get_decoder_prompt_ids(language=lang, task="transcribe") if lang else None
+        forced_decoder_ids = (
+            whisper_processor.get_decoder_prompt_ids(language=lang, task="transcribe") if lang else None
+        )
         for start_idx in range(0, len(indices), batch_size):
             batch_indices = indices[start_idx : start_idx + batch_size]
             speech_arrays = [librosa.load(audio_filepaths[idx], sr=16000)[0] for idx in batch_indices]

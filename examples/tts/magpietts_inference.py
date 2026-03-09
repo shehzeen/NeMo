@@ -507,7 +507,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     target_group.add_argument('--cer_target', type=float, default=None)
     target_group.add_argument('--ssim_target', type=float, default=None)
     target_group.add_argument('--is_decoder_only_model', action='store_true')
-    target_group.add_argument('--legacy_context_stacking', action='store_true', help='Use audio_bos_id/audio_eos_id instead of context_audio_bos_id/context_audio_eos_id for context stacking')
+    target_group.add_argument(
+        '--legacy_context_stacking',
+        action='store_true',
+        help='Use audio_bos_id/audio_eos_id instead of context_audio_bos_id/context_audio_eos_id for context stacking',
+    )
     target_group.add_argument('--phoneme_input_type', type=str, default='gt', choices=['predicted', 'gt'])
     target_group.add_argument(
         '--phoneme_sampling_method', type=str, default='argmax', choices=['argmax', 'multinomial']
