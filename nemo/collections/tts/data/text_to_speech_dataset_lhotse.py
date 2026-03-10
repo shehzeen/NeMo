@@ -60,16 +60,6 @@ def setup_tokenizers(all_tokenizers_config, mode='train'):
     return aggregated_tokenizer
 
 
-def instantiate_phoneme_tokenizer(phoneme_tokenizer_config):
-    phoneme_tokenizer = instantiate(phoneme_tokenizer_config)
-    phoneme_vocab_size = len(phoneme_tokenizer.tokens)
-    phoneme_tokenizer.bos_token_id = phoneme_vocab_size
-    phoneme_tokenizer.eos_token_id = phoneme_vocab_size + 1
-    phoneme_tokenizer.unk_token_id = phoneme_vocab_size + 2
-    phoneme_tokenizer.vocab_size = phoneme_vocab_size + 3
-    return phoneme_tokenizer
-
-
 def check_speaker_format(item: str):
     # enforce the format as example like "| Language:en Dataset:HiFiTTS Speaker:9136_other |".
     pattern = r"\| Language:\w+ Dataset:[\w\d\W]+ Speaker:[\w\d\W]+ \|"
@@ -207,7 +197,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
 
         # initialize the phoneme tokenizer once per dataset/worker when config is available.
         if self.phoneme_tokenizer is None and self.phoneme_tokenizer_config is not None:
-            self.phoneme_tokenizer = instantiate_phoneme_tokenizer(self.phoneme_tokenizer_config)
+            self.phoneme_tokenizer = instantiate(self.phoneme_tokenizer_config)
 
         # define list to store batched information
         dataset_name_list = []

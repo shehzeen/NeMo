@@ -16,9 +16,10 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+from hydra.utils import instantiate
 from torch.utils.data import get_worker_info
 
-from nemo.collections.tts.data.text_to_speech_dataset_lhotse import instantiate_phoneme_tokenizer, setup_tokenizers
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse import setup_tokenizers
 from nemo.collections.tts.modules.magpietts_modules import SpecialAudioToken, cosine_schedule
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import ModelPT
@@ -37,7 +38,7 @@ def worker_init_fn(worker_id):
     tokenizer = setup_tokenizers(dataset.tokenizer_config, mode=dataset.dataset_type)
     dataset.text_tokenizer = tokenizer
     if hasattr(dataset, 'phoneme_tokenizer_config'):
-        dataset.phoneme_tokenizer = instantiate_phoneme_tokenizer(dataset.phoneme_tokenizer_config)
+        dataset.phoneme_tokenizer = instantiate(dataset.phoneme_tokenizer_config)
 
 
 class BaseMagpieTTSModel(ModelPT):

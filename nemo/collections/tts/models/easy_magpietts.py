@@ -34,7 +34,6 @@ from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.collections.tts.data.text_to_speech_dataset_lhotse import (
     MagpieTTSLhotseDataset,
-    instantiate_phoneme_tokenizer,
     setup_tokenizers,
 )
 from nemo.collections.tts.models.base_magpietts import worker_init_fn
@@ -1428,7 +1427,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                     mode='train',
                 )
                 if self.cfg.get("phoneme_tokenizer", None) is not None:
-                    dataset.phoneme_tokenizer = instantiate_phoneme_tokenizer(self.cfg.phoneme_tokenizer)
+                    dataset.phoneme_tokenizer = instantiate(self.cfg.phoneme_tokenizer)
 
             self._train_dl = torch.utils.data.DataLoader(
                 dataset,
@@ -1450,7 +1449,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 # For num workers > 0 tokenizer will be assigned in worker_init_fn (since it is not picklable)
                 dataset.text_tokenizer = setup_tokenizers(all_tokenizers_config=self.cfg.text_tokenizers, mode='test')
                 if self.cfg.get("phoneme_tokenizer", None) is not None:
-                    dataset.phoneme_tokenizer = instantiate_phoneme_tokenizer(self.cfg.phoneme_tokenizer)
+                    dataset.phoneme_tokenizer = instantiate(self.cfg.phoneme_tokenizer)
 
             data_loader = torch.utils.data.DataLoader(
                 dataset,

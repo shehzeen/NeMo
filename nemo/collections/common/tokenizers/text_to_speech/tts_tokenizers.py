@@ -1192,6 +1192,14 @@ class IPABPETokenizer:
 
         self._tokenizer = Tokenizer.from_file(tokenizer_file)
         self.tokens = self._tokenizer.get_vocab()
+        phoneme_vocab_size = len(self.tokens)
+        self.bos_token_id = phoneme_vocab_size
+        self.eos_token_id = phoneme_vocab_size + 1
+        self.unk_token_id = phoneme_vocab_size + 2
+        self.vocab_size = phoneme_vocab_size + 3
+        self.tokens["<sp_bos>"] = self.bos_token_id
+        self.tokens["<sp_eos>"] = self.eos_token_id
+        self.tokens["<sp_unk>"] = self.unk_token_id
         self.pad = self.tokens.get("<pad>", None)
 
     def encode(self, text: str) -> List[int]:

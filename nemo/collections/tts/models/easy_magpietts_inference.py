@@ -25,7 +25,7 @@ from omegaconf import DictConfig
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from nemo.collections.tts.data.text_to_speech_dataset_lhotse import instantiate_phoneme_tokenizer, setup_tokenizers
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse import setup_tokenizers
 from nemo.collections.tts.models import AudioCodecModel
 from nemo.collections.tts.models.base_magpietts import BaseMagpieTTSModel
 from nemo.collections.tts.modules import transformer_2501
@@ -306,7 +306,7 @@ class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
         self.cfg_unk_token_id = num_tokens - 1
         self.phoneme_tokenizer = None
         if cfg.get('phoneme_tokenizer', None) is not None:
-            self.phoneme_tokenizer = instantiate_phoneme_tokenizer(cfg.phoneme_tokenizer)
+            self.phoneme_tokenizer = instantiate(cfg.phoneme_tokenizer)
             self.phoneme_stacking_factor = cfg.get('phoneme_stacking_factor', 1)
             self.phoneme_vocab_size = self.phoneme_tokenizer.vocab_size
             if cfg.get('phoneme_corruption_batch_prob', None) is None:
