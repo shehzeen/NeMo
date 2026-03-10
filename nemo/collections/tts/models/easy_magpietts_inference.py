@@ -25,10 +25,7 @@ from omegaconf import DictConfig
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from nemo.collections.tts.data.text_to_speech_dataset_lhotse import (
-    instantiate_phoneme_tokenizer,
-    setup_tokenizers,
-)
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse import instantiate_phoneme_tokenizer, setup_tokenizers
 from nemo.collections.tts.models import AudioCodecModel
 from nemo.collections.tts.models.base_magpietts import BaseMagpieTTSModel
 from nemo.collections.tts.modules import transformer_2501
@@ -1861,9 +1858,7 @@ class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
                 phoneme_end = torch.where(
                     state.phoneme_prediction_end_idx >= 0,
                     state.phoneme_prediction_end_idx,
-                    torch.full_like(
-                        state.phoneme_prediction_end_idx, predicted_phoneme_tokens.size(-1)
-                    ),
+                    torch.full_like(state.phoneme_prediction_end_idx, predicted_phoneme_tokens.size(-1)),
                 )
                 predicted_phoneme_tokens_lens = phoneme_end - phoneme_start
                 phoneme_prediction_start_idx_out = phoneme_start

@@ -18,14 +18,8 @@ import numpy as np
 import torch
 from torch.utils.data import get_worker_info
 
-from nemo.collections.tts.data.text_to_speech_dataset_lhotse import (
-    instantiate_phoneme_tokenizer,
-    setup_tokenizers,
-)
-from nemo.collections.tts.modules.magpietts_modules import (
-    SpecialAudioToken,
-    cosine_schedule,
-)
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse import instantiate_phoneme_tokenizer, setup_tokenizers
+from nemo.collections.tts.modules.magpietts_modules import SpecialAudioToken, cosine_schedule
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import ModelPT
 from nemo.utils import logging
@@ -93,7 +87,7 @@ class BaseMagpieTTSModel(ModelPT):
                 for key in state_dict.keys():
                     name_with_dot = f"{name}."
                     if key.startswith(name_with_dot):
-                        new_state_dict[key[len(name_with_dot):]] = state_dict[key]
+                        new_state_dict[key[len(name_with_dot) :]] = state_dict[key]
                 child.load_state_dict(new_state_dict)
 
     def setup_optimizer_param_groups(self):
@@ -478,7 +472,7 @@ class BaseMagpieTTSModel(ModelPT):
 
             if sampling_type == "causal" or sampling_type == "purity_causal":
                 n_frames_to_allow = int(np.floor(progress * self.frame_stacking_factor + 1))
-                confidences[:, n_frames_to_allow * self.num_audio_codebooks:] = min_confidence - 1
+                confidences[:, n_frames_to_allow * self.num_audio_codebooks :] = min_confidence - 1
 
             _, topk_indices = torch.topk(confidences, k=n_unmasked, dim=1)
             if use_cfg:
@@ -494,9 +488,7 @@ class BaseMagpieTTSModel(ModelPT):
             for codebook_num in range(codebook_seq_len):
                 next_local_transformer_input = self.audio_embeddings[codebook_num](codes[:, codebook_num]).unsqueeze(1)
                 next_local_transformer_input = self.local_transformer_in_projection(next_local_transformer_input)
-                local_transformer_input = torch.cat(
-                    [local_transformer_input, next_local_transformer_input], dim=1
-                )
+                local_transformer_input = torch.cat([local_transformer_input, next_local_transformer_input], dim=1)
 
             _mask = torch.ones(B, codebook_seq_len + 1, device=device)
             local_transformer_output = self.local_transformer(local_transformer_input, _mask)['output']
@@ -545,9 +537,7 @@ class BaseMagpieTTSModel(ModelPT):
                 confidences = probs.max(dim=2)[0]
             sampled_codes.scatter_(dim=1, index=topk_indices, src=unmasked_codes)
             if noise_scale > 0.0:
-                noise = (
-                    (torch.rand_like(confidences) - 0.5) * noise_scale * (1 - (step + 2) / n_steps)
-                )
+                noise = (torch.rand_like(confidences) - 0.5) * noise_scale * (1 - (step + 2) / n_steps)
                 confidences += noise
                 confidences[actual_batch_size:] = confidences[:actual_batch_size]
             confidence_eps = 0.1
