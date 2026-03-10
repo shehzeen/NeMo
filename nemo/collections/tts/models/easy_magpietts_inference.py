@@ -905,6 +905,7 @@ class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
                     topk=topk,
                     use_cfg=use_cfg,
                     cfg_scale=cfg_scale,
+                    sanitize_logits=True,
                 )
                 # Base class returns (B, C, S); flatten to (B, C*S) for downstream code
                 audio_codes_next = audio_codes_next.permute(0, 2, 1)

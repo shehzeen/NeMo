@@ -289,6 +289,7 @@ class BaseMagpieTTSModel(ModelPT):
         cfg_scale: float = 1.0,
         use_kv_cache: bool = True,
         forbid_audio_eos: bool = False,
+        sanitize_logits: bool = False,
     ) -> torch.Tensor:
         """Sample audio codes autoregressively across codebooks using the local transformer.
 
@@ -305,6 +306,7 @@ class BaseMagpieTTSModel(ModelPT):
             cfg_scale: Scale factor for CFG.
             use_kv_cache: Whether to use key-value caching in the local transformer.
             forbid_audio_eos: Whether to globally forbid audio EOS.
+            sanitize_logits: Whether to clamp/clean logits before sampling.
 
         Returns:
             Sampled audio codes (B, num_codebooks, frame_stacking_factor).
@@ -329,8 +331,9 @@ class BaseMagpieTTSModel(ModelPT):
                 cfg_logits = cfg_scale * conditional_logits + (1.0 - cfg_scale) * unconditional_logits
                 codebook_logits[:actual_batch_size] = cfg_logits
 
-            codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
-            codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
+            if sanitize_logits:
+                codebook_logits = torch.nan_to_num(codebook_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+                codebook_logits = codebook_logits.clamp(min=-100.0, max=100.0)
 
             for item_idx in unfinished_items:
                 codebook_logits[item_idx, self.audio_eos_id] = float('-inf')
