@@ -32,10 +32,7 @@ import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
-from nemo.collections.tts.data.text_to_speech_dataset_lhotse import (
-    MagpieTTSLhotseDataset,
-    setup_tokenizers,
-)
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse import MagpieTTSLhotseDataset, setup_tokenizers
 from nemo.collections.tts.models.base_magpietts import worker_init_fn
 from nemo.collections.tts.models.easy_magpietts_inference import (
     EasyMagpieTTSInferenceModel,
