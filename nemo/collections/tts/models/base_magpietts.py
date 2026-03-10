@@ -49,10 +49,6 @@ class BaseMagpieTTSModel(ModelPT):
     ``__init__``, data loading, training/inference logic, etc.
     """
 
-    # ------------------------------------------------------------------
-    # State-dict exclusion – subclasses override
-    # ------------------------------------------------------------------
-
     def _get_state_dict_keys_to_exclude(self) -> List[str]:
         """Return list of key substrings to exclude from checkpoint save/load.
 
@@ -60,10 +56,6 @@ class BaseMagpieTTSModel(ModelPT):
         (e.g. codec model, eval models).
         """
         return ['_codec_model']
-
-    # ------------------------------------------------------------------
-    # state_dict / load_state_dict / optimizer param groups
-    # ------------------------------------------------------------------
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         if hasattr(self, '_no_state_dict') and self._no_state_dict:
@@ -108,10 +100,6 @@ class BaseMagpieTTSModel(ModelPT):
         )
 
         self._optimizer_param_groups = [{"params": trainable_params}]
-
-    # ------------------------------------------------------------------
-    # Special token helpers
-    # ------------------------------------------------------------------
 
     def add_eos_token(self, codes, codes_len, eos_id, num_eos_tokens=1):
         # codes: (B, C, T')
@@ -160,10 +148,6 @@ class BaseMagpieTTSModel(ModelPT):
         codes, codes_len = self.remove_eos_token(codes=codes, codes_len=codes_len)
         return codes, codes_len
 
-    # ------------------------------------------------------------------
-    # Audio codec helpers
-    # ------------------------------------------------------------------
-
     def audio_to_codes(self, audio, audio_len, sample_rate=None):
         self._codec_model.eval()
         with torch.no_grad(), torch.autocast(device_type=audio.device.type, dtype=torch.float32):
@@ -178,10 +162,6 @@ class BaseMagpieTTSModel(ModelPT):
                 codes = self._codec_converter.convert_new_to_original(audio_tokens=codes, audio_lens=codes_len)
             audio, audio_len = self._codec_model.decode(tokens=codes, tokens_len=codes_len)
             return audio, audio_len, codes
-
-    # ------------------------------------------------------------------
-    # Padding / forbidden-logits helpers
-    # ------------------------------------------------------------------
 
     def pad_audio_codes(self, audio_codes: torch.Tensor):
         """Pads the time dimension of the audio codes to a multiple of the frame stacking factor.
@@ -214,10 +194,6 @@ class BaseMagpieTTSModel(ModelPT):
         ] = float('-inf')
         return logits
 
-    # ------------------------------------------------------------------
-    # MaskGit helpers
-    # ------------------------------------------------------------------
-
     def maskgit_create_random_mask(self, codes):
         """Creates a mask where True indicates positions that should be replaced with MASK_TOKEN."""
         B, C, T = codes.shape
@@ -235,10 +211,6 @@ class BaseMagpieTTSModel(ModelPT):
         mask = self.maskgit_create_random_mask(codes)
         codes_with_mask = torch.where(mask, self.mask_token_id, codes)
         return codes_with_mask, mask
-
-    # ------------------------------------------------------------------
-    # Local transformer – training
-    # ------------------------------------------------------------------
 
     def compute_local_transformer_logits(self, dec_out, audio_codes_target, targets_offset_by_one=False):
         """Predicts the logits for all codebooks using the local transformer.
@@ -305,10 +277,6 @@ class BaseMagpieTTSModel(ModelPT):
         )
 
         return all_code_logits
-
-    # ------------------------------------------------------------------
-    # Local transformer – AR sampling
-    # ------------------------------------------------------------------
 
     def local_transformer_sample_autoregressive(
         self,
@@ -400,10 +368,6 @@ class BaseMagpieTTSModel(ModelPT):
             all_preds = all_preds[:actual_batch_size]
 
         return all_preds
-
-    # ------------------------------------------------------------------
-    # Local transformer – MaskGit sampling
-    # ------------------------------------------------------------------
 
     def local_transformer_sample_maskgit(
         self,
