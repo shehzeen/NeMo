@@ -26,15 +26,15 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import soundfile as sf
 import torch
 
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPATokenizer
-from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset, MagpieTTSDataset
-from nemo.collections.tts.models import EasyMagpieTTSModel, MagpieTTSModel
+from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset
+from nemo.collections.tts.models import MagpieTTSModel
 from nemo.collections.tts.models.magpietts import ModelInferenceParameters
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.utils import logging
@@ -72,18 +72,6 @@ class InferenceConfig:
     maskgit_noise_scale: float = 0.0
     maskgit_fixed_schedule: Optional[List[int]] = None
     maskgit_sampling_type: Optional[str] = None
-
-    # Decoder-only inference options
-    phoneme_input_type: str = "gt"  # gt or predicted
-    phoneme_sampling_method: str = "argmax"  # argmax or multinomial
-    dropout_text_input: bool = False
-    legacy_context_stacking: bool = False  # Use audio_bos_id/audio_eos_id for context stacking
-
-    # Longform inference mode
-    longform_mode: str = "auto"  # "auto" | "always" | "never"
-    longform_word_threshold: int = 40  # Word threshold for auto-detection
-
-    is_decoder_only_model: bool = False
 
     def build_identifier(self) -> str:
         """Build a unique identifier string for this configuration.
@@ -139,8 +127,8 @@ class MagpieInferenceRunner:
     """
 
     def __init__(
-        self,  # model can be MagpieTTSModel or DecoderOnlyMagpieTTSModel
-        model: Union[MagpieTTSModel, EasyMagpieTTSModel],
+        self,
+        model: MagpieTTSModel,
         config: InferenceConfig,
     ):
         """Initialize the inference runner.
@@ -151,9 +139,6 @@ class MagpieInferenceRunner:
         """
         self.model = model
         self.config = config
-
-        # Set legacy context stacking flag on model
-        self.model.legacy_context_stacking = config.legacy_context_stacking
 
         # Set phoneme probability to 1 for inference
         self._configure_tokenizer()
@@ -166,10 +151,7 @@ class MagpieInferenceRunner:
         """Configure the tokenizer for inference (phoneme prob = 1.0)."""
         g2p = None
         if isinstance(self.model.tokenizer, AggregatedTTSTokenizer):
-            if "english_phoneme" in self.model.tokenizer.tokenizers and hasattr(
-                self.model.tokenizer.tokenizers["english_phoneme"], "g2p"
-            ):
-                g2p = self.model.tokenizer.tokenizers["english_phoneme"].g2p
+            g2p = self.model.tokenizer.tokenizers["english_phoneme"].g2p
         elif isinstance(self.model.tokenizer, IPATokenizer):
             g2p = self.model.tokenizer.g2p
 
@@ -181,12 +163,13 @@ class MagpieInferenceRunner:
         dataset_meta: dict,
         context_duration_min: Optional[float] = None,
         context_duration_max: Optional[float] = None,
-    ) -> Union[ChunkedTTSInferenceDataset, MagpieTTSDataset]:
-        """Create an inference dataset.
+    ) -> ChunkedTTSInferenceDataset:
+        """Create a unified dataset for inference.
 
-        Standard MagpieTTS uses the chunked inference dataset from `main`.
-        Decoder-only MagpieTTS uses the regular dataset and its dedicated
-        `infer_batch()` inference path.
+        Always creates ChunkedTTSInferenceDataset which uses language-aware chunking
+        to automatically handle both short and long texts:
+        - Short text (below threshold): processed as single chunk
+        - Long text (above threshold): split into sentence chunks
 
         Args:
             dataset_meta: Dataset metadata dictionary with 'manifest_path' and 'audio_dir'.
@@ -216,35 +199,11 @@ class MagpieInferenceRunner:
 
         self._manifest_records = read_manifest(manifest_path)
         self._audio_base_dir = audio_dir
-        if self.config.is_decoder_only_model:
-            logging.info("Creating standard inference dataset for decoder-only model")
-            dataset = MagpieTTSDataset(
-                dataset_meta=dataset_meta,
-                sample_rate=self.model.sample_rate,
-                min_duration=0.5,
-                max_duration=20,
-                codec_model_samples_per_frame=self.model.codec_model_samples_per_frame,
-                bos_id=getattr(self.model, "bos_id", None),
-                eos_id=self.model.eos_id,
-                num_audio_codebooks=self.model.num_audio_codebooks,
-                prior_scaling_factor=None,
-                load_cached_codes_if_available=False,
-                dataset_type='test',
-                tokenizer_config=None,
-                load_16khz_audio=False,
-                use_text_conditioning_tokenizer=True,
-                text_conditioning_tokenizer_name=self.model.text_conditioning_tokenizer_name,
-                pad_context_text_to_max_duration=False,
-                context_duration_min=context_duration_min,
-                context_duration_max=context_duration_max,
-            )
-            dataset.text_tokenizer = self.model.tokenizer
-        else:
-            logging.info("Creating unified inference dataset")
-            dataset = self._create_chunked_inference_dataset(dataset_meta, context_duration_min, context_duration_max)
 
-        if hasattr(self.model, 'phoneme_tokenizer'):
-            dataset.phoneme_tokenizer = self.model.phoneme_tokenizer
+        # Always use unified dataset (handles both short and long texts automatically)
+        # Language for chunking thresholds is determined per-sample from manifest
+        logging.info("Creating unified inference dataset")
+        dataset = self._create_chunked_inference_dataset(dataset_meta, context_duration_min, context_duration_max)
 
         return dataset
 
@@ -258,7 +217,10 @@ class MagpieInferenceRunner:
         save_context_audio: bool = True,
         save_predicted_codes: bool = True,
     ) -> Tuple[List[dict], List[str], List[str]]:
-        """Run inference on a dataset.
+        """Run unified inference on a dataset.
+
+        Uses the unified inference path that automatically handles both short texts
+        (single chunk) and long texts (multiple chunks) through the same code path.
 
         Args:
             dataset: The inference dataset (created by create_dataset()).
@@ -286,95 +248,11 @@ class MagpieInferenceRunner:
                 raise ValueError("audio_base_dir not provided and not cached from create_dataset()")
             audio_base_dir = self._audio_base_dir
 
-        if self.config.is_decoder_only_model:
-            logging.info("Using decoder-only inference path")
-            return self._run_decoder_only_inference(
-                dataset, output_dir, manifest_records, audio_base_dir, save_context_audio, save_predicted_codes
-            )
-
+        # Always use unified inference path
         logging.info("Using unified inference path")
         return self._run_unified_inference(
             dataset, output_dir, manifest_records, audio_base_dir, save_context_audio, save_predicted_codes
         )
-
-    def _run_decoder_only_inference(
-        self,
-        dataset: MagpieTTSDataset,
-        output_dir: str,
-        manifest_records: List[dict],
-        audio_base_dir: str,
-        save_context_audio: bool = True,
-        save_predicted_codes: bool = True,
-    ) -> Tuple[List[dict], List[str], List[str]]:
-        """Run inference for decoder-only models via `infer_batch()`."""
-        os.makedirs(output_dir, exist_ok=True)
-        self._delete_old_generated_files(output_dir)
-
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            collate_fn=dataset.collate_fn,
-            num_workers=0,
-            shuffle=False,
-        )
-
-        all_rtf_metrics = []
-        generated_audio_paths = []
-        codec_file_paths = []
-        item_idx = 0
-        phoneme_sampling_method = (
-            "argmax" if self.config.phoneme_sampling_method == "greedy" else self.config.phoneme_sampling_method
-        )
-
-        for batch_idx, batch in enumerate(dataloader):
-            logging.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
-            batch = self._batch_to_cuda(batch)
-            output = self.model.infer_batch(
-                batch,
-                max_decoder_steps=self.config.model_inference_parameters.max_decoder_steps,
-                temperature=self.config.model_inference_parameters.temperature,
-                topk=self.config.model_inference_parameters.topk,
-                use_cfg=self.config.use_cfg,
-                cfg_scale=self.config.model_inference_parameters.cfg_scale,
-                use_local_transformer_for_inference=self.config.use_local_transformer,
-                phoneme_input_type=self.config.phoneme_input_type,
-                phoneme_sampling_method=phoneme_sampling_method,
-                force_dropout_text=self.config.dropout_text_input,
-            )
-            predicted_audio = output.predicted_audio
-            predicted_audio_lens = output.predicted_audio_lens
-            predicted_codes = output.predicted_codes
-            predicted_codes_lens = output.predicted_codes_lens
-            rtf_metrics = output.rtf_metrics
-
-            all_rtf_metrics.append(rtf_metrics)
-            logging.info(f"Output shape: {predicted_audio.size()}")
-
-            for idx in range(predicted_audio.size(0)):
-                audio_len = predicted_audio_lens[idx].item()
-                audio_np = predicted_audio[idx].float().detach().cpu().numpy()[:audio_len]
-                audio_path = os.path.join(output_dir, f"predicted_audio_{item_idx}.wav")
-                sample_rate = getattr(self.model, "output_sample_rate", self.model.sample_rate)
-                sf.write(audio_path, audio_np, sample_rate)
-                generated_audio_paths.append(audio_path)
-
-                if save_context_audio and item_idx < len(manifest_records):
-                    self._copy_reference_audio(
-                        manifest_records[item_idx],
-                        audio_base_dir,
-                        output_dir,
-                        item_idx,
-                    )
-
-                if save_predicted_codes:
-                    code_len = predicted_codes_lens[idx].item()
-                    codes_path = os.path.join(output_dir, f"predicted_codes_{item_idx}.pt")
-                    torch.save(predicted_codes[idx, :, :code_len].detach().cpu(), codes_path)
-                    codec_file_paths.append(codes_path)
-
-                item_idx += 1
-
-        return all_rtf_metrics, generated_audio_paths, codec_file_paths
 
     @staticmethod
     def _batch_to_cuda(batch: dict) -> dict:

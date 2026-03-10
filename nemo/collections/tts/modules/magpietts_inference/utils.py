@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from nemo.collections.tts.models import EasyMagpieTTSModel, MagpieTTSModel
+from nemo.collections.tts.models import MagpieTTSModel
 from nemo.utils import logging
 
 
@@ -253,9 +253,7 @@ def update_checkpoint_state_dict(state_dict: dict) -> dict:
     return new_state_dict
 
 
-def load_magpie_model(
-    config: ModelLoadConfig, device: str = "cuda", is_decoder_only_model: bool = False
-) -> Tuple[Union[MagpieTTSModel, EasyMagpieTTSModel], str]:
+def load_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tuple[MagpieTTSModel, str]:
     """Load a MagpieTTS model from checkpoint or NeMo archive.
 
     Supports two loading modes:
@@ -273,7 +271,7 @@ def load_magpie_model(
         ValueError: If configuration is invalid or sample rates don't match.
     """
     config.validate()
-    model_cls = EasyMagpieTTSModel if is_decoder_only_model else MagpieTTSModel
+
     if config.hparams_file is not None and config.checkpoint_file is not None:
         # Mode 1: Load from hparams + checkpoint
         model_cfg = OmegaConf.load(config.hparams_file)
@@ -292,7 +290,7 @@ def load_magpie_model(
                 config.legacy_text_conditioning,
             )
 
-        model = model_cls(cfg=model_cfg)
+        model = MagpieTTSModel(cfg=model_cfg)
         model.use_kv_cache_for_inference = True
 
         # Load weights
@@ -304,15 +302,15 @@ def load_magpie_model(
         checkpoint_name = os.path.basename(config.checkpoint_file).replace(".ckpt", "")
 
     else:
-        if config.nemo_file.startswith("nvidia/"):
-            model = model_cls.from_pretrained(config.nemo_file)
+        if config.nemo_file.startswith("nvidia/"):  # TODO @xueyang: why ignore `update_config_for_inference`?
+            model = MagpieTTSModel.from_pretrained(config.nemo_file)
             model.use_kv_cache_for_inference = True
             checkpoint_name = config.nemo_file.split("/")[-1]
             cfg_sample_rate = None
         else:
             # Mode 2: Load from .nemo archive
             logging.info(f"Loading model from NeMo archive: {config.nemo_file}")
-            model_cfg = model_cls.restore_from(config.nemo_file, return_config=True)
+            model_cfg = MagpieTTSModel.restore_from(config.nemo_file, return_config=True)
 
             with open_dict(model_cfg):
                 model_cfg, cfg_sample_rate = update_config_for_inference(
@@ -322,7 +320,7 @@ def load_magpie_model(
                     config.legacy_text_conditioning,
                 )
 
-            model = model_cls.restore_from(config.nemo_file, override_config_path=model_cfg)
+            model = MagpieTTSModel.restore_from(config.nemo_file, override_config_path=model_cfg)
             model.use_kv_cache_for_inference = True
             checkpoint_name = os.path.basename(config.nemo_file).replace(".nemo", "")
 
@@ -428,9 +426,6 @@ def log_model_architecture_summary(model: MagpieTTSModel) -> Tuple[str, Dict[str
             - moe_info: String for checkpoint naming (e.g., "MoE_8x2_d2048_softmax_"), empty for dense models
             - flops_per_component: Dict mapping component name (e.g., "decoder") to its FLOPs metrics dict
     """
-    if isinstance(model, EasyMagpieTTSModel):
-        return "", {}
-
     logging.info("=" * 60)
     logging.info("MODEL ARCHITECTURE SUMMARY")
     logging.info("=" * 60)
