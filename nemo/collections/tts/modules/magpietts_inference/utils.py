@@ -428,6 +428,9 @@ def log_model_architecture_summary(model: MagpieTTSModel) -> Tuple[str, Dict[str
             - moe_info: String for checkpoint naming (e.g., "MoE_8x2_d2048_softmax_"), empty for dense models
             - flops_per_component: Dict mapping component name (e.g., "decoder") to its FLOPs metrics dict
     """
+    if isinstance(model, EasyMagpieTTSModel):
+        return "", {}
+
     logging.info("=" * 60)
     logging.info("MODEL ARCHITECTURE SUMMARY")
     logging.info("=" * 60)

@@ -559,12 +559,8 @@ def main(argv=None):
                 model_inference_parameters[field_name] = arg_from_cmdline
 
     if "max_decoder_steps" not in model_inference_parameters:
-        if args.longform_mode in {'always', 'auto'}:
-            model_inference_parameters["max_decoder_steps"] = args.longform_max_decoder_steps
-        elif args.is_decoder_only_model:
+        if args.is_decoder_only_model:
             model_inference_parameters["max_decoder_steps"] = 300
-        else:
-            model_inference_parameters["max_decoder_steps"] = 440
 
     inference_config = InferenceConfig(
         model_inference_parameters=ModelInferenceParameters.from_dict(model_inference_parameters),
@@ -581,8 +577,6 @@ def main(argv=None):
         phoneme_sampling_method=args.phoneme_sampling_method,
         dropout_text_input=args.dropout_text_input,
         legacy_context_stacking=args.legacy_context_stacking,
-        longform_mode=args.longform_mode,
-        longform_word_threshold=args.longform_word_threshold,
     )
 
     eval_config = EvaluationConfig(
