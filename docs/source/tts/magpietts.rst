@@ -130,7 +130,7 @@ Several parameters control the generation behavior. The temperature setting affe
 
 .. code-block:: bash
 
-    python examples/tts/magpietts_inference.py \
+    python examples/tts/tts_infer.py \
         --nemo_files /path/to/magpietts_model.nemo \
         --codecmodel_path /path/to/audio_codec.nemo \
         --datasets your_evaluation_set \
