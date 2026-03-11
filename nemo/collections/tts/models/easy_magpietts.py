@@ -14,7 +14,7 @@
 import json
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -96,6 +96,29 @@ class ProcessBatchOutput:
     context_audio_codes: torch.Tensor
     context_audio_codes_lens: torch.Tensor
     selected_training_mode: Optional[str]
+
+
+@dataclass
+class EasyModelInferenceParameters:
+    """Inference parameters for the decoder-only EasyMagpieTTS model.
+
+    Attributes:
+        max_decoder_steps: Maximum number of decoder steps.
+        temperature: Sampling temperature.
+        topk: Number of top-probability tokens to consider in sampling.
+        cfg_scale: Scale factor for classifier-free guidance.
+    """
+
+    max_decoder_steps: int = 500
+    temperature: float = 0.7
+    topk: int = 80
+    cfg_scale: float = 2.5
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EasyModelInferenceParameters':
+        field_names = {field.name for field in fields(cls)}
+        filtered_data = {k: v for k, v in data.items() if k in field_names}
+        return cls(**filtered_data)
 
 
 class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
