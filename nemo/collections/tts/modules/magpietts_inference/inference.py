@@ -125,9 +125,7 @@ class MagpieInferenceConfig(BaseInferenceConfig):
 class EasyMagpieInferenceConfig(BaseInferenceConfig):
     """Configuration for decoder-only EasyMagpieTTSModel inference."""
 
-    model_inference_parameters: EasyModelInferenceParameters = field(
-        default_factory=EasyModelInferenceParameters
-    )
+    model_inference_parameters: EasyModelInferenceParameters = field(default_factory=EasyModelInferenceParameters)
     phoneme_input_type: str = "gt"
     phoneme_sampling_method: str = "argmax"
     dropout_text_input: bool = False
@@ -176,8 +174,7 @@ class BaseInferenceRunner(abc.ABC):
         dataset_meta: dict,
         context_duration_min: Optional[float] = None,
         context_duration_max: Optional[float] = None,
-    ) -> Union[ChunkedTTSInferenceDataset, MagpieTTSDataset]:
-        ...
+    ) -> Union[ChunkedTTSInferenceDataset, MagpieTTSDataset]: ...
 
     @abc.abstractmethod
     def run_inference_on_dataset(
@@ -189,8 +186,7 @@ class BaseInferenceRunner(abc.ABC):
         save_cross_attention_maps: bool = True,
         save_context_audio: bool = True,
         save_predicted_codes: bool = True,
-    ) -> Tuple[List[dict], List[str], List[str]]:
-        ...
+    ) -> Tuple[List[dict], List[str], List[str]]: ...
 
     # -- shared helpers ------------------------------------------------------
 
