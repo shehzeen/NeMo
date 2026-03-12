@@ -1360,9 +1360,7 @@ class MagpieTTSModel(ModelPT):
             pred_audio_codes, pred_audio_codes_lens = remove_eos_token(
                 codes=pred_audio_codes, codes_len=audio_codes_lens
             )
-            pred_audio, pred_audio_lens, _ = self._codec_helper.codes_to_audio(
-                pred_audio_codes, pred_audio_codes_lens
-            )
+            pred_audio, pred_audio_lens, _ = self._codec_helper.codes_to_audio(pred_audio_codes, pred_audio_codes_lens)
 
             # Decode targets: remove EOS token, then decode to audio
             target_audio_codes, target_audio_codes_lens = remove_eos_token(
@@ -1600,7 +1598,8 @@ class MagpieTTSModel(ModelPT):
             lens = batch['context_audio_codes_lens']
         else:
             codes, lens = self._codec_helper.audio_to_codes(
-                batch['context_audio'], batch['context_audio_lens'],
+                batch['context_audio'],
+                batch['context_audio_lens'],
                 sample_rate=batch.get('context_sample_rate'),
             )
 
@@ -2012,7 +2011,8 @@ class MagpieTTSModel(ModelPT):
 
         if 'audio_codes' not in batch:
             audio_codes, audio_codes_lens = self._codec_helper.audio_to_codes(
-                batch['audio'], batch['audio_lens'],
+                batch['audio'],
+                batch['audio_lens'],
                 sample_rate=batch.get('sample_rate'),
             )
         else:

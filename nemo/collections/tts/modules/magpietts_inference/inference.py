@@ -473,7 +473,8 @@ class MagpieInferenceRunner(BaseInferenceRunner):
             predicted_codes_lens_tensor = torch.tensor(predicted_codes_lens, dtype=torch.long, device='cuda')
 
             predicted_audio, predicted_audio_lens, _ = self.model._codec_helper.codes_to_audio(
-                predicted_codes, predicted_codes_lens_tensor,
+                predicted_codes,
+                predicted_codes_lens_tensor,
             )
 
             total_audio_samples = sum(predicted_audio_lens.cpu().tolist())
