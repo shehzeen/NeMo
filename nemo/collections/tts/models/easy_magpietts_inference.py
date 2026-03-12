@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import partial
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -184,6 +184,29 @@ class InferBatchOutput:
     phoneme_prediction_start_idx: Optional[torch.Tensor] = None  # (B,) start index into predicted_phoneme_tokens
 
 
+@dataclass
+class EasyModelInferenceParameters:
+    """Inference parameters for the decoder-only EasyMagpieTTS model.
+
+    Attributes:
+        max_decoder_steps: Maximum number of decoder steps.
+        temperature: Sampling temperature.
+        topk: Number of top-probability tokens to consider in sampling.
+        cfg_scale: Scale factor for classifier-free guidance.
+    """
+
+    max_decoder_steps: int = 300
+    temperature: float = 0.7
+    topk: int = 80
+    cfg_scale: float = 2.5
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EasyModelInferenceParameters':
+        field_names = {field.name for field in fields(cls)}
+        filtered_data = {k: v for k, v in data.items() if k in field_names}
+        return cls(**filtered_data)
+
+
 class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
     """
     Inference-only base class for EasyMagpieTTS decoder-only model.
@@ -319,6 +342,7 @@ class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
 
         self.pad_context_text_to_max_duration = False
         self.add_language_to_context_text = cfg.get('add_language_to_context_text', False)
+        self.ignore_phoneme_languages = cfg.get('ignore_phoneme_languages', [])
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -464,6 +488,12 @@ class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
         return [
             '_codec_model',
         ]
+
+    def setup_training_data(self, train_data_config=None):
+        pass
+
+    def setup_validation_data(self, val_data_config=None):
+        pass
 
     def codes_to_audio(self, codes, codes_len):
         # codes: (B, C, T')
@@ -734,19 +764,11 @@ class EasyMagpieTTSInferenceModel(BaseMagpieTTSModel):
             eos_id=self.context_audio_eos_id,
         )
 
-        # Use legacy audio_bos_id/audio_eos_id if flag is set
-        stack_bos_id = (
-            self.audio_bos_id if getattr(self, 'legacy_context_stacking', False) else self.context_audio_bos_id
-        )
-        stack_eos_id = (
-            self.audio_eos_id if getattr(self, 'legacy_context_stacking', False) else self.context_audio_eos_id
-        )
-
         context_audio_codes, context_audio_codes_lens = self.stack_codes(
             context_audio_codes,
             context_audio_codes_lens,
-            stack_bos_id,
-            stack_eos_id,
+            self.context_audio_bos_id,
+            self.context_audio_eos_id,
             self.frame_stacking_factor,
             self.num_audio_codebooks,
         )

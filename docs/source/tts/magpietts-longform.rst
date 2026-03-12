@@ -169,7 +169,7 @@ The ``do_tts`` method automatically detects whether longform inference is needed
     sf.write("output.wav", long_audio[0].cpu().numpy(), 22050)
 
 
-Method 2: Using CLI (``tts_infer.py``)
+Method 2: Using CLI (``magpietts_inference.py``)
 ------------------------------------------------
 
 For batch inference from manifests:
@@ -177,7 +177,7 @@ For batch inference from manifests:
 .. code-block:: bash
 
     # Auto-detect longform based on text length (default)
-    python examples/tts/tts_infer.py \
+    python examples/tts/magpietts_inference.py \
         --nemo_files /path/to/magpietts.nemo \
         --datasets_json_path /path/to/evalset_config.json \
         --out_dir /path/to/output \
@@ -185,7 +185,7 @@ For batch inference from manifests:
         --longform_mode auto
 
     # Force longform inference for all inputs
-    python examples/tts/tts_infer.py \
+    python examples/tts/magpietts_inference.py \
         --nemo_files /path/to/magpietts.nemo \
         --datasets_json_path /path/to/evalset_config.json \
         --out_dir /path/to/output \

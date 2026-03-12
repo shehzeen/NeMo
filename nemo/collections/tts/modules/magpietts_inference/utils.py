@@ -28,7 +28,7 @@ from typing import Dict, Optional, Tuple
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from nemo.collections.tts.models import EasyMagpieTTSModel, MagpieTTSModel
+from nemo.collections.tts.models import EasyMagpieTTSInferenceModel, MagpieTTSModel
 from nemo.utils import logging
 
 
@@ -119,6 +119,7 @@ class ModelLoadConfig:
         legacy_codebooks: Use legacy codebook indices for old checkpoints.
         legacy_text_conditioning: Use legacy text conditioning for old checkpoints.
         hparams_from_wandb: Whether hparams file is from wandb export.
+        phoneme_tokenizer_path: Override path to the phoneme tokenizer file (EasyMagpieTTS only).
     """
 
     hparams_file: Optional[str] = None
@@ -128,6 +129,7 @@ class ModelLoadConfig:
     legacy_codebooks: bool = False
     legacy_text_conditioning: bool = False
     hparams_from_wandb: bool = False
+    phoneme_tokenizer_path: Optional[str] = None
 
     def validate(self) -> None:
         """Validate that the configuration is complete and consistent."""
@@ -336,8 +338,13 @@ def load_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tuple[Ma
     return model, checkpoint_name
 
 
-def load_easy_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tuple[EasyMagpieTTSModel, str]:
-    """Load an EasyMagpieTTSModel (decoder-only) from checkpoint or NeMo archive.
+def load_easy_magpie_model(
+    config: ModelLoadConfig, device: str = "cuda"
+) -> Tuple[EasyMagpieTTSInferenceModel, str]:
+    """Load an EasyMagpieTTSInferenceModel (decoder-only) from checkpoint or NeMo archive.
+
+    Uses the inference-only base class rather than the full training model,
+    which avoids pulling in training-specific dependencies.
 
     Supports two loading modes:
     1. Checkpoint mode: hparams.yaml + .ckpt file
@@ -367,8 +374,10 @@ def load_easy_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tup
             model_cfg.codecmodel_path = config.codecmodel_path
             model_cfg.train_ds = None
             model_cfg.validation_ds = None
+            if config.phoneme_tokenizer_path and hasattr(model_cfg, 'phoneme_tokenizer'):
+                model_cfg.phoneme_tokenizer.tokenizer_path = config.phoneme_tokenizer_path
 
-        model = EasyMagpieTTSModel(cfg=model_cfg)
+        model = EasyMagpieTTSInferenceModel(cfg=model_cfg)
 
         logging.info(f"Loading weights from checkpoint: {config.checkpoint_file}")
         ckpt = torch.load(config.checkpoint_file)
@@ -378,22 +387,29 @@ def load_easy_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tup
         checkpoint_name = os.path.basename(config.checkpoint_file).replace(".ckpt", "")
     else:
         if config.nemo_file.startswith("nvidia/"):
-            model = EasyMagpieTTSModel.from_pretrained(config.nemo_file)
+            model = EasyMagpieTTSInferenceModel.from_pretrained(config.nemo_file)
             checkpoint_name = config.nemo_file.split("/")[-1]
         else:
             logging.info(f"Loading model from NeMo archive: {config.nemo_file}")
-            model_cfg = EasyMagpieTTSModel.restore_from(config.nemo_file, return_config=True)
+            model_cfg = EasyMagpieTTSInferenceModel.restore_from(config.nemo_file, return_config=True)
 
             with open_dict(model_cfg):
                 model_cfg.codecmodel_path = config.codecmodel_path
                 model_cfg.train_ds = None
                 model_cfg.validation_ds = None
+                if config.phoneme_tokenizer_path and hasattr(model_cfg, 'phoneme_tokenizer'):
+                    model_cfg.phoneme_tokenizer.tokenizer_path = config.phoneme_tokenizer_path
+                # Override target so restore_from instantiates the inference class,
+                # not the training subclass stored in the .nemo config.
+                model_cfg.target = (
+                    'nemo.collections.tts.models.easy_magpietts_inference.EasyMagpieTTSInferenceModel'
+                )
 
-            model = EasyMagpieTTSModel.restore_from(config.nemo_file, override_config_path=model_cfg)
+            model = EasyMagpieTTSInferenceModel.restore_from(config.nemo_file, override_config_path=model_cfg)
             checkpoint_name = os.path.basename(config.nemo_file).replace(".nemo", "")
 
     model.to(device)
-    model.eval()
+    model.eval().float()
     logging.info("EasyMagpieTTS model loaded and ready for inference.")
 
     return model, checkpoint_name
@@ -480,7 +496,7 @@ def log_model_architecture_summary(model) -> Tuple[str, Dict[str, dict]]:
 
     Detects and logs MoE configuration for each transformer component,
     computing FLOPs metrics and parameter counts. Gracefully handles
-    decoder-only models (EasyMagpieTTSModel) that use HuggingFace/Nemotron
+    decoder-only models (EasyMagpieTTSInferenceModel) that use HuggingFace/Nemotron
     decoders without the d_model/d_ffn config structure.
 
     Args:

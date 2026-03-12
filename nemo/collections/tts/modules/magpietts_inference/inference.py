@@ -21,7 +21,7 @@ This module provides a strategy-pattern based inference framework with:
 MagpieInferenceRunner handles the encoder-decoder MagpieTTSModel
 (chunked text, generate_speech + codes_to_audio).
 
-EasyMagpieInferenceRunner handles the decoder-only EasyMagpieTTSModel
+EasyMagpieInferenceRunner handles the decoder-only EasyMagpieTTSInferenceModel
 (infer_batch, returns audio directly).
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ import torch
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPATokenizer
 from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset, MagpieTTSDataset
-from nemo.collections.tts.models.easy_magpietts import EasyModelInferenceParameters
+from nemo.collections.tts.models.easy_magpietts_inference import EasyModelInferenceParameters
 from nemo.collections.tts.models.magpietts import ModelInferenceParameters
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.utils import logging
@@ -123,13 +123,12 @@ class MagpieInferenceConfig(BaseInferenceConfig):
 
 @dataclass
 class EasyMagpieInferenceConfig(BaseInferenceConfig):
-    """Configuration for decoder-only EasyMagpieTTSModel inference."""
+    """Configuration for decoder-only EasyMagpieTTSInferenceModel inference."""
 
     model_inference_parameters: EasyModelInferenceParameters = field(default_factory=EasyModelInferenceParameters)
     phoneme_input_type: str = "gt"
     phoneme_sampling_method: str = "argmax"
     dropout_text_input: bool = False
-    legacy_context_stacking: bool = False
 
     def build_identifier(self) -> str:
         parts = [
@@ -538,19 +537,18 @@ class MagpieInferenceRunner(BaseInferenceRunner):
 
 
 # ---------------------------------------------------------------------------
-# EasyMagpieInferenceRunner  (decoder-only EasyMagpieTTSModel)
+# EasyMagpieInferenceRunner  (decoder-only EasyMagpieTTSInferenceModel)
 # ---------------------------------------------------------------------------
 
 
 class EasyMagpieInferenceRunner(BaseInferenceRunner):
-    """Runner for decoder-only EasyMagpieTTSModel.
+    """Runner for decoder-only EasyMagpieTTSInferenceModel.
 
     Uses MagpieTTSDataset and model.infer_batch() which returns audio directly.
     """
 
     def __init__(self, model, config: EasyMagpieInferenceConfig):
         super().__init__(model, config)
-        self.model.legacy_context_stacking = config.legacy_context_stacking
 
     def create_dataset(
         self,
@@ -583,6 +581,8 @@ class EasyMagpieInferenceRunner(BaseInferenceRunner):
             pad_context_text_to_max_duration=False,
             context_duration_min=context_duration_min,
             context_duration_max=context_duration_max,
+            ignore_phoneme_languages=self.config.get('ignore_phoneme_languages', []),
+            add_language_to_context_text=self.model.add_language_to_context_text
         )
         dataset.text_tokenizer = self.model.tokenizer
 
