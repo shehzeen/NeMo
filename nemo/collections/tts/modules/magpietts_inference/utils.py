@@ -338,9 +338,7 @@ def load_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tuple[Ma
     return model, checkpoint_name
 
 
-def load_easy_magpie_model(
-    config: ModelLoadConfig, device: str = "cuda"
-) -> Tuple[EasyMagpieTTSInferenceModel, str]:
+def load_easy_magpie_model(config: ModelLoadConfig, device: str = "cuda") -> Tuple[EasyMagpieTTSInferenceModel, str]:
     """Load an EasyMagpieTTSInferenceModel (decoder-only) from checkpoint or NeMo archive.
 
     Uses the inference-only base class rather than the full training model,
@@ -401,9 +399,7 @@ def load_easy_magpie_model(
                     model_cfg.phoneme_tokenizer.tokenizer_path = config.phoneme_tokenizer_path
                 # Override target so restore_from instantiates the inference class,
                 # not the training subclass stored in the .nemo config.
-                model_cfg.target = (
-                    'nemo.collections.tts.models.easy_magpietts_inference.EasyMagpieTTSInferenceModel'
-                )
+                model_cfg.target = 'nemo.collections.tts.models.easy_magpietts_inference.EasyMagpieTTSInferenceModel'
 
             model = EasyMagpieTTSInferenceModel.restore_from(config.nemo_file, override_config_path=model_cfg)
             checkpoint_name = os.path.basename(config.nemo_file).replace(".nemo", "")

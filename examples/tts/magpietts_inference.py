@@ -591,6 +591,7 @@ def _build_easy_magpie_config(args) -> EasyMagpieInferenceConfig:
         dropout_text_input=args.dropout_text_input,
     )
 
+
 def main(argv=None):
     """Entry point for TTS inference and evaluation."""
     parser = create_argument_parser()
