@@ -38,15 +38,26 @@ from nemo.collections.tts.data.text_to_speech_dataset_lhotse import MagpieTTSLho
 from nemo.collections.tts.losses.aligner_loss import ForwardSumLoss
 from nemo.collections.tts.losses.moe_loss import MoEAuxiliaryLoss, compute_expert_usage
 from nemo.collections.tts.models import AudioCodecModel
-from nemo.collections.tts.models.base_magpietts import BaseMagpieTTSModel, worker_init_fn
 from nemo.collections.tts.modules import transformer_2501
 from nemo.collections.tts.modules.aligner import AlignmentEncoder
 from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter
 from nemo.collections.tts.modules.magpietts_modules import (
     CharAwareSubwordEncoder,
+    CodecHelper,
     EOSDetectionMethod,
+    LocalTransformerHelper,
     LocalTransformerType,
     SpecialAudioToken,
+    add_eos_token,
+    add_special_tokens,
+    clear_forbidden_logits,
+    pad_audio_codes,
+    remove_bos_token,
+    remove_embedded_bos_token,
+    remove_embedded_eos_token,
+    remove_eos_token,
+    remove_special_tokens,
+    worker_init_fn,
 )
 from nemo.collections.tts.parts.utils.helpers import (
     binarize_attention_parallel,
@@ -59,6 +70,7 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     get_tokenizer_for_language,
     stack_tensors,
 )
+from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging
 
@@ -299,7 +311,7 @@ class ModelInferenceParameters:
         return cls(**filtered_data)
 
 
-class MagpieTTSModel(BaseMagpieTTSModel):
+class MagpieTTSModel(ModelPT):
     """
     Magpie-TTS Model Base Class used for training a TTS model that can generate audio codes from transcript and a context
     audio/text
@@ -470,13 +482,14 @@ class MagpieTTSModel(BaseMagpieTTSModel):
         self._codec_model = codec_model
         self._codec_model.freeze()  # Lightning does requires_grad = False and self.eval()
         self._codec_converter = codec_converter
+        self._codec_helper = CodecHelper(self._codec_model, self._codec_converter)
 
         audio_embeddings = []
         for _ in range(self.num_audio_codebooks * self.frame_stacking_factor):
             audio_embeddings.append(nn.Embedding(self.num_all_tokens_per_codebook, cfg.embedding_dim))
         self.audio_embeddings = nn.ModuleList(audio_embeddings)
 
-        # Identity projections required by BaseMagpieTTSModel local transformer methods.
+        # Identity projections required by LocalTransformerHelper methods.
         # MagpieTTSModel embeds directly in embedding_dim, so no projection is needed.
         self.audio_in_projection = nn.Identity()
         self.local_transformer_audio_out_projection = nn.Identity()
@@ -536,6 +549,20 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                     nn.Linear(local_transformer_hidden_dim, self.num_all_tokens_per_codebook)
                 )
             self.local_transformer_out_projections = nn.ModuleList(local_transformer_out_projections)
+
+            self._lt_helper = LocalTransformerHelper(
+                local_transformer=self.local_transformer,
+                audio_embeddings=self.audio_embeddings,
+                audio_in_projection=self.audio_in_projection,
+                local_transformer_in_projection=self.local_transformer_in_projection,
+                local_transformer_audio_out_projection=self.local_transformer_audio_out_projection,
+                local_transformer_out_projections=self.local_transformer_out_projections,
+                num_audio_codebooks=self.num_audio_codebooks,
+                frame_stacking_factor=self.frame_stacking_factor,
+                audio_eos_id=self.audio_eos_id,
+                mask_token_id=self.mask_token_id,
+                codebook_size=self.codebook_size,
+            )
 
         if cfg.get('use_alignment_encoder', False):
             self.alignment_encoder = AlignmentEncoder(
@@ -750,6 +777,35 @@ class MagpieTTSModel(BaseMagpieTTSModel):
         if self.has_baked_context_embedding:
             keys.append('context_encoder')
         return keys
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        if hasattr(self, '_no_state_dict') and self._no_state_dict:
+            return {}
+        state_dict = super().state_dict(destination, prefix, keep_vars)
+        keys_substrings_to_exclude = self._get_state_dict_keys_to_exclude()
+        for key in list(state_dict.keys()):
+            if any(substring in key for substring in keys_substrings_to_exclude):
+                del state_dict[key]
+        return state_dict
+
+    def setup_optimizer_param_groups(self):
+        """Exclude frozen eval/inference-only models from the optimizer."""
+        modules_to_exclude = set(self._get_state_dict_keys_to_exclude())
+
+        excluded_param_ids = set()
+        for name, module in self.named_children():
+            if name in modules_to_exclude:
+                for param in module.parameters():
+                    excluded_param_ids.add(id(param))
+
+        trainable_params = [p for p in self.parameters() if id(p) not in excluded_param_ids]
+
+        logging.info(
+            f"setup_optimizer_param_groups: {len(trainable_params)} params in optimizer, "
+            f"{len(excluded_param_ids)} params excluded (eval models)"
+        )
+
+        self._optimizer_param_groups = [{"params": trainable_params}]
 
     def check_frame_stacking_config_validity(self):
         """
@@ -997,7 +1053,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
 
     def embed_audio_tokens(self, audio_tokens, audio_tokens_lens):
         B, C, T = audio_tokens.shape
-        audio_tokens = self.pad_audio_codes(audio_tokens).long()
+        audio_tokens = pad_audio_codes(audio_tokens, self.frame_stacking_factor).long()
         audio_embedding = None
         for i in range(self.frame_stacking_factor):
             for c in range(C):
@@ -1045,7 +1101,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             # repeat loss mask for each codebook to simplify code below
             loss_mask = loss_mask.unsqueeze(1).repeat(1, audio_codes.size(1), 1)
         total_codebook_loss = None
-        audio_codes = self.pad_audio_codes(audio_codes).long()
+        audio_codes = pad_audio_codes(audio_codes, self.frame_stacking_factor).long()
         for fs_index in range(frame_stacking_factor):
             for codebook in range(audio_codes.size(1)):
                 si = (codebook + self.num_audio_codebooks * fs_index) * self.num_all_tokens_per_codebook
@@ -1210,8 +1266,8 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                     codebook_logits[item_idx, self.audio_eos_id] = 0.0
 
                 # Disallow generation of special tokens
-                codebook_logits = self.clear_forbidden_logits(
-                    codebook_logits.unsqueeze(1), forbid_audio_eos=forbid_audio_eos
+                codebook_logits = clear_forbidden_logits(
+                    codebook_logits.unsqueeze(1), self.codebook_size, forbid_audio_eos=forbid_audio_eos
                 ).squeeze(1)
 
                 codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0]  # (B, topk)
@@ -1301,25 +1357,29 @@ class MagpieTTSModel(BaseMagpieTTSModel):
         with torch.no_grad():
             # Decode predictions: convert logits to codes, remove EOS token, then decode to audio
             pred_audio_codes = self.logits_to_audio_codes(logits, audio_codes_lens)
-            pred_audio_codes, pred_audio_codes_lens = self.remove_eos_token(
+            pred_audio_codes, pred_audio_codes_lens = remove_eos_token(
                 codes=pred_audio_codes, codes_len=audio_codes_lens
             )
-            pred_audio, pred_audio_lens, _ = self.codes_to_audio(pred_audio_codes, pred_audio_codes_lens)
+            pred_audio, pred_audio_lens, _ = self._codec_helper.codes_to_audio(
+                pred_audio_codes, pred_audio_codes_lens
+            )
 
             # Decode targets: remove EOS token, then decode to audio
-            target_audio_codes, target_audio_codes_lens = self.remove_eos_token(
+            target_audio_codes, target_audio_codes_lens = remove_eos_token(
                 codes=target_audio_codes, codes_len=audio_codes_lens
             )
-            target_audio, target_audio_lens, _ = self.codes_to_audio(target_audio_codes, target_audio_codes_lens)
+            target_audio, target_audio_lens, _ = self._codec_helper.codes_to_audio(
+                target_audio_codes, target_audio_codes_lens
+            )
 
             # Decode context audio if available (shape check ensures it's not a dummy tensor used in text context)
             # This does not handle the case in which a batch has a mixture of text and audio context examples
             context_audio, context_audio_lens = None, None
             if context_audio_codes is not None and context_audio_codes.shape[2] > 3:
-                context_audio_codes, context_audio_codes_lens = self.remove_special_tokens(
+                context_audio_codes, context_audio_codes_lens = remove_special_tokens(
                     codes=context_audio_codes, codes_len=context_audio_codes_lens
                 )
-                context_audio, context_audio_lens, _ = self.codes_to_audio(
+                context_audio, context_audio_lens, _ = self._codec_helper.codes_to_audio(
                     context_audio_codes, context_audio_codes_lens
                 )
 
@@ -1539,14 +1599,15 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             codes = batch['context_audio_codes']
             lens = batch['context_audio_codes_lens']
         else:
-            codes, lens = self.audio_to_codes(
-                batch['context_audio'], batch['context_audio_lens'], batch.get('context_sample_rate')
+            codes, lens = self._codec_helper.audio_to_codes(
+                batch['context_audio'], batch['context_audio_lens'],
+                sample_rate=batch.get('context_sample_rate'),
             )
 
         if self._codec_converter is not None:
             codes = self._codec_converter.convert_original_to_new(audio_tokens=codes, audio_lens=lens)
 
-        codes, lens = self.add_special_tokens(
+        codes, lens = add_special_tokens(
             codes=codes,
             codes_len=lens,
             bos_id=self.context_audio_bos_id,
@@ -1950,8 +2011,9 @@ class MagpieTTSModel(BaseMagpieTTSModel):
         disable_alignment_loss = False
 
         if 'audio_codes' not in batch:
-            audio_codes, audio_codes_lens = self.audio_to_codes(
-                batch['audio'], batch['audio_lens'], batch.get('sample_rate')
+            audio_codes, audio_codes_lens = self._codec_helper.audio_to_codes(
+                batch['audio'], batch['audio_lens'],
+                sample_rate=batch.get('sample_rate'),
             )
         else:
             audio_codes = batch['audio_codes']
@@ -1962,7 +2024,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                 audio_tokens=audio_codes, audio_lens=audio_codes_lens
             )
 
-        audio_codes, audio_codes_lens = self.add_special_tokens(
+        audio_codes, audio_codes_lens = add_special_tokens(
             codes=audio_codes,
             codes_len=audio_codes_lens,
             bos_id=self.audio_bos_id,
@@ -1976,7 +2038,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
         # Note: if a tensor lacks the `_unstacked` suffix, it can be assumed to be in the frame-stacked domain
 
         # Remove EOS token for decoder inputs
-        audio_codes_embedded_input, audio_codes_lens_input = self.remove_embedded_eos_token(
+        audio_codes_embedded_input, audio_codes_lens_input = remove_embedded_eos_token(
             embedded=audio_codes_embedded_all, embedded_len=audio_codes_lens_all
         )
         use_cfg = self.training and (self.cfg_unconditional_prob > 0.0) and (context_tensors.cond is not None)
@@ -2009,7 +2071,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                 random_embedded, random_embedded_lens = self.embed_audio_tokens(
                     audio_tokens=random_audio_tokens, audio_tokens_lens=audio_codes_lens
                 )  # (B T E)
-                random_embedded, random_embedded_lens = self.remove_embedded_eos_token(
+                random_embedded, random_embedded_lens = remove_embedded_eos_token(
                     embedded=random_embedded, embedded_len=random_embedded_lens
                 )
                 dec_dropout_mask = (
@@ -2028,7 +2090,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             audio_codes_mask = torch.cat([additional_decoder_mask, audio_codes_mask], dim=1)
 
         # Remove BOS token for aligner targets
-        audio_codes_embedded_target, audio_codes_lens_target = self.remove_embedded_bos_token(
+        audio_codes_embedded_target, audio_codes_lens_target = remove_embedded_bos_token(
             embedded=audio_codes_embedded_all, embedded_len=audio_codes_lens_all
         )
         aligner_encoder_loss = None
@@ -2083,7 +2145,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
         logits = logits[:, dec_context_size:, :]  # Remove the context audio embeddings from the logits
 
         # Remove BOS tokens from decoder targets
-        audio_codes_target_unstacked, audio_codes_lens_target_unstacked = self.remove_bos_token(
+        audio_codes_target_unstacked, audio_codes_lens_target_unstacked = remove_bos_token(
             codes=audio_codes, codes_len=audio_codes_lens, num_tokens=self.frame_stacking_factor
         )
         # Codebook loss (parallel)
@@ -2116,10 +2178,10 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             if self.local_transformer_type == LocalTransformerType.MASKGIT:
                 # Maskgit
                 # randomly replace some positions with MASK_TOKEN
-                audio_codes_masked, mask_tokens_mask = self.maskgit_apply_random_mask(audio_codes_target_unstacked)
+                audio_codes_masked, mask_tokens_mask = self._lt_helper.apply_random_mask(audio_codes_target_unstacked)
                 # TODO @rfejgin: the very last position might be padding but the local transformer might look at it as part of
                 #                of a pair where the first position is valid. Is this an issue?
-                local_transformer_logits = self.compute_local_transformer_logits(
+                local_transformer_logits = self._lt_helper.compute_logits(
                     dec_out[:, dec_context_size:, :], audio_codes_masked, targets_offset_by_one=True
                 )
                 local_transformer_loss, _ = self.compute_loss(
@@ -2132,7 +2194,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             else:
                 # Autoregressive
                 assert self.local_transformer_type == LocalTransformerType.AR, "Unexpected local transformer type"
-                local_transformer_logits = self.compute_local_transformer_logits(
+                local_transformer_logits = self._lt_helper.compute_logits(
                     dec_out[:, dec_context_size:, :], audio_codes_target_unstacked, targets_offset_by_one=False
                 )
                 local_transformer_loss, _ = self.compute_loss(
@@ -2903,7 +2965,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                 if use_local_transformer_for_inference:
                     if self.local_transformer_type == LocalTransformerType.AR:
                         # Autoregressive sampling with local transformer
-                        audio_codes_next = self.local_transformer_sample_autoregressive(
+                        audio_codes_next = self._lt_helper.sample_autoregressive(
                             dec_output=dec_out[:, -1, :],
                             temperature=self.inference_parameters.temperature,
                             topk=self.inference_parameters.topk,
@@ -2915,7 +2977,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                             forbid_audio_eos=forbid_audio_eos,
                         )
                     elif self.local_transformer_type == LocalTransformerType.MASKGIT:
-                        audio_codes_next = self.local_transformer_sample_maskgit(
+                        audio_codes_next = self._lt_helper.sample_maskgit(
                             dec_output=dec_out[:, -1, :],
                             temperature=self.inference_parameters.temperature,
                             topk=self.inference_parameters.topk,
@@ -2982,7 +3044,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             predicted_codes_lens = torch.tensor(predicted_lens, device=text.device).long()
             predicted_codes = predicted_codes[:, :, : predicted_codes_lens.max()]
 
-            predicted_audio, predicted_audio_lens, predicted_codes = self.codes_to_audio(
+            predicted_audio, predicted_audio_lens, predicted_codes = self._codec_helper.codes_to_audio(
                 predicted_codes, predicted_codes_lens
             )
             end_time = time.time()
@@ -3682,7 +3744,9 @@ class MagpieTTSModel(BaseMagpieTTSModel):
             if len(all_codes) > 0:
                 concatenated_codes = torch.cat(all_codes, dim=1).unsqueeze(0)
                 codes_lens = torch.tensor([concatenated_codes.shape[2]], device=self.device, dtype=torch.long)
-                predicted_audio, predicted_audio_lens, _ = self.codes_to_audio(concatenated_codes, codes_lens)
+                predicted_audio, predicted_audio_lens, _ = self._codec_helper.codes_to_audio(
+                    concatenated_codes, codes_lens
+                )
                 return predicted_audio, predicted_audio_lens
             else:
                 return torch.zeros(1, 0, device=self.device), torch.zeros(1, device=self.device, dtype=torch.long)
@@ -4489,7 +4553,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                 if use_local_transformer_for_inference:
                     if self.local_transformer_type == LocalTransformerType.AR:
                         # Autoregressive sampling with local transformer
-                        audio_codes_next = self.local_transformer_sample_autoregressive(
+                        audio_codes_next = self._lt_helper.sample_autoregressive(
                             dec_output=dec_out[:, -1, :],
                             temperature=self.inference_parameters.temperature,
                             topk=self.inference_parameters.topk,
@@ -4501,7 +4565,7 @@ class MagpieTTSModel(BaseMagpieTTSModel):
                             forbid_audio_eos=forbid_audio_eos,
                         )
                     elif self.local_transformer_type == LocalTransformerType.MASKGIT:
-                        audio_codes_next = self.local_transformer_sample_maskgit(
+                        audio_codes_next = self._lt_helper.sample_maskgit(
                             dec_output=dec_out[:, -1, :],
                             temperature=self.inference_parameters.temperature,
                             topk=self.inference_parameters.topk,

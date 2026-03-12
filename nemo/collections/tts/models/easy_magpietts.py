@@ -33,7 +33,6 @@ from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.collections.tts.data.text_to_speech_dataset_lhotse import MagpieTTSLhotseDataset, setup_tokenizers
-from nemo.collections.tts.models.base_magpietts import worker_init_fn
 from nemo.collections.tts.models.easy_magpietts_inference import (
     EasyMagpieTTSInferenceModel,
     InferBatchOutput,
@@ -41,7 +40,13 @@ from nemo.collections.tts.models.easy_magpietts_inference import (
     StreamingState,
     TrainingMode,
 )
-from nemo.collections.tts.modules.magpietts_modules import LocalTransformerType
+from nemo.collections.tts.modules.magpietts_modules import (
+    LocalTransformerType,
+    add_special_tokens,
+    remove_eos_token,
+    remove_special_tokens,
+    worker_init_fn,
+)
 from nemo.collections.tts.parts.utils.helpers import (
     compute_utmos_scores_from_filepaths,
     get_mask_from_lengths,
@@ -229,25 +234,34 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         wandb_audio_log = {}
 
         pred_audio_codes = self.logits_to_audio_codes(logits, audio_codes_lens_target)
-        pred_audio_codes, _ = self.remove_eos_token(
+        pred_audio_codes, _ = remove_eos_token(
             codes=pred_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        pred_audio, pred_audio_lens, _ = self.codes_to_audio(pred_audio_codes, audio_codes_lens_target - 1)
-        target_audio_codes, _ = self.remove_eos_token(
+        pred_audio_codes, pred_audio_codes_lens = self._prepare_codes_for_decode(pred_audio_codes, audio_codes_lens_target - 1)
+        pred_audio, pred_audio_lens, _ = self._codec_helper.codes_to_audio(
+            pred_audio_codes, pred_audio_codes_lens,
+        )
+        target_audio_codes, _ = remove_eos_token(
             codes=target_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        target_audio, target_audio_lens, _ = self.codes_to_audio(target_audio_codes, audio_codes_lens_target - 1)
+        target_audio_codes, target_audio_codes_lens = self._prepare_codes_for_decode(target_audio_codes, audio_codes_lens_target - 1)
+        target_audio, target_audio_lens, _ = self._codec_helper.codes_to_audio(
+            target_audio_codes, target_audio_codes_lens,
+        )
 
         context_audio, context_audio_lens = None, None
         if context_audio_codes is not None and context_audio_codes.shape[2] > 3:
             # > 3 ensures, it is a valid context audio tensor (and not dummy tensor used in text context)
-            context_audio_codes, context_audio_codes_lens = self.remove_special_tokens(
+            context_audio_codes, context_audio_codes_lens = remove_special_tokens(
                 codes=context_audio_codes,
                 codes_len=context_audio_codes_lens,
             )
-            context_audio, context_audio_lens, _ = self.codes_to_audio(context_audio_codes, context_audio_codes_lens)
+            context_audio_codes, context_audio_codes_lens = self._prepare_codes_for_decode(context_audio_codes, context_audio_codes_lens)
+            context_audio, context_audio_lens, _ = self._codec_helper.codes_to_audio(
+                context_audio_codes, context_audio_codes_lens,
+            )
 
         for logger in self.loggers:
             is_wandb = isinstance(logger, WandbLogger)
@@ -545,7 +559,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             ).long()
 
         # Add BOS and EOS tokens
-        audio_codes, audio_codes_lens = self.add_special_tokens(
+        audio_codes, audio_codes_lens = add_special_tokens(
             codes=audio_codes,
             codes_len=audio_codes_lens,
             bos_id=self.audio_bos_id,
@@ -859,7 +873,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         local_transformer_logits = None
         if self.local_transformer_type != LocalTransformerType.NO_LT:
             assert self.local_transformer_type == LocalTransformerType.AR, "Unexpected local transformer type"
-            local_transformer_logits = self.compute_local_transformer_logits(
+            local_transformer_logits = self._lt_helper.compute_logits(
                 pred_embeddings, audio_codes_target, targets_offset_by_one=False
             )
             local_transformer_loss, _ = self.compute_loss(
@@ -918,7 +932,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         else:
             context_audio = batch['context_audio']
             context_audio_lens = batch['context_audio_lens']
-            context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
+            context_audio_codes, context_audio_codes_lens = self._codec_helper.audio_to_codes(
+                context_audio, context_audio_lens
+            )
 
         if 'audio_codes' in batch:
             audio_codes = batch['audio_codes']
@@ -926,7 +942,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         else:
             audio = batch['audio']
             audio_lens = batch['audio_lens']
-            audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
+            audio_codes, audio_codes_lens = self._codec_helper.audio_to_codes(audio, audio_lens)
 
         batch_output = self.process_batch(
             text=batch['text'],
@@ -1013,7 +1029,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         else:
             context_audio = batch['context_audio']
             context_audio_lens = batch['context_audio_lens']
-            context_audio_codes, context_audio_codes_lens = self.audio_to_codes(context_audio, context_audio_lens)
+            context_audio_codes, context_audio_codes_lens = self._codec_helper.audio_to_codes(
+                context_audio, context_audio_lens
+            )
 
         if 'audio_codes' in batch:
             audio_codes = batch['audio_codes']
@@ -1021,7 +1039,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         else:
             audio = batch['audio']
             audio_lens = batch['audio_lens']
-            audio_codes, audio_codes_lens = self.audio_to_codes(audio, audio_lens)
+            audio_codes, audio_codes_lens = self._codec_helper.audio_to_codes(audio, audio_lens)
 
         batch_output = self.process_batch(
             text=batch['text'],
@@ -1095,12 +1113,15 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             predicted_audio_paths = []
             context_audio_paths = []
 
-            context_audio_codes_cleaned, context_audio_codes_lens_cleaned = self.remove_special_tokens(
+            context_audio_codes_cleaned, context_audio_codes_lens_cleaned = remove_special_tokens(
                 codes=context_audio_codes,
                 codes_len=context_audio_codes_lens,
             )
-            context_audio_cleaned, context_audio_lens_cleaned, _ = self.codes_to_audio(
-                context_audio_codes_cleaned, context_audio_codes_lens_cleaned
+            context_audio_codes_cleaned, context_audio_codes_lens_cleaned = self._prepare_codes_for_decode(
+                context_audio_codes_cleaned, context_audio_codes_lens_cleaned,
+            )
+            context_audio_cleaned, context_audio_lens_cleaned, _ = self._codec_helper.codes_to_audio(
+                context_audio_codes_cleaned, context_audio_codes_lens_cleaned,
             )
 
             for idx in range(infer_output.predicted_audio.size(0)):

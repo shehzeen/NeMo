@@ -307,7 +307,7 @@ class MagpieInferenceRunner(BaseInferenceRunner):
     """Runner for encoder-decoder MagpieTTSModel.
 
     Uses ChunkedTTSInferenceDataset and model.generate_speech() per chunk,
-    then model.codes_to_audio() to produce waveforms.
+    then codes_to_audio() to produce waveforms.
     """
 
     def __init__(self, model, config: MagpieInferenceConfig):
@@ -472,8 +472,8 @@ class MagpieInferenceRunner(BaseInferenceRunner):
             predicted_codes = stack_tensors(predicted_codes_list, max_lens=[max_code_len]).cuda()
             predicted_codes_lens_tensor = torch.tensor(predicted_codes_lens, dtype=torch.long, device='cuda')
 
-            predicted_audio, predicted_audio_lens, _ = self.model.codes_to_audio(
-                predicted_codes, predicted_codes_lens_tensor
+            predicted_audio, predicted_audio_lens, _ = self.model._codec_helper.codes_to_audio(
+                predicted_codes, predicted_codes_lens_tensor,
             )
 
             total_audio_samples = sum(predicted_audio_lens.cpu().tolist())

@@ -51,6 +51,7 @@ except (ImportError, ModuleNotFoundError):
     PYNINI_AVAILABLE = False
 
 from nemo.collections.tts.models import MagpieTTSModel
+from nemo.collections.tts.modules.magpietts_modules import add_eos_token
 
 
 class MagpieTTSModelOfflinePODataGen(MagpieTTSModel):
@@ -904,7 +905,7 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
             with torch.no_grad():
                 reference_model_output = self._reference_model.process_batch(batch_repeated)
 
-        codebook_targets, _ = self.add_eos_token(
+        codebook_targets, _ = add_eos_token(
             codes=predicted_codes, codes_len=predicted_codes_lens, eos_id=self.audio_eos_id
         )
 
