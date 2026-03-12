@@ -581,7 +581,7 @@ class EasyMagpieInferenceRunner(BaseInferenceRunner):
             pad_context_text_to_max_duration=False,
             context_duration_min=context_duration_min,
             context_duration_max=context_duration_max,
-            ignore_phoneme_languages=self.config.get('ignore_phoneme_languages', []),
+            ignore_phoneme_languages=self.model.cfg.get('ignore_phoneme_languages', []),
             add_language_to_context_text=self.model.add_language_to_context_text,
         )
         dataset.text_tokenizer = self.model.tokenizer
