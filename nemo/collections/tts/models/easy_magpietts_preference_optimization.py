@@ -439,7 +439,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 ).long()
             context_codes, context_lens = self._prepare_codes_for_decode(context_codes, context_lens)
             context_audio, context_audio_lens, _ = self._codec_helper.codes_to_audio(
-                context_codes, context_lens,
+                context_codes,
+                context_lens,
             )
             return self._save_waveforms_to_paths(
                 waveforms=context_audio,

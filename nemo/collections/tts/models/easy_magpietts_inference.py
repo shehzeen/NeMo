@@ -1721,9 +1721,12 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
             # No need to remove EOS - end_indices already point to the frame before EOS
             # Decode to audio (codes are already unstacked: B, C, T)
-            predicted_codes, predicted_codes_lens = self._prepare_codes_for_decode(predicted_codes, predicted_codes_lens)
+            predicted_codes, predicted_codes_lens = self._prepare_codes_for_decode(
+                predicted_codes, predicted_codes_lens
+            )
             audio, audio_len, decoded_codes = self._codec_helper.codes_to_audio(
-                predicted_codes, predicted_codes_lens,
+                predicted_codes,
+                predicted_codes_lens,
             )
 
             return StreamingFinalizeOutput(
@@ -1824,9 +1827,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 elif 'audio' in batch:
                     gt_audio = batch['audio']
                     gt_audio_lens = batch['audio_lens']
-                    gt_audio_codes, gt_audio_codes_lens = self._codec_helper.audio_to_codes(
-                        gt_audio, gt_audio_lens
-                    )
+                    gt_audio_codes, gt_audio_codes_lens = self._codec_helper.audio_to_codes(gt_audio, gt_audio_lens)
                 else:
                     raise ValueError("Teacher forcing requires 'audio_codes' or 'audio' in batch")
 

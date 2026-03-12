@@ -238,17 +238,23 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             codes=pred_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        pred_audio_codes, pred_audio_codes_lens = self._prepare_codes_for_decode(pred_audio_codes, audio_codes_lens_target - 1)
+        pred_audio_codes, pred_audio_codes_lens = self._prepare_codes_for_decode(
+            pred_audio_codes, audio_codes_lens_target - 1
+        )
         pred_audio, pred_audio_lens, _ = self._codec_helper.codes_to_audio(
-            pred_audio_codes, pred_audio_codes_lens,
+            pred_audio_codes,
+            pred_audio_codes_lens,
         )
         target_audio_codes, _ = remove_eos_token(
             codes=target_audio_codes,
             codes_len=audio_codes_lens_target,
         )
-        target_audio_codes, target_audio_codes_lens = self._prepare_codes_for_decode(target_audio_codes, audio_codes_lens_target - 1)
+        target_audio_codes, target_audio_codes_lens = self._prepare_codes_for_decode(
+            target_audio_codes, audio_codes_lens_target - 1
+        )
         target_audio, target_audio_lens, _ = self._codec_helper.codes_to_audio(
-            target_audio_codes, target_audio_codes_lens,
+            target_audio_codes,
+            target_audio_codes_lens,
         )
 
         context_audio, context_audio_lens = None, None
@@ -258,9 +264,12 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 codes=context_audio_codes,
                 codes_len=context_audio_codes_lens,
             )
-            context_audio_codes, context_audio_codes_lens = self._prepare_codes_for_decode(context_audio_codes, context_audio_codes_lens)
+            context_audio_codes, context_audio_codes_lens = self._prepare_codes_for_decode(
+                context_audio_codes, context_audio_codes_lens
+            )
             context_audio, context_audio_lens, _ = self._codec_helper.codes_to_audio(
-                context_audio_codes, context_audio_codes_lens,
+                context_audio_codes,
+                context_audio_codes_lens,
             )
 
         for logger in self.loggers:
@@ -1118,10 +1127,12 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 codes_len=context_audio_codes_lens,
             )
             context_audio_codes_cleaned, context_audio_codes_lens_cleaned = self._prepare_codes_for_decode(
-                context_audio_codes_cleaned, context_audio_codes_lens_cleaned,
+                context_audio_codes_cleaned,
+                context_audio_codes_lens_cleaned,
             )
             context_audio_cleaned, context_audio_lens_cleaned, _ = self._codec_helper.codes_to_audio(
-                context_audio_codes_cleaned, context_audio_codes_lens_cleaned,
+                context_audio_codes_cleaned,
+                context_audio_codes_lens_cleaned,
             )
 
             for idx in range(infer_output.predicted_audio.size(0)):
