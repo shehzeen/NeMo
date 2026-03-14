@@ -489,6 +489,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 )
             self.local_transformer_out_projections = nn.ModuleList(local_transformer_out_projections)
 
+            # EasyMagpie stacks frames into the channel dimension (B, C*S, T_stacked)
+            # via stack_codes, unlike Magpie which keeps them interleaved in time (B, C, T_full).
+            # We pass num_audio_codebooks=C*S and frame_stacking_factor=1 so the helper
+            # treats each stacked channel as an independent codebook without time-domain striding.
             self._lt_helper = LocalTransformerHelper(
                 local_transformer=self.local_transformer,
                 audio_embeddings=self.audio_embeddings,
@@ -496,8 +500,8 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 local_transformer_in_projection=self.local_transformer_in_projection,
                 local_transformer_audio_out_projection=self.local_transformer_audio_out_projection,
                 local_transformer_out_projections=self.local_transformer_out_projections,
-                num_audio_codebooks=self.num_audio_codebooks,
-                frame_stacking_factor=self.frame_stacking_factor,
+                num_audio_codebooks=self.num_audio_codebooks * self.frame_stacking_factor,
+                frame_stacking_factor=1,
                 audio_eos_id=self.audio_eos_id,
                 mask_token_id=self.mask_token_id,
                 codebook_size=self.codebook_size,
