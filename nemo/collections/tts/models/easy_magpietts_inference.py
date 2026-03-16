@@ -989,6 +989,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                     topk=topk,
                     use_cfg=use_cfg,
                     cfg_scale=cfg_scale,
+                    use_kv_cache=False,
                     sanitize_logits=True,
                 )
                 # Base class returns (B, C, S); flatten to (B, C*S) for downstream code
