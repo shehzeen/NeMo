@@ -7,8 +7,6 @@ batch_size: 2
 # If null, then weighted sampling is disabled.
 weighted_sampling_steps_per_epoch: null
 
-# Dataset metadata for each manifest
-# https://github.com/NVIDIA/NeMo/blob/main/nemo/collections/tts/data/vocoder_dataset.py#L39-L41
 train_ds_meta: ???
 val_ds_meta: ???
 
@@ -88,10 +86,6 @@ model:
   # model.tokenizer.first_tokenizer.additional_special_tokens
   
   # Multi-mode training configuration
-  # The model will randomly select one of the modes for each batch during training.
-  # Each mode has its own task embedding that is prepended to the context.
-  # During inference, you can specify which mode to use via the derived
-  # 'inference_mode' string: "{text_input_mode}_{streaming_phonemes_delay}_{streaming_speech_delay}".
   training_modes:
     - text_input_mode: "streaming" # Options: "full", "streaming"
       streaming_phonemes_delay: 0

@@ -6,9 +6,6 @@ quadratic_duration: 20
 # When doing weighted sampling with multiple manifests, this defines how many training steps are in an epoch.
 # If null, then weighted sampling is disabled.
 
-# Dataset metadata for each manifest
-# https://github.com/NVIDIA/NeMo/blob/main/nemo/collections/tts/data/vocoder_dataset.py#L39-L41
-
 model:
   use_lhotse: true
   
@@ -83,10 +80,6 @@ model:
   cfg_unconditional_prob: 0.05
   
   # Multi-mode training configuration
-  # The model will randomly select one of the modes for each batch during training.
-  # Each mode has its own task embedding that is prepended to the context.
-  # During inference, you can specify which mode to use via the derived
-  # 'inference_mode' string: "{text_input_mode}_{streaming_phonemes_delay}_{streaming_speech_delay}".
   training_modes:
     - text_input_mode: "streaming" # Options: "full", "streaming"
       streaming_phonemes_delay: 0

@@ -204,17 +204,21 @@ def run_inference_and_evaluation(
     if violin_plot_metrics is None:
         violin_plot_metrics = list(DEFAULT_VIOLIN_METRICS)
 
+    # Remove UTMOSv2 from plots if disabled
     if not eval_config.with_utmosv2 and 'utmosv2' in violin_plot_metrics:
         violin_plot_metrics.remove('utmosv2')
 
+    # Build full checkpoint identifier (include MoE info if present)
     full_checkpoint_name = (
         f"{checkpoint_name}_{moe_info}{inference_config.build_identifier()}_SV_{eval_config.sv_model}"
     )
 
+    # Tracking metrics across datasets
     ssim_per_dataset = []
     cer_per_dataset = []
     all_datasets_filewise_metrics = {}
 
+    # CSV headers
     csv_header = (
         "checkpoint_name,dataset,cer_filewise_avg,wer_filewise_avg,cer_cumulative,"
         "wer_cumulative,ssim_pred_gt_avg,ssim_pred_context_avg,ssim_gt_context_avg,"
@@ -231,14 +235,17 @@ def run_inference_and_evaluation(
         manifest_records = read_manifest(meta['manifest_path'])
         language = meta.get('whisper_language', 'en')
 
+        # Prepare dataset metadata (remove evaluation-specific keys)
         dataset_meta_for_dl = copy.deepcopy(meta)
         for key in ["whisper_language", "load_cached_codes_if_available"]:
             dataset_meta_for_dl.pop(key, None)
 
+        # Setup output directories
         eval_dir = os.path.join(out_dir, f"{full_checkpoint_name}_{dataset}")
         audio_dir = os.path.join(eval_dir, "audio")
         os.makedirs(eval_dir, exist_ok=True)
 
+        # Setup CSV files
         per_run_csv = os.path.join(eval_dir, "all_experiment_metrics.csv")
         write_csv_header_if_needed(per_run_csv, csv_header)
 
@@ -251,6 +258,7 @@ def run_inference_and_evaluation(
             repeat_audio_dir = os.path.join(audio_dir, f"repeat_{repeat_idx}")
             os.makedirs(repeat_audio_dir, exist_ok=True)
 
+            # Create dataset and run inference
             test_dataset = runner.create_dataset({dataset: dataset_meta_for_dl})
 
             if len(test_dataset) != len(manifest_records):
@@ -264,12 +272,14 @@ def run_inference_and_evaluation(
                 manifest_records=manifest_records,
                 audio_base_dir=meta['audio_dir'],
                 save_cross_attention_maps=True,
-                save_context_audio=(repeat_idx == 0),
-                save_predicted_codes=eval_config.with_fcd,
+                save_context_audio=(repeat_idx == 0),  # Only save context audio once
+                save_predicted_codes=eval_config.with_fcd,  # Code files are only needed for FCD computation
             )
 
+            # Compute mean RTF metrics
             mean_rtf = runner.compute_mean_rtf_metrics(rtf_metrics_list)
 
+            # Add FLOPs metrics per component
             for component_name, component_flops in flops_per_component.items():
                 for key, value in component_flops.items():
                     mean_rtf[f"{component_name}_{key}"] = value
@@ -282,6 +292,7 @@ def run_inference_and_evaluation(
                 logging.info("Skipping evaluation as requested.")
                 continue
 
+            # Run evaluation
             eval_config_for_dataset = EvaluationConfig(
                 sv_model=eval_config.sv_model,
                 asr_model_name=eval_config.asr_model_name,
@@ -302,6 +313,7 @@ def run_inference_and_evaluation(
             metrics_all_repeats.append(metrics)
             filewise_metrics_all_repeats.extend(filewise_metrics)
 
+            # Save metrics
             with open(os.path.join(eval_dir, f"{dataset}_metrics_{repeat_idx}.json"), "w") as f:
                 json.dump(metrics, f, indent=4)
 
@@ -309,19 +321,24 @@ def run_inference_and_evaluation(
             with open(os.path.join(eval_dir, f"{dataset}_filewise_metrics_{repeat_idx}.json"), "w") as f:
                 json.dump(sorted_filewise, f, indent=4)
 
+            # Append to per-run CSV
             append_metrics_to_csv(per_run_csv, full_checkpoint_name, dataset, metrics)
 
+            # Create violin plot for this repeat
             violin_path = Path(eval_dir) / f"{dataset}_violin_{repeat_idx}.png"
             create_violin_plot(filewise_metrics, violin_plot_metrics, violin_path)
 
+            # Delete temporary predicted codes files
             for codec_file_path in codec_file_paths:
                 os.remove(codec_file_path)
 
         if skip_evaluation or not metrics_all_repeats:
             continue
 
+        # Store for combined plot
         all_datasets_filewise_metrics[dataset] = filewise_metrics_all_repeats
 
+        # Compute mean with confidence interval across repeats
         metrics_mean_ci = compute_mean_with_confidence_interval(
             metrics_all_repeats,
             confidence=confidence_level,
@@ -329,23 +346,28 @@ def run_inference_and_evaluation(
 
         formatted_metrics_mean_ci = create_formatted_metrics_mean_ci(metrics_mean_ci)
 
+        # Write to aggregated CSV
         ci_csv = os.path.join(out_dir, "all_experiment_metrics_with_ci.csv")
         write_csv_header_if_needed(ci_csv, csv_header)
         append_metrics_to_csv(ci_csv, full_checkpoint_name, dataset, formatted_metrics_mean_ci)
 
+        # Track per-dataset means
         ssim_values = [m['ssim_pred_context_avg'] for m in metrics_all_repeats]
         cer_values = [m['cer_cumulative'] for m in metrics_all_repeats]
         ssim_per_dataset.append(np.mean(ssim_values))
         cer_per_dataset.append(np.mean(cer_values))
 
+    # Create combined plot if we have multiple datasets
     if len(all_datasets_filewise_metrics) > 1:
         combined_plot_path = os.path.join(out_dir, f"{full_checkpoint_name}_combined_violin_plot.png")
         create_combined_box_plot(all_datasets_filewise_metrics, violin_plot_metrics, combined_plot_path)
 
+    # Clean up if requested
     if clean_up_disk:
         logging.info(f"Cleaning up output directory: {out_dir}")
         shutil.rmtree(out_dir)
 
+    # Return averaged metrics
     if ssim_per_dataset and cer_per_dataset:
         return np.mean(cer_per_dataset), np.mean(ssim_per_dataset)
     return None, None
@@ -651,13 +673,17 @@ def main(argv=None):
                 phoneme_tokenizer_path=getattr(args, 'phoneme_tokenizer_path', None),
             )
 
+            # Load model
             model, checkpoint_name = load_fn(model_config)
+            # Log architecture summary and get MoE info + FLOPs metrics
             moe_info, flops_per_component = log_model_architecture_summary(model)
 
+            # Add experiment name prefix if requested
             if args.log_exp_name and model_config.checkpoint_file:
                 exp_name = get_experiment_name_from_checkpoint_path(model_config.checkpoint_file)
                 checkpoint_name = f"{exp_name}__{checkpoint_name}"
 
+            # Create inference runner
             runner = runner_cls(model, inference_config)
 
             cer, ssim = run_inference_and_evaluation(
@@ -689,9 +715,12 @@ def main(argv=None):
                 phoneme_tokenizer_path=getattr(args, 'phoneme_tokenizer_path', None),
             )
 
+            # Load model
             model, checkpoint_name = load_fn(model_config)
+            # Log architecture summary and get MoE info + FLOPs metrics
             moe_info, flops_per_component = log_model_architecture_summary(model)
 
+            # Create inference runner
             runner = runner_cls(model, inference_config)
 
             cer, ssim = run_inference_and_evaluation(
