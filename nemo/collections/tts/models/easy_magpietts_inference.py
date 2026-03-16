@@ -1970,28 +1970,39 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
     @staticmethod
     def _load_audio_for_inference(audio_path: str, target_sample_rate: int) -> torch.Tensor:
-        audio_data, sr = sf.read(audio_path, dtype='float32')
-        if len(audio_data.shape) > 1:
-            audio_data = audio_data[:, 0]
-        audio_tensor = torch.tensor(audio_data).unsqueeze(0)
+        """
+        Load context audio and resample if needed.
+        Returns tensor of shape (1, num_samples).
+        """
+        audio, sr = sf.read(audio_path, dtype='float32')
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
         if sr != target_sample_rate:
-            import torchaudio
+            import librosa
 
-            audio_tensor = torchaudio.functional.resample(audio_tensor, sr, target_sample_rate)
-        return audio_tensor.unsqueeze(0)
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sample_rate)
+        return torch.from_numpy(audio).unsqueeze(0)
 
     @staticmethod
     def _adjust_audio_to_duration_for_inference(
-        audio: torch.Tensor, sample_rate: int, target_seconds: float, codec_model_samples_per_frame: int
+        audio: torch.Tensor,
+        sample_rate: int,
+        target_duration: float,
+        codec_model_samples_per_frame: int,
     ) -> torch.Tensor:
-        target_samples = int(target_seconds * sample_rate)
-        target_samples = (target_samples // codec_model_samples_per_frame) * codec_model_samples_per_frame
-        if audio.size(-1) > target_samples:
-            audio = audio[:, :, :target_samples]
-        elif audio.size(-1) < target_samples:
-            # repeat to fill
-            repeats = target_samples // audio.size(-1) + 1
-            audio = audio.repeat(1, 1, repeats)[:, :, :target_samples]
+        """
+        Match the same duration-alignment logic used in magpietts_streaming_inference.py.
+        """
+        num_codec_frames = int(target_duration * sample_rate / codec_model_samples_per_frame)
+        target_num_samples = num_codec_frames * codec_model_samples_per_frame
+        current_num_samples = audio.size(1)
+
+        if current_num_samples >= target_num_samples:
+            audio = audio[:, :target_num_samples]
+        else:
+            num_repeats = int(np.ceil(target_num_samples / current_num_samples))
+            audio_repeated = audio.repeat(1, num_repeats)
+            audio = audio_repeated[:, :target_num_samples]
         return audio
 
     def do_tts(
