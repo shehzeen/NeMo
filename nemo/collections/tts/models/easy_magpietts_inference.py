@@ -387,7 +387,17 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 cfg.transformer_hf_backend,
                 trust_remote_code=True,
             )
-            hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
+            use_meta = cfg.get('use_meta_init_for_decoder', False)
+            if use_meta:
+                logging.info("Using meta device for decoder init (weights will be loaded from checkpoint)")
+                with torch.device('meta'):
+                    hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
+                hf_transformer = hf_transformer.to_empty(device='cpu')
+                for module in hf_transformer.modules():
+                    if 'RotaryEmbedding' in type(module).__name__ and hasattr(module, 'config'):
+                        type(module).__init__(module, module.config, device='cpu')
+            else:
+                hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
             self.decoder = hf_transformer.model
             self.lm_text_head = hf_transformer.lm_head
 
