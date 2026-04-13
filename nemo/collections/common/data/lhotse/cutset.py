@@ -23,6 +23,8 @@ from itertools import repeat
 from pathlib import Path
 from typing import KeysView, List, Mapping, Sequence, Tuple, Union
 
+from copy import deepcopy
+
 import numpy as np
 import omegaconf
 import soundfile as sf
@@ -925,7 +927,7 @@ def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
 
     def convert_cut_fn(cut: Cut) -> Cut:
         """Convert a single cut into the continuation format."""
-        orig_agent_sup = fastcopy(cut.supervisions[0])
+        orig_agent_sup = deepcopy(cut.supervisions[0])
         target_audio_orig_dur = cut.target_audio.duration
 
         # Resample audios
@@ -946,6 +948,7 @@ def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
         zero_audio = np.zeros((1, int(total_duration * sample_rate)), dtype=np.float32)
         source_recording = create_recording_from_array(zero_audio, sample_rate, recording_id=f"{cut.id}_source")
 
+        # Create source cut, preserving cut.custom safely
         cut_source = MonoCut(
             id=f"{cut.id}_source",
             start=0.0,
@@ -953,6 +956,7 @@ def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
             channel=0,
             recording=source_recording,
             supervisions=[],
+            custom=deepcopy(cut.custom) if cut.custom is not None else None,
         )
 
         # Save to memory
@@ -962,6 +966,11 @@ def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
         # Create user and agent supervisions
         user_sup = fastcopy(orig_agent_sup, start=0.0, duration=0.08, speaker="user", text="dummy text")
         agent_sup = fastcopy(orig_agent_sup, start=0.0, duration=target_audio_orig_dur - 0.08, speaker="agent")
+
+        # Safely wipe IPA from dummy user text if it exists
+        if user_sup.custom is not None and "ipa" in user_sup.custom:
+            user_sup.custom = deepcopy(user_sup.custom)
+            user_sup.custom["ipa"] = ""
 
         # Optionally add extra silence
         if add_extra_end_sil:
