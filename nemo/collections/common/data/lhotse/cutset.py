@@ -14,6 +14,8 @@
 """Lhotse CutSet utilities and Parquet manifest support for NeMo."""
 
 import io
+import os
+import json
 import logging
 import random
 import re
@@ -56,6 +58,9 @@ from nemo.collections.common.data.lhotse.text_adapters import (
 )
 from nemo.collections.common.parts.preprocessing.manifest import get_full_path
 
+from lhotse import Recording, AudioSource, SupervisionSegment, MonoCut, CutSet
+
+from pydub.utils import mediainfo
 
 def temperature_reweighting(weights: List[Union[float, int]], temperature: float = 1.0) -> List[float]:
     """
@@ -782,115 +787,6 @@ def cut_to_conversation(
     )
 
 
-def _filter_cer_fn(cut: Cut, max_cer: float) -> bool:
-    return (
-        len(cut.supervisions) == 0
-        or not cut.supervisions[0].has_custom("cer")
-        or cut.supervisions[0].cer <= max_cer
-    )
-
-def _filter_val_flag_fn(cut: Cut, keep_flag: str) -> bool:
-    return not cut.has_custom("validation_status") or cut.validation_status == keep_flag
-
-def _filter_secs_fn(cut: Cut, min_sim: float) -> bool:
-    return (
-        len(cut.supervisions) == 0
-        or not cut.supervisions[0].has_custom("context_speaker_similarity")
-        or cut.supervisions[0].context_speaker_similarity >= min_sim
-    )
-
-def _filter_target_speaker_fn(cut: Cut, target_speaker: str) -> bool:
-    return len(cut.supervisions) == 0 or target_speaker is None or target_speaker in cut.supervisions[0].speaker
-
-def _create_recording_from_array(samples: np.ndarray, sampling_rate: int, recording_id: str) -> Recording:
-    with io.BytesIO() as buffer:
-        sf.write(buffer, samples.T, samplerate=sampling_rate, format='WAV')
-        buffer.seek(0)
-        return Recording.from_bytes(buffer.read(), recording_id=recording_id)
-
-def _convert_cut_fn(cut: Cut, sample_rate: int, add_extra_end_sil: bool, extra_end_silence_range: list) -> Cut:
-    orig_agent_sup = fastcopy(cut.supervisions[0])
-    target_audio_orig_dur = cut.target_audio.duration
-
-    cut.target_audio = cut.target_audio.resample(sample_rate)
-    cut.context_audio = cut.context_audio.resample(sample_rate)
-    total_duration = cut.target_audio.duration
-
-    cut_target = MonoCut(
-        id=f"{cut.id}_target",
-        start=0.0,
-        duration=total_duration,
-        channel=0,
-        recording=cut.target_audio,
-        supervisions=[],
-    )
-
-    zero_audio = np.zeros((1, int(total_duration * sample_rate)), dtype=np.float32)
-    source_recording = _create_recording_from_array(zero_audio, sample_rate, recording_id=f"{cut.id}_source")
-
-    cut_source = MonoCut(
-        id=f"{cut.id}_source",
-        start=0.0,
-        duration=total_duration,
-        channel=0,
-        recording=source_recording,
-        supervisions=[],
-        custom=deepcopy(cut.custom) if cut.custom is not None else None,
-    )
-
-    cut_source = cut_source.move_to_memory(audio_format='wav')
-    cut_target = cut_target.move_to_memory(audio_format='wav')
-
-    user_sup = fastcopy(orig_agent_sup, start=0.0, duration=0.08, speaker="user", text="dummy text")
-    agent_sup = fastcopy(orig_agent_sup, start=0.0, duration=target_audio_orig_dur - 0.08, speaker="agent")
-
-    if user_sup.custom is not None and "ipa" in user_sup.custom:
-        user_sup.custom = deepcopy(user_sup.custom)
-        user_sup.custom["ipa"] = ""
-
-    if add_extra_end_sil:
-        sil_duration = random.uniform(*extra_end_silence_range)
-        cut_target = cut_target.pad(duration=total_duration + sil_duration, direction="right")
-        cut_source = cut_source.pad(duration=total_duration + sil_duration, direction="right")
-        cut_source = cut_source.to_mono().move_to_memory(audio_format='wav')
-        cut_target = cut_target.to_mono().move_to_memory(audio_format='wav')
-        agent_sup.duration += sil_duration + 1.0
-        user_sup.duration += sil_duration
-
-    cut_source.supervisions = [user_sup, agent_sup]
-    cut_source.target_audio = cut_target.recording
-    cut_source.duration = cut_target.duration
-    cut_source.context_audio = cut.context_audio
-    cut_source.task = "lhotse_magpietts_data_as_continuation"
-
-    return cut_source
-
-
-@data_type_parser(["lhotse_magpietts_data_as_continuation"])
-def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
-    cuts, is_tarred = read_cutset_from_config(config)
-
-    add_extra_end_sil = config.get("add_extra_end_silence", False)
-    extra_end_silence_range = config.get("extra_end_silence_range", [0.5, 6.0])
-    sample_rate = config.get("sample_rate", 22050)
-
-    max_cer = config.get("max_cer", 0.03)
-    min_context_speaker_similarity = config.get("min_context_speaker_similarity", 0.6)
-    target_speaker = config.get("target_speaker", None)
-    keep_flag = "pass"
-
-    cuts = (
-        cuts.filter(partial(_filter_cer_fn, max_cer=max_cer))
-        .filter(partial(_filter_val_flag_fn, keep_flag=keep_flag))
-        .filter(partial(_filter_secs_fn, min_sim=min_context_speaker_similarity))
-        .filter(partial(_filter_target_speaker_fn, target_speaker=target_speaker))
-    )
-
-    cuts = cuts.map(partial(_convert_cut_fn, sample_rate=sample_rate, add_extra_end_sil=add_extra_end_sil, extra_end_silence_range=extra_end_silence_range))
-
-    return cuts, is_tarred
-
-
 class FilterCER:
     def __init__(self, max_cer: float):
         self.max_cer = max_cer
@@ -1004,6 +900,7 @@ class ConvertCutFn:
         return cut_source
 
 
+
 @data_type_parser(["lhotse_magpietts_data_as_continuation"])
 def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
     cuts, is_tarred = read_cutset_from_config(config)
@@ -1029,6 +926,121 @@ def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
 
     return cuts, is_tarred
 
+
+@data_type_parser(["json_magpietts_data_as_continuation"])
+def read_json_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
+    manifest_filepath = config.get("manifest_filepath")
+    
+    # Extract parameters (renamed to target_sample_rate so it isn't overwritten by the loop)
+    target_sample_rate = config.get("sample_rate", 22050)
+    add_extra_end_sil = config.get("add_extra_end_silence", False)
+    extra_end_silence_range = config.get("extra_end_silence_range", [0.5, 6.0])
+    dataset_name = config.get("dataset_name", "MyCustomDataset")
+    audio_dir = config.get("audio_dir", "")
+
+    cuts = []
+
+    with open(manifest_filepath, 'r', encoding='utf-8') as f:
+        for i, line in enumerate(f):
+            if not line.strip(): 
+                continue
+            item = json.loads(line)
+
+            target_audio_path = os.path.join(audio_dir, item["audio_filepath"])
+            context_audio_path = os.path.join(audio_dir, item["context_audio_filepath"])
+
+            # --- 1. Get exact metadata using pydub ---
+            tgt_info = mediainfo(target_audio_path)
+            ctx_info = mediainfo(context_audio_path)
+            
+            tgt_sr = int(tgt_info.get("sample_rate"))
+            ctx_sr = int(ctx_info.get("sample_rate"))
+            
+            # Use the duration from mediainfo (falling back to JSON if missing)
+            true_tgt_duration = float(tgt_info.get("duration", item["duration"]))
+            true_ctx_duration = float(ctx_info.get("duration", item["context_audio_duration"]))
+
+            # --- 2. Calculate mathematically perfect frame counts using round() ---
+            tgt_num_samples = round(true_tgt_duration * tgt_sr)
+            ctx_num_samples = round(true_ctx_duration * ctx_sr)
+
+            item_lang = item.get("language", "en")
+
+            # 3. Instantly create virtual Recordings
+            target_rec = Recording(
+                id=f"rec_tgt_{i}",
+                sources=[AudioSource(type="file", channels=[0], source=target_audio_path)],
+                sampling_rate=tgt_sr,
+                num_samples=tgt_num_samples,
+                duration=true_tgt_duration
+            )
+            
+            context_rec = Recording(
+                id=f"rec_ctx_{i}",
+                sources=[AudioSource(type="file", channels=[0], source=context_audio_path)],
+                sampling_rate=ctx_sr,
+                num_samples=ctx_num_samples,
+                duration=true_ctx_duration
+            )
+
+            # 4. Build the exact base supervision
+            speaker_id = str(item.get("speaker", "unknown"))
+            regex_speaker = f"| Language:{item_lang} Dataset:{dataset_name} Speaker:{speaker_id} |"
+            ipa_text = item.get("ipa", "")
+            
+            sup = SupervisionSegment(
+                id=f"sup_{i}",
+                recording_id=target_rec.id,
+                start=0.0,
+                duration=true_tgt_duration,
+                text=item["text"],
+                speaker=regex_speaker,
+                custom={"ipa": ipa_text, "language": item_lang}
+            )
+
+            # 5. Create the base Cut, injecting the target and context audio
+            cut = MonoCut(
+                id=f"cut_{i}",
+                start=0.0,
+                duration=true_tgt_duration,
+                channel=0,
+                recording=target_rec,
+                supervisions=[sup],
+                custom={
+                    "target_audio": target_rec,
+                    "context_audio": context_rec,
+                    "lang": item_lang, 
+                    "regex_speaker_string": regex_speaker 
+                }
+            )
+            cuts.append(cut)
+
+    # 6. Create the base CutSet
+    cutset = CutSet.from_cuts(cuts)
+
+    # 7. Apply the ConvertCutFn class mapping (using target_sample_rate)
+    cutset = cutset.map(ConvertCutFn(target_sample_rate, add_extra_end_sil, extra_end_silence_range))
+
+    # 8. Reinject the dummy metadata segment
+    def _reinject_metadata(cut):
+        item_lang = cut.custom.get("lang", "en")
+        regex_string = cut.custom.get("regex_speaker_string", f"| Language:{item_lang} Dataset:Unknown Speaker:unknown |")
+        
+        meta_sup = SupervisionSegment(
+            id=f"meta_{cut.id}", 
+            recording_id=cut.recording.id, 
+            start=0.0, 
+            duration=0.0, 
+            text="", 
+            speaker=regex_string,
+            custom={"language": item_lang} 
+        )
+        cut.supervisions.append(meta_sup)
+        return cut
+        
+    cutset = cutset.map(_reinject_metadata)
+
+    return cutset, False
 
 
 @data_type_parser(["lhotse_as_conversation"])
