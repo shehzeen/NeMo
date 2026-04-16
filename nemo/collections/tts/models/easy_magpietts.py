@@ -328,6 +328,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         text_lens: torch.Tensor,
         delay: torch.Tensor,
         dropout_text_input: bool = False,
+        is_multiturn: bool = False,
+        text_pad_id: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Prepare text embeddings as a channel input with delay handling.
@@ -356,13 +358,21 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
 
         # Apply CAS encoding if using BPE char tokenizer
         if self.use_bpe_char_tokenizer:
-            text_mask = get_mask_from_lengths(text_lens)
+            if is_multiturn:
+                text_mask = (text != text_pad_id) 
+            else:
+                text_mask = get_mask_from_lengths(text_lens)
+
             cas_embedding = self.cas_encoder(text, subword_mask=text_mask)  # (B, L, E)
             text_embedded = text_embedded + cas_embedding
 
         # Handle text dropout - zero out the embeddings
         if dropout_text_input:
             text_embedded = text_embedded * 0.0
+
+        # multiturn dataset returns a special pad text tokens until it matches the audio len, to keep compatible with regular dataset zero-out those values
+        if is_multiturn:
+            text_embedded[text == text_pad_id] = 0.0
 
         # Create zero tensor for delay padding
         max_delay = delay.max().item()
@@ -434,8 +444,15 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         phoneme_embedded = self.embed_phoneme_tokens(phoneme_tokens_stacked)  # (B, T', E)
 
         # Apply mask to zero out padding
-        phoneme_mask = get_mask_from_lengths(phoneme_tokens_lens_stacked)
-        phoneme_embedded = phoneme_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
+        if self.cfg.get("use_multiturn_dataset", False):
+            phoneme_pad_id = getattr(self.phoneme_tokenizer, "pad", -1)
+            phoneme_mask = (phoneme_tokens_stacked[:, 0, :] != phoneme_pad_id) # Check the first layer of the stack
+            # Apply mask to zero out padding
+            phoneme_embedded = phoneme_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
+        else:
+            phoneme_mask = get_mask_from_lengths(phoneme_tokens_lens_stacked)
+            phoneme_embedded = phoneme_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
+
 
         # Handle phoneme dropout - zero out the embeddings
         if dropout_complete_phoneme_channel:
@@ -729,6 +746,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             text_lens=text_lens,
             delay=text_delay,
             dropout_text_input=dropout_text_input or dropout_conditional_input,
+            is_multiturn=self.cfg.get("use_multiturn_dataset", False),
+            text_pad_id=self.tokenizer.pad,
         )
 
         # 4. Prepare phoneme channel embeddings (if phoneme tokenizer is configured)
@@ -1312,6 +1331,10 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
 
         return val_output
 
+    def on_validation_epoch_start(self) -> None:
+        if torch.distributed.is_initialized():
+            self.trainer.strategy.model.require_backward_grad_sync = False
+
     def on_validation_epoch_end(self):
         collect = lambda key: torch.stack([x[key] for x in self.validation_step_outputs]).mean()
         val_loss = collect("val_loss")
@@ -1367,6 +1390,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                     )
 
         self.validation_step_outputs.clear()  # free memory
+
+        if torch.distributed.is_initialized():
+            self.trainer.strategy.model.require_backward_grad_sync = True
 
     def get_dataset(self, dataset_cfg, dataset_type):
         dataset = instantiate(

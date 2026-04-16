@@ -1154,6 +1154,11 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 )
                 gt_phoneme_embeddings = self.embed_phoneme_tokens(gt_phoneme_stacked)  # (B, T', E)
 
+                if self.cfg.get("use_multiturn_dataset", False):
+                    phoneme_pad_id = getattr(self.phoneme_tokenizer, "pad", -1)
+                    phoneme_mask = (gt_phoneme_stacked[:, 0, :] != phoneme_pad_id)
+                    gt_phoneme_embeddings = gt_phoneme_embeddings * phoneme_mask.unsqueeze(2)
+
             # Process GT audio codes if provided (for teacher forcing)
             gt_audio_embeddings = None
             gt_audio_lens_state = None
@@ -1319,13 +1324,24 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             text_tokens_2d = text_tokens.unsqueeze(1)  # (B, 1)
             text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
 
+            # Check for pad tokens
+            is_pad = (text_tokens_2d == self.tokenizer.pad)
+
             if self.use_bpe_char_tokenizer:
-                text_mask = torch.ones_like(text_tokens_2d, dtype=torch.bool)
+                # Mask out pad tokens for cas_encoder
+                if self.cfg.get("use_multiturn_dataset", False):
+                    text_mask = ~is_pad
+                else:
+                    text_mask = torch.ones_like(text_tokens_2d, dtype=torch.bool)
                 cas_embedding = self.cas_encoder(text_tokens_2d, subword_mask=text_mask)  # (B, 1, E)
                 text_embedded = text_embedded + cas_embedding
 
             if force_dropout_text:
                 text_embedded = text_embedded * 0
+
+            # Zero out padding tokens exactly like in process_batch
+            if self.cfg.get("use_multiturn_dataset", False):
+                text_embedded[is_pad] = 0.0
 
             is_eos_token = (text_tokens == self.eos_id) & needs_text  # (B,) bool
             text_add_mask = needs_text.view(batch_size, 1, 1).float()
