@@ -28,6 +28,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from nemo.collections.tts.data.text_to_speech_dataset_lhotse import setup_tokenizers
 from nemo.collections.tts.models import AudioCodecModel
 from nemo.collections.tts.modules import transformer_2501
+from nemo.collections.audio.parts.utils.transforms import resample
 from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter
 from nemo.collections.tts.modules.magpietts_modules import (
     CharAwareSubwordEncoder,
@@ -1336,7 +1337,16 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         # --- Non-context phase items: handle text embedding ---
         if text_tokens is not None and needs_text.any():
             text_tokens_2d = text_tokens.unsqueeze(1)  # (B, 1)
-            text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
+            if self.cfg.get("disable_subword_embedding", False):
+                B, L = text_tokens_2d.shape
+                text_embedded = torch.zeros(
+                    (B, L, self.cfg.embedding_dim), 
+                    dtype=self.decoder.get_input_embeddings().weight.dtype,
+                    device=text_tokens_2d.device
+                )
+                print("Hereeee")
+            else:
+                text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
 
             # Check for pad tokens
             is_pad = (text_tokens_2d == self.tokenizer.pad)
@@ -1348,6 +1358,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 else:
                     text_mask = torch.ones_like(text_tokens_2d, dtype=torch.bool)
                 cas_embedding = self.cas_encoder(text_tokens_2d, subword_mask=text_mask)  # (B, 1, E)
+
                 text_embedded = text_embedded + cas_embedding
 
             if force_dropout_text:
@@ -1994,11 +2005,13 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         audio, sr = sf.read(audio_path, dtype='float32')
         if len(audio.shape) > 1:
             audio = audio.mean(axis=1)
-        if sr != target_sample_rate:
-            import librosa
 
-            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sample_rate)
-        return torch.from_numpy(audio).unsqueeze(0)
+        audio = torch.from_numpy(audio).unsqueeze(0)
+
+        if sr != target_sample_rate:
+            audio = resample(audio.float(), sr, target_sample_rate)
+
+        return audio
 
     @staticmethod
     def _adjust_audio_to_duration_for_inference(
