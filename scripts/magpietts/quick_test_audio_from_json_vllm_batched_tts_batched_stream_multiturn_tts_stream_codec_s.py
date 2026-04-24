@@ -408,6 +408,12 @@ class EndToEndSpeechPipeline:
             tts_steps += 1
             steps += 1
             if audio_codes is not None:
+                eos_in_audio_codes = audio_codes == self.tts_model.audio_eos_id # (B, C, S)
+                if eos_in_audio_codes.any():
+                    eos_in_any_codebook = eos_in_audio_codes.any(dim=1) # (B, S)
+                    eos_frame_idx = eos_in_any_codebook.int().argmax(dim=1).item()
+                    audio_codes = audio_codes[:, :, :eos_frame_idx]
+                    print(f"EOS detected in audio codes at frame {eos_frame_idx}")
                 accumulated_audio_codes = torch.cat([accumulated_audio_codes, audio_codes.detach()], dim=-1)
                 generated_audio_frames = int(accumulated_audio_codes.size(-1))
                 if generated_audio_frames - last_decode_frame_mark >= self.decode_every_frames:
