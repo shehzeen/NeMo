@@ -265,6 +265,9 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.mask_token_id = get_token_index(SpecialAudioToken.MASK_TOKEN)
         self.num_all_tokens_per_codebook = self.codebook_size + len(SpecialAudioToken)
         self.use_bpe_char_tokenizer = cfg.get('use_bpe_char_tokenizer', False)
+        self.use_text_embedding = cfg.get('use_text_embedding', True)
+        if not self.use_text_embedding and not self.use_bpe_char_tokenizer:
+            raise ValueError("`use_bpe_char_tokenizer` must be True when `use_text_embedding` is False.")
 
         # If specified, use this as the text conditioning tokenizer. Otherwise, use the first tokenizer.
         self.text_conditioning_tokenizer_name = cfg.get('text_conditioning_tokenizer_name', None)
@@ -443,8 +446,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         else:
             raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Supported: 'huggingface', 'nemotron_h'")
 
-        self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
-        self.decoder.set_input_embeddings(self.text_embedding)
+        self.text_embedding = None
+        if self.use_text_embedding:
+            self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
+            self.decoder.set_input_embeddings(self.text_embedding)
 
         # Task embedding for multi-mode training
         # Each mode has a unique task embedding that is prepended to the context
@@ -1367,7 +1372,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         # --- Non-context phase items: handle text embedding ---
         if text_tokens is not None and needs_text.any():
             text_tokens_2d = text_tokens.unsqueeze(1)  # (B, 1)
-            text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
+            if self.use_text_embedding:
+                text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
+            else:
+                text_embedded = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
 
             if self.use_bpe_char_tokenizer:
                 text_mask = torch.ones_like(text_tokens_2d, dtype=torch.bool)
