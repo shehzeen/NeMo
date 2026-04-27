@@ -357,7 +357,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             B, L = text.shape
             text_embedded = torch.zeros(
                 (B, L, self.cfg.embedding_dim), 
-                dtype=self.decoder.get_input_embeddings().weight.dtype,
+                dtype=next(self.parameters()).dtype,
                 device=text.device
             )
         else:
@@ -1419,6 +1419,11 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         self.validation_step_outputs.append(val_output)
 
         return val_output
+
+    def on_fit_start(self):
+        super().on_fit_start()
+        if not hasattr(self, "_codec_sil_codes_buffer"):
+            self._generate_codec_silence_buffer()
 
     def on_validation_epoch_start(self) -> None:
         if torch.distributed.is_initialized():

@@ -321,6 +321,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             mode='train',
         )
 
+       
         base_num_tokens = len(self.tokenizer.tokens)
 
         # Assign standard special tokens sequentially
@@ -409,7 +410,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             else:
                 hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
             self.decoder = hf_transformer.model
-            self.lm_text_head = hf_transformer.lm_head
+            # self.lm_text_head = hf_transformer.lm_head
 
         elif self.decoder_type == 'nemotron_h':
             # NemotronH hybrid Mamba2/Attention backend
@@ -423,7 +424,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             nemotron_config = NemotronHConfig(**nemotron_h_config_dict)
             nemotron_model = NemotronHForCausalLM(nemotron_config)
             self.decoder = nemotron_model.backbone
-            self.lm_text_head = nemotron_model.lm_head
+            # self.lm_text_head = nemotron_model.lm_head
             logging.info(
                 f"NemotronH config: {nemotron_config.num_hidden_layers} layers, pattern={nemotron_config.hybrid_override_pattern[:20]}..."
             )
@@ -431,8 +432,21 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         else:
             raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Supported: 'huggingface', 'nemotron_h'")
 
-        self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
-        self.decoder.set_input_embeddings(self.text_embedding)
+        if self.cfg.get("disable_subword_embedding", False) and self.cfg.get("disable_subword_embedding_on_context", False):
+            if not self.cfg.get("use_bpe_char_tokenizer", False):
+                raise ValueError(
+                    "Both `disable_subword_embedding` and `disable_subword_embedding_on_context` are True, "
+                    "but `use_bpe_char_tokenizer` is False.\n"
+                    "This would remove ALL text representations (no text_embedding, no CAS)."
+                )
+
+            self.text_embedding = None
+
+            # Remove unused backend token embeddings.
+            self.decoder.set_input_embeddings(None)
+        else:
+            self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
+            self.decoder.set_input_embeddings(self.text_embedding)
 
         # Task embedding for multi-mode training
         # Each mode has a unique task embedding that is prepended to the context
@@ -529,53 +543,43 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
     @property
     def codec_sil_codes(self):
-        """Returns the CONVERTED silence codes (used by the model's predictions)"""
-        if not hasattr(self, "_codec_sil_codes_buffer"):
-            self._generate_codec_silence_buffer()
         return self._codec_sil_codes_buffer
 
     @property
     def codec_sil_codes_unconverted(self):
-        """Returns the RAW, UNCONVERTED silence codes (used for training batch labels)"""
-        if not hasattr(self, "_codec_sil_codes_buffer_unconverted"):
-            self._generate_codec_silence_buffer()
         return self._codec_sil_codes_buffer_unconverted
 
     def _generate_codec_silence_buffer(self):
-        device = self.device if hasattr(self, 'device') else next(self.parameters()).device
+        codec_device = next(self._codec_model.parameters()).device
 
-        # Generate 5 seconds of silence
-        audio = torch.zeros(1, 5 * self.sample_rate, dtype=torch.float32, device=device)
-        audio_len = torch.tensor([audio.size(-1)], dtype=torch.long, device=device)
+        audio = torch.zeros(1, 5 * self.sample_rate, dtype=torch.float32, device=codec_device)
+        audio_len = torch.tensor([audio.size(-1)], dtype=torch.long, device=codec_device)
 
         with torch.no_grad():
-            # 1. Get the RAW codes directly from the helper
             sil_codes_raw, sil_codes_lens = self._codec_helper.audio_to_codes(audio, audio_len)
-            
-            # Find most common frame for UNCONVERTED
+
             frames_raw = sil_codes_raw[0].transpose(0, 1)
             combos_raw = [tuple(frame.tolist()) for frame in frames_raw]
             most_common_raw, _ = Counter(combos_raw).most_common(1)[0]
-            sil_tensor_unconverted = torch.tensor(most_common_raw, device=device, dtype=torch.long)
+            sil_tensor_unconverted = torch.tensor(most_common_raw, device=codec_device, dtype=torch.long)
 
-            # 2. Get the CONVERTED codes (if a converter exists)
-            if getattr(self, '_codec_converter', None) is not None:
+            if self._codec_converter is not None:
                 sil_codes_conv = self._codec_converter.convert_original_to_new(
                     audio_tokens=sil_codes_raw, audio_lens=sil_codes_lens
                 ).long()
-                
-                # Find most common frame for CONVERTED
                 frames_conv = sil_codes_conv[0].transpose(0, 1)
                 combos_conv = [tuple(frame.tolist()) for frame in frames_conv]
                 most_common_conv, _ = Counter(combos_conv).most_common(1)[0]
-                sil_tensor_converted = torch.tensor(most_common_conv, device=device, dtype=torch.long)
+                sil_tensor_converted = torch.tensor(most_common_conv, device=codec_device, dtype=torch.long)
             else:
-                # If no converter exists, they are identical
                 sil_tensor_converted = sil_tensor_unconverted.clone()
 
-        # 3. Register BOTH as independent buffers
-        self.register_buffer("_codec_sil_codes_buffer", sil_tensor_converted, persistent=False)
-        self.register_buffer("_codec_sil_codes_buffer_unconverted", sil_tensor_unconverted, persistent=False)
+        if not hasattr(self, "_codec_sil_codes_buffer"):
+            self.register_buffer("_codec_sil_codes_buffer", sil_tensor_converted, persistent=False)
+            self.register_buffer("_codec_sil_codes_buffer_unconverted", sil_tensor_unconverted, persistent=False)
+        else:
+            self._codec_sil_codes_buffer.copy_(sil_tensor_converted)
+            self._codec_sil_codes_buffer_unconverted.copy_(sil_tensor_unconverted)
 
     def _get_state_dict_keys_to_exclude(self) -> List[str]:
         return [
@@ -908,7 +912,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
         # Context Text
         context_text_lens = context_text_tokens_lens
-        context_text_embedded = self.decoder.get_input_embeddings()(context_text_tokens)  # (B, L, E)
+        context_text_embedded = self._embed_context_text_tokens(context_text_tokens)
 
         # Prepare task embedding for multi-mode training
         task_embedding = None
@@ -932,14 +936,63 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
         # Handle CFG unconditional dropout
         if dropout_conditional_input:
-            cfg_token_id = self.cfg_unk_token_id
-            cfg_token_embedding = self.decoder.get_input_embeddings()(
-                torch.full((batch_size, 1), cfg_token_id, device=device)
-            )  # (B, 1, E)
-            # Expand CFG token to match context embedding size
-            context_embedding = cfg_token_embedding.expand(-1, context_embedding.size(1), -1)  # (B, T_context, E)
+            cfg_token_embedding = self._get_context_cfg_embedding(batch_size, device)
+            context_embedding = cfg_token_embedding.expand(-1, context_embedding.size(1), -1)
 
         return context_embedding, context_lens, context_audio_codes, context_audio_codes_lens
+
+    def _embed_context_text_tokens(self, context_text_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Embed context text tokens.
+
+        Default behavior is preserved:
+        - disable_subword_embedding_on_context=False: decoder text embedding only
+
+        New behavior:
+        - disable_subword_embedding_on_context=True: CAS encoder replaces decoder text embedding
+        """
+        if self.cfg.get("disable_subword_embedding_on_context", False):
+            if not self.cfg.get("use_bpe_char_tokenizer", False):
+                raise ValueError(
+                    "`disable_subword_embedding_on_context=True` requires "
+                    "`use_bpe_char_tokenizer=True`, because CAS must replace text_embedding."
+                )
+
+            if self.cfg.get("use_multiturn_dataset", False):
+                context_text_mask = context_text_tokens != self.pad_id
+            else:
+                context_text_mask = torch.ones_like(context_text_tokens, dtype=torch.bool)
+
+            return self.cas_encoder(
+                context_text_tokens,
+                subword_mask=context_text_mask,
+            )
+
+        return self.decoder.get_input_embeddings()(context_text_tokens)
+
+    def _get_context_cfg_embedding(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """
+        Returns the unconditional context embedding used for CFG dropout.
+        Shape: (B, 1, E)
+        """
+        cfg_token = torch.full(
+            (batch_size, 1),
+            self.cfg_unk_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+
+        if self.cfg.get("disable_subword_embedding_on_context", False):
+            if not self.cfg.get("use_bpe_char_tokenizer", False):
+                raise ValueError(
+                    "`disable_subword_embedding_on_context=True` requires "
+                    "`use_bpe_char_tokenizer=True` for CFG context embedding."
+                )
+
+            cfg_mask = torch.ones_like(cfg_token, dtype=torch.bool)
+            return self.cas_encoder(cfg_token, subword_mask=cfg_mask)
+
+        return self.decoder.get_input_embeddings()(cfg_token)
 
     def stack_codes(self, codes, codes_lens, bos_id, eos_id, stacking_factor, num_codebooks):
         """
@@ -1181,9 +1234,8 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             # Setup classifier-free guidance if enabled
             dummy_context_embedding_unconditional = None
             if use_cfg:
-                dummy_context_embedding_unconditional = self.decoder.get_input_embeddings()(
-                    torch.full((1, 1), self.cfg_unk_token_id, device=device)
-                )
+                dummy_context_embedding_unconditional = self._get_context_cfg_embedding(1, device)
+
                 # Create unconditional context (same length as conditional)
                 dummy_context_expanded = dummy_context_embedding_unconditional.expand(
                     batch_size, context_embedding.size(1), -1
@@ -1392,10 +1444,9 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 B, L = text_tokens_2d.shape
                 text_embedded = torch.zeros(
                     (B, L, self.cfg.embedding_dim), 
-                    dtype=self.decoder.get_input_embeddings().weight.dtype,
+                    dtype=next(self.parameters()).dtype,
                     device=text_tokens_2d.device
                 )
-                print("Hereeee")
             else:
                 text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
 
