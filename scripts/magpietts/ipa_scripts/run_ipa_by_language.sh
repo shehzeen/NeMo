@@ -13,11 +13,12 @@ set -e
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="${SCRIPT_DIR}/add_ipa_to_lhotse_shards.py"
-LOG_DIR="/home/shehzeenh/Code/DecoderNeMo/LhotseLogs"
+LOG_DIR="/home/pneekhara/2023/SimpleT5NeMo/IPAStatus"
 
 # Languages to process (in order)
 # LANGUAGES=("de" "es" "fr" "hi" "it" "vi" "zh" "en")
-LANGUAGES=("hi")
+# LANGUAGES=("ar-AE" "ar-MSA" "ar-SA" "ar-SY" "de" "en" "es" "fr" "hi" "it" "ko-KR" "pt-br" "vi" "zh")
+LANGUAGES=("en")
 
 # Create log directory if it doesn't exist
 mkdir -p "${LOG_DIR}"

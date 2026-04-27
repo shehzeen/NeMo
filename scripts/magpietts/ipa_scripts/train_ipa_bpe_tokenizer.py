@@ -43,7 +43,7 @@ from tokenizers.trainers import BpeTrainer
 # -------------------------
 
 # Default config file path (same directory as this script)
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_dirs_config.json"
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_dirs_config_all.json"
 
 
 def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[str]]:
@@ -280,7 +280,7 @@ def create_balanced_corpus(
     
     # Apply max_samples_per_lang cap if specified
     samples_per_lang = min_count
-    if max_samples_per_lang is not None and max_samples_per_lang < min_count:
+    if max_samples_per_lang is not None:
         samples_per_lang = max_samples_per_lang
         print(f"[INFO] Using max_samples_per_lang cap: {samples_per_lang}")
     

@@ -21,6 +21,7 @@
         "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/de/kingAsr182/cuts"
     ],
     "en": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/Emilia-YODAS/lhotse_shar_shuffle_shardSize256/cuts_without_numbers",
         "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/GLOBE_V2/cuts",
         "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/davidAI_v2602/cuts"
     ],

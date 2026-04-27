@@ -1,0 +1,115 @@
+{
+    "ar-AE": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-AE/kingAsr109/train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-AE/kingAsr109/train/cuts_diacritics_by_catt",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-AE/kingAsr109/val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-AE/kingAsr109/val/cuts_diacritics_by_catt"
+    ],
+    "ar-MSA": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-MSA/nvyt2605/cuts"
+    ],
+    "ar-SA": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-SA/ClArTTS/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-SA/kingAsr318/train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-SA/kingAsr318/val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-SA/nvyt2605/cuts"
+    ],
+    "ar-SY": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ar-SY/arabicSpeechCorpus/cuts"
+    ],
+    "de": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/de/kingAsr182/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/de/cmltts_de_train/cuts"
+    ],
+    "en": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/Emilia-YODAS/lhotse_shar_shuffle_shardSize256/cuts_without_numbers",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/GLOBE_V2/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/davidAI_v2602/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/nvyt2505/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/hifitts/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/hifitts2/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/jhsdGtc20Amp20Keynote/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/libritts/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/rivaLindyRodney/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/rivaLindyRodney/lhotse_shar_shuffle_shardSize256/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/rivaEmmaMeganSeanTom/lhotse_shar_shuffle_shardSize256/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/rivaEmmaMeganSeanTom/lhotse_shar_shuffle_shardSize256/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/en/jhsdGtc20Amp20Keynote/lhotse_shar_shuffle_shardSize256/cuts_textContext"
+    ],
+    "es": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/es/ESP_ASR003/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/es/riva_es_val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/es/riva_es_val/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/es/cmltts_es_train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/es/riva_ES_RubbyCarlos/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/es/riva_ES_RubbyCarlos/cuts_textContext"
+    ],
+    "fr": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/fr/riva_fr_val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/fr/riva_fr_val/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/fr/cmltts_fr_train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/fr/riva_FR_VirginieSamy/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/fr/riva_FR_VirginieSamy/cuts_textContext"
+    ],
+    "hi": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/ai4bharat/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/mucs2021_hi_en/train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/nvyt2605/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/nvyt_hi/filter_1/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/nvyt_hi/filter_2/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/nvyt_hi_2/filter_1/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/hi/nvyt_hi_2/filter_2/cuts"
+    ],
+    "it": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/it/cmltts_it_train/cuts"
+    ],
+    "ja": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/Emilia-YODAS_ja/lhotse_shar/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/common_voice_ja/lhotse_shar/train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/common_voice_ja/lhotse_shar/val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/ja_anime_speech/lhotse_shar/train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/ja_anime_speech/lhotse_shar/val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/kingAsr444/lhotse_shar/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ja/Emilia-YODAS_ja_en/cuts/"
+    ],
+    "ko-KR": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/ko-KR/emiliaYodas/cuts"
+    ],
+    "pt-br": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/pt-BR/cmltts_pt_train/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/pt-BR/cmltts_pt_val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/pt-BR/pt-br_char/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/pt-BR/tts_portuguese_corpus/cuts"
+    ],
+    "vi": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/femalePhung/cut_contextText",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/femalePhung/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/infore1/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/maleLong/cut_contextText",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/maleLong/cut_ipa_contextText",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/maleLong/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/val_infore1_maleLong/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/vi_val_long/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/vi_val_long/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/vi_val_northfemale/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/vi_val_northfemale/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/Infore1_2_lsvsc/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/Long_ContextAudio/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/Long_ContextAudio/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/NorthFemale/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/vi/nvyt_vi/nvyt_yt2025/cuts"
+    ],
+    "zh": [
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/AISHELL3/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/ZH_Siwei_HouZhen_val/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/ZH_Siwei_HouZhen_val/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/emiliaYodas/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/nvyt2602/filter_1/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/nvyt2602/filter_2/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/nvyt2605/lhotse_shar/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/riva_ZH_SiweiHouZhen/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/riva_ZH_SiweiHouZhen/cuts_textContext",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/nvyt_zh/filter_1/cuts",
+        "/datap/misc/FreshMounts/tts_lhotse_datasets/speech_data/zh/nvyt_zh/filter_2/cuts"
+    ]
+}

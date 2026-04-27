@@ -57,7 +57,7 @@ from transformers import AutoTokenizer
 VOCAB_SIZES = [512, 1024, 2048, 4096]
 
 # Default config file path (same directory as this script)
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_dirs_config.json"
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_all_no_ja.json"
 
 
 def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[str]]:
@@ -71,7 +71,7 @@ def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-OUTPUT_SUFFIX = "_with_ipa"
+OUTPUT_SUFFIX = "_with_ipaNG"
 SHARD_GLOB = "cuts.*.jsonl.gz"
 
 
@@ -323,7 +323,7 @@ def create_balanced_corpus(
     
     # Apply max_samples_per_lang cap if specified
     samples_per_lang = min_count
-    if max_samples_per_lang is not None and max_samples_per_lang < min_count:
+    if max_samples_per_lang is not None:
         samples_per_lang = max_samples_per_lang
         print(f"[INFO] Using max_samples_per_lang cap: {samples_per_lang}")
     

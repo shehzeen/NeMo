@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -38,7 +39,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # -------------------------
 
 # Default config file path (same directory as this script)
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_dirs_config.json"
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_only_val.json"
 
 
 def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[str]]:
@@ -71,9 +72,14 @@ ESPEAK_VOICE_BY_LANG: Dict[str, str] = {
     "nl": "nl",
     "pl": "pl",
     "pt": "pt",
+    "ar-AE": "ar",
+    "ar-MSA": "ar",
+    "ar-SA": "ar",
+    "ar-SY": "ar",
+    "ko-KR": "ko",
 }
 
-OUTPUT_SUFFIX = "_with_ipa"  # cuts -> cuts_with_ipa
+OUTPUT_SUFFIX = "_with_ipaNG"  # cuts -> cuts_with_ipa
 SHARD_GLOB = "cuts.*.jsonl.gz"
 
 # Parallelism
@@ -96,16 +102,22 @@ WRITE_TO_CUT_CUSTOM = False
 IPA_FLAG = "--ipa"  # espeak-ng uses --ipa, espeak supports --ipa in many builds
 # Use --quiet if available; safe to try.
 COMMON_FLAGS = ["-q"]
+MAX_ESPEAK_RETRIES = 2
+ESPEAK_RETRY_SLEEP_SECONDS = 0.1
 
 # Some espeak builds output extra spaces/newlines; we normalize.
 _WS_RE = re.compile(r"\s+")
 
 
-def _find_espeak_binary() -> str:
-    """Prefer espeak-ng if present, else espeak."""
+def _find_espeak_binaries() -> List[str]:
+    """Prefer espeak-ng, then optionally fall back to espeak."""
+    binaries: List[str] = []
     for exe in ("espeak-ng", "espeak"):
         if shutil.which(exe):
-            return exe
+            binaries.append(exe)
+    if binaries:
+        print(f"Found espeak binaries on PATH: {', '.join(binaries)}")
+        return binaries
     raise RuntimeError(
         "Neither 'espeak-ng' nor 'espeak' was found on PATH. "
         "Install espeak-ng (recommended) or espeak."
@@ -116,35 +128,56 @@ def _find_espeak_binary() -> str:
 class EspeakRunner:
     exe: str
     voice: str
+    fallback_exe: Optional[str] = None
 
     def text_to_ipa(self, text: str) -> str:
         """
         Convert text -> IPA using espeak/espeak-ng.
         """
         # Note: We pass text via stdin to avoid shell escaping issues.
-        cmd = [self.exe, "-v", self.voice, IPA_FLAG] + COMMON_FLAGS
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=text.encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to run {cmd}: {e}") from e
+        errors: List[str] = []
+        executables = [self.exe]
+        if self.fallback_exe and self.fallback_exe != self.exe:
+            executables.append(self.fallback_exe)
 
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"espeak command failed (rc={proc.returncode})\n"
-                f"cmd: {' '.join(cmd)}\n"
-                f"stderr: {proc.stderr.decode('utf-8', errors='replace')}"
-            )
+        for exe in executables:
+            cmd = [exe, "-v", self.voice, IPA_FLAG] + COMMON_FLAGS
+            for attempt in range(1, MAX_ESPEAK_RETRIES + 2):
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        input=text.encode("utf-8"),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+                except Exception as e:
+                    errors.append(f"cmd={' '.join(cmd)} attempt={attempt} error={e}")
+                    break
 
-        out = proc.stdout.decode("utf-8", errors="replace").strip()
-        # Normalize whitespace to single spaces
-        out = _WS_RE.sub(" ", out).strip()
-        return out
+                if proc.returncode == 0:
+                    out = proc.stdout.decode("utf-8", errors="replace").strip()
+                    # Normalize whitespace to single spaces
+                    out = _WS_RE.sub(" ", out).strip()
+                    return out
+
+                stderr = proc.stderr.decode("utf-8", errors="replace")
+                errors.append(
+                    f"cmd={' '.join(cmd)} attempt={attempt} rc={proc.returncode} stderr={stderr}"
+                )
+
+                # Negative return code indicates signal-based crash (e.g., -11 segfault).
+                if proc.returncode < 0 and attempt <= MAX_ESPEAK_RETRIES:
+                    print(
+                        f"[WARN] espeak process crash (rc={proc.returncode}) "
+                        f"for voice={self.voice}; retrying attempt {attempt + 1}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(ESPEAK_RETRY_SLEEP_SECONDS)
+                    continue
+                break
+
+        raise RuntimeError("espeak command failed after retries/fallback:\n" + "\n".join(errors))
 
 
 def iter_shards(cuts_dir: Path) -> List[Path]:
@@ -271,8 +304,10 @@ def process_shard(
 
 def process_cuts_dir(lang: str, cuts_dir: Path) -> None:
     voice = ESPEAK_VOICE_BY_LANG.get(lang, lang)
-    exe = _find_espeak_binary()
-    espeak = EspeakRunner(exe=exe, voice=voice)
+    exes = _find_espeak_binaries()
+    primary_exe = exes[0]
+    fallback_exe = exes[1] if len(exes) > 1 else None
+    espeak = EspeakRunner(exe=primary_exe, fallback_exe=fallback_exe, voice=voice)
 
     out_dir = derive_output_dir(cuts_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -299,16 +334,27 @@ def process_cuts_dir(lang: str, cuts_dir: Path) -> None:
     with cf.ProcessPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
         for shard, out_shard in jobs:
-            futures.append(ex.submit(_process_shard_worker, shard, out_shard, espeak.exe, espeak.voice))
+            futures.append(
+                ex.submit(
+                    _process_shard_worker,
+                    shard,
+                    out_shard,
+                    espeak.exe,
+                    espeak.fallback_exe,
+                    espeak.voice,
+                )
+            )
 
         for fut in cf.as_completed(futures):
             out_shard_path, n = fut.result()
             print(f"[OK] wrote {out_shard_path}  (lines={n})")
 
 
-def _process_shard_worker(shard: Path, out_shard: Path, exe: str, voice: str) -> Tuple[Path, int]:
+def _process_shard_worker(
+    shard: Path, out_shard: Path, exe: str, fallback_exe: Optional[str], voice: str
+) -> Tuple[Path, int]:
     # Re-create runner in worker process
-    espeak = EspeakRunner(exe=exe, voice=voice)
+    espeak = EspeakRunner(exe=exe, fallback_exe=fallback_exe, voice=voice)
     return process_shard(shard, out_shard, espeak)
 
 
