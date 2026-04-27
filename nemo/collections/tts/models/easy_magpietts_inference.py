@@ -446,10 +446,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         else:
             raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Supported: 'huggingface', 'nemotron_h'")
 
-        self.text_embedding = None
-        if self.use_text_embedding:
-            self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
-            self.decoder.set_input_embeddings(self.text_embedding)
+        # self.text_embedding = None
+        # if self.use_text_embedding:
+        self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
+        self.decoder.set_input_embeddings(self.text_embedding)
 
         # Task embedding for multi-mode training
         # Each mode has a unique task embedding that is prepended to the context
