@@ -44,6 +44,8 @@ from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging
 
+from nemo.collections.speechlm2.parts.pretrained import set_model_dict_for_partial_init
+
 
 @dataclass
 class TrainingMode:
@@ -600,6 +602,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         return state_dict
 
     def load_state_dict(self, state_dict, strict=True):
+        state_dict = set_model_dict_for_partial_init(state_dict, self.state_dict())
         if not strict:
             super().load_state_dict(state_dict, strict=False)
         modules_to_skip = self._get_state_dict_keys_to_exclude()
