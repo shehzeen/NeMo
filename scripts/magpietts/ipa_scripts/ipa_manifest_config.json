@@ -1,0 +1,26 @@
+{
+  "en": [
+    "/datap/misc/EOSMountsMarch/TTS/manifests/dev_clean_withContextAudio_604samples_ipa_filtered.json"
+  ],
+  "de": [
+    "/datap/misc/EOSMountsMarch/TTS/CML/manifests_with_codecs/cml_tts_dataset_german_v0.1/dev_100subset_ipa.json"
+  ],
+  "es": [
+    "/datap/misc/EOSMountsMarch/TTS/CML/manifests_with_codecs/cml_tts_dataset_spanish_v0.1/dev_100subset_ipa.json"
+  ],
+  "fr": [
+    "/datap/misc/EOSMountsMarch/TTS/CML/manifests_with_codecs/cml_tts_dataset_french_v0.1/dev_100subset_ipa.json"
+  ],
+  "it": [
+    "/datap/misc/EOSMountsMarch/TTS/CML/manifests_with_codecs/cml_tts_dataset_italian_v0.1/dev_100subset_ipa.json"
+  ],
+  "hi": [
+    "/datap/misc/EOSMountsMarch/TTS/evaluation_manifests/hindi_100subset_basic_ipa.json"
+  ],
+  "zh": [
+    "/datap/misc/EOSMountsMarch/TTS/evaluation_manifests/zh_riva_100subset_ipa.json"
+  ],
+  "vi": [
+    "/datap/misc/EOSMountsMarch/TTS/evaluation_manifests/vi_100subset_test_ipa.json"
+  ]
+}
