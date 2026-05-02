@@ -348,14 +348,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         batch_size = text.size(0)
         device = text.device
 
-        # Embed text tokens
-        text_embedded = self.decoder.get_input_embeddings()(text)  # (B, L, E)
-
-        # Apply CAS encoding if using BPE char tokenizer
-        if self.use_bpe_char_tokenizer:
-            text_mask = get_mask_from_lengths(text_lens)
-            cas_embedding = self.cas_encoder(text, subword_mask=text_mask)  # (B, L, E)
-            text_embedded = text_embedded + cas_embedding
+        # Embed text tokens (CAS-only when disable_subword_embedding=True).
+        text_embedded = self.embed_text_tokens(text, text_lens=text_lens)  # (B, L, E)
 
         # Handle text dropout - zero out the embeddings
         if dropout_text_input:
