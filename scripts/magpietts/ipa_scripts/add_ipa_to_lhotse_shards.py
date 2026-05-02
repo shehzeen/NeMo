@@ -9,7 +9,8 @@ creates:
 and writes corresponding cuts.000000.jsonl.gz, etc. with an added IPA field.
 
 IPA is added to each supervision under:
-  cut["supervisions"][i]["custom"]["ipa"]
+  - cut["supervisions"][i]["ipa"]                  # next to text
+  - cut["supervisions"][i]["custom"]["ipa"]        # backward compatibility
 
 Usage:
   python add_ipa_to_cuts.py --lang de
@@ -39,7 +40,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # -------------------------
 
 # Default config file path (same directory as this script)
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_only_val.json"
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "cuts_multiturn.json"
 
 
 def load_cuts_dirs_config(config_path: Optional[Path] = None) -> Dict[str, List[str]]:
@@ -89,8 +90,10 @@ MAX_WORKERS = max(1, (os.cpu_count() or 4) - 1)
 # If True, skip writing if output shard exists (basic resume)
 SKIP_EXISTING_OUTPUT_SHARDS = False
 
-# Where to store IPA inside each cut:
-#   - supervision custom: recommended
+# Where to store IPA inside each supervision:
+#   - sibling field next to "text": supervision["ipa"]
+WRITE_TO_SUP_FIELD = True
+#   - supervision custom: kept for backward compatibility with existing scripts
 WRITE_TO_SUP_CUSTOM = True
 #   - optionally also store at cut["custom"]["ipa"] (commented code below)
 WRITE_TO_CUT_CUSTOM = False
@@ -225,7 +228,9 @@ def add_ipa_to_cut(
     cache: IPACache,
 ) -> dict:
     """
-    Adds IPA to each supervision custom field: custom["ipa"].
+    Adds IPA to each supervision field and custom field:
+      - supervision["ipa"] (next to supervision["text"])
+      - supervision["custom"]["ipa"] (backward compatibility)
     Uses supervision["custom"]["normalized_text"] if available, otherwise supervision["text"] as source text.
     For Vietnamese (vi), uses original_text and updates text/normalized_text fields.
     """
@@ -248,8 +253,12 @@ def add_ipa_to_cut(
         if not text:
             continue
 
-        # If already has IPA, keep it
-        if "ipa" in custom and isinstance(custom["ipa"], str) and custom["ipa"].strip():
+        has_sup_ipa = isinstance(sup.get("ipa"), str) and bool(sup["ipa"].strip())
+        has_custom_ipa = isinstance(custom.get("ipa"), str) and bool(custom["ipa"].strip())
+        # If IPA already exists in all requested destinations, keep it.
+        if ((not WRITE_TO_SUP_FIELD) or has_sup_ipa) and (
+            (not WRITE_TO_SUP_CUSTOM) or has_custom_ipa
+        ):
             continue
 
         cached = cache.get(espeak.voice, text)
@@ -257,6 +266,8 @@ def add_ipa_to_cut(
             cached = espeak.text_to_ipa(text)
             cache.set(espeak.voice, text, cached)
 
+        if WRITE_TO_SUP_FIELD:
+            sup["ipa"] = cached
         if WRITE_TO_SUP_CUSTOM:
             custom["ipa"] = cached
 
