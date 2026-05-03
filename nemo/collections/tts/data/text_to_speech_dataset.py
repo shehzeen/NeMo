@@ -380,6 +380,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         text_context_remapping: Dict[str, str] = None,
         text_context_remapping_prob: float = 0.0,
         ignore_phoneme_languages: List[str] = None,
+        ipa_as_text_prob: float = 0.0,
         add_language_to_context_text: bool = False,
     ):
         super().__init__(
@@ -415,6 +416,7 @@ class MagpieTTSDataset(TextToSpeechDataset):
         self.text_context_remapping = text_context_remapping
         self.text_context_remapping_prob = text_context_remapping_prob
         self.ignore_phoneme_languages = ignore_phoneme_languages or []
+        self.ipa_as_text_prob = ipa_as_text_prob
         self.add_language_to_context_text = add_language_to_context_text
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
@@ -435,7 +437,17 @@ class MagpieTTSDataset(TextToSpeechDataset):
             # Pick a random tokenizer from the list of tokenizers
             tokenizer_name = random.choice(data.tokenizer_names)
         language = data.manifest_entry.get('language', 'en')
-        tokens = self.text_tokenizer.encode(text=data.text, tokenizer_name=tokenizer_name)
+        text_for_tokens = data.text
+        should_use_ipa_as_text = (
+            self.dataset_type == 'train'
+            and self.ipa_as_text_prob > 0.0
+            and random.random() < self.ipa_as_text_prob
+            and 'ipa' in data.manifest_entry
+            and language not in self.ignore_phoneme_languages
+        )
+        if should_use_ipa_as_text:
+            text_for_tokens = data.manifest_entry['ipa']
+        tokens = self.text_tokenizer.encode(text=text_for_tokens, tokenizer_name=tokenizer_name)
         tokens = tokens + [self.eos_id]  # Not adding BOS id
         tokens = torch.tensor(tokens, dtype=torch.int32)
         text_len = tokens.shape[0]

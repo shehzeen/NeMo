@@ -142,6 +142,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         text_context_remapping_prob: float = 0.0,
         phoneme_tokenizer_config: DictConfig = None,
         ignore_phoneme_languages: List[str] = None,
+        ipa_as_text_prob: float = 0.0,
         add_language_to_context_text: bool = False,
     ):
         super().__init__()
@@ -168,6 +169,7 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
         self.text_context_remapping_prob = text_context_remapping_prob
         self.phoneme_tokenizer_config = phoneme_tokenizer_config
         self.ignore_phoneme_languages = ignore_phoneme_languages or []
+        self.ipa_as_text_prob = ipa_as_text_prob
         self.add_language_to_context_text = add_language_to_context_text
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
@@ -411,6 +413,17 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                 text_str = cut.supervisions[0].normalized_text
             else:
                 text_str = cut.supervisions[0].text
+
+            should_use_ipa_as_text = (
+                self.dataset_type == 'train'
+                and self.ipa_as_text_prob > 0.0
+                and random.random() < self.ipa_as_text_prob
+                and cut.supervisions[0].has_custom("ipa")
+                and language not in self.ignore_phoneme_languages
+            )
+            if should_use_ipa_as_text:
+                text_str = cut.supervisions[0].ipa
+
             raw_text_list.append(text_str)
             if cut.has_custom("tokenizer_names"):
                 # Pick a random tokenizer from the list of tokenizers

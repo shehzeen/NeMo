@@ -347,6 +347,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.pad_context_text_to_max_duration = False
         self.add_language_to_context_text = cfg.get('add_language_to_context_text', False)
         self.ignore_phoneme_languages = cfg.get('ignore_phoneme_languages', [])
+        self.ipa_as_text_prob = cfg.get('ipa_as_text_prob', 0.0)
 
         super().__init__(cfg=cfg, trainer=trainer)
 
