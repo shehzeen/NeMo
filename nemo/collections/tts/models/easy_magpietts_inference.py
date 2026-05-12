@@ -255,6 +255,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.codebook_size = codebook_size
 
         self.codec_model_samples_per_frame = codec_model.samples_per_frame
+        self.codec_model_input_sample_rate = codec_model.sample_rate
         # Our codebooks start with actual audio codec tokens, followed by special tokens.
         # The `forced_*` options are for backward compatibility for models trained with older code.
         get_token_index = partial(SpecialAudioToken.get_index, base_codebook_size=self.codebook_size)
@@ -326,11 +327,16 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             mode='train',
         )
 
-        num_tokens_tokenizer = len(self.tokenizer.tokens)
-        num_tokens = num_tokens_tokenizer + 3  # +3 for BOS, EOS, CFG_UNK
-        self.bos_id = num_tokens - 3
-        self.eos_id = num_tokens - 2
-        self.cfg_unk_token_id = num_tokens - 1
+        base_num_tokens = len(self.tokenizer.tokens)
+        self.bos_id = base_num_tokens
+        self.eos_id = base_num_tokens + 1
+        self.cfg_unk_token_id = base_num_tokens + 2
+        special_tokens_added = 3
+        if cfg.get("use_multiturn_dataset", False):
+            self.interruption_token_id = base_num_tokens + special_tokens_added
+            special_tokens_added += 1
+        num_tokens = base_num_tokens + special_tokens_added
+        self.pad_id = self.tokenizer.pad
         self.phoneme_tokenizer = None
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate(cfg.phoneme_tokenizer)
@@ -490,6 +496,8 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 '<EOS>': self.eos_id,
                 '<CFG_UNK>': self.cfg_unk_token_id,
             }
+            if cfg.get("use_multiturn_dataset", False):
+                special_vocab["<INTERRUPTION>"] = self.interruption_token_id
             self.cas_encoder = CharAwareSubwordEncoder(
                 d_embed=cfg.embedding_dim,
                 llm_tokenizer_vocab=subword_vocab,

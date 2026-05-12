@@ -31,8 +31,10 @@ from torch.utils.data.distributed import DistributedSampler
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
+from nemo.collections.common.data.fallback import FallbackDataset
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.collections.tts.data.text_to_speech_dataset_lhotse import MagpieTTSLhotseDataset, setup_tokenizers
+from nemo.collections.tts.data.text_to_speech_dataset_lhotse_multiturn import MagpieTTSLhotseMultiturnDataset
 from nemo.collections.tts.models.easy_magpietts_inference import EasyMagpieTTSInferenceModel, TrainingMode
 from nemo.collections.tts.modules.magpietts_modules import (
     LocalTransformerType,
@@ -326,6 +328,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         text_lens: torch.Tensor,
         delay: torch.Tensor,
         dropout_text_input: bool = False,
+        is_multiturn: bool = False,
+        text_pad_id: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Prepare text embeddings as a channel input with delay handling.
@@ -351,6 +355,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
 
         # Embed text tokens (CAS-only when disable_subword_embedding=True).
         text_embedded = self.embed_text_tokens(text, text_lens=text_lens)  # (B, L, E)
+        if is_multiturn and text_pad_id is not None:
+            text_embedded[text == text_pad_id] = 0.0
 
         # Handle text dropout - zero out the embeddings
         if dropout_text_input:
@@ -426,7 +432,11 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         phoneme_embedded = self.embed_phoneme_tokens(phoneme_tokens_stacked)  # (B, T', E)
 
         # Apply mask to zero out padding
-        phoneme_mask = get_mask_from_lengths(phoneme_tokens_lens_stacked)
+        if self.cfg.get("use_multiturn_dataset", False):
+            phoneme_pad_id = getattr(self.phoneme_tokenizer, "pad", -1)
+            phoneme_mask = phoneme_tokens_stacked[:, 0, :] != phoneme_pad_id
+        else:
+            phoneme_mask = get_mask_from_lengths(phoneme_tokens_lens_stacked)
         phoneme_embedded = phoneme_embedded * phoneme_mask.unsqueeze(2)  # (B, T', E)
 
         # Handle phoneme dropout - zero out the embeddings
@@ -523,6 +533,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         audio_codes: torch.Tensor,
         audio_codes_lens: torch.Tensor,
         delay: torch.Tensor,
+        speech_eos_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Prepare audio embeddings as a channel input with delay handling.
@@ -560,6 +571,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             codes_len=audio_codes_lens,
             bos_id=self.audio_bos_id,
             eos_id=self.audio_eos_id,
+            num_eos_tokens=1 if speech_eos_mask is None else 0,
         )
 
         # Stack audio codes across codebooks
@@ -571,6 +583,14 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             self.frame_stacking_factor,
             self.num_audio_codebooks,
         )
+
+        if speech_eos_mask is not None:
+            b_mask, t_mask = speech_eos_mask.shape
+            shifted_mask = torch.zeros((b_mask, t_mask + 2), dtype=torch.bool, device=device)
+            shifted_mask[:, 2:] = speech_eos_mask
+            min_t = min(shifted_mask.size(1), audio_codes.size(2))
+            expanded_mask = shifted_mask[:, :min_t].unsqueeze(1).expand(-1, audio_codes.size(1), -1)
+            audio_codes[:, :, :min_t][expanded_mask] = self.audio_eos_id
 
         # Prepare input and target for autoregressive training
         # Input: all tokens except the last (teacher forcing)
@@ -635,6 +655,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         phoneme_tokens_lens: Optional[torch.Tensor] = None,
         mode: str = "train",
         training_mode: Optional[TrainingMode] = None,
+        task: Optional[list] = None,
+        agent_mask: Optional[torch.Tensor] = None,
     ) -> ProcessBatchOutput:
         """
         Simplified batch processing using channel-based embedding architecture.
@@ -715,12 +737,22 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             # Streaming mode: context_lens + speech_delay
             audio_delay = context_lens + current_streaming_speech_delay
 
+        speech_eos_mask = None
+        text_for_channel = text
+        if self.cfg.get("use_multiturn_dataset", False):
+            speech_eos_mask = text == self.interruption_token_id
+            text_for_channel = text.clone()
+            if not task or "interruption" not in str(task[0]):
+                text_for_channel[speech_eos_mask] = self.pad_id
+
         # 3. Prepare text channel embeddings
         text_channel_embedding, text_channel_lens = self.prepare_text_channel_embeddings(
-            text=text,
+            text=text_for_channel,
             text_lens=text_lens,
             delay=text_delay,
             dropout_text_input=dropout_text_input or dropout_conditional_input,
+            is_multiturn=self.cfg.get("use_multiturn_dataset", False),
+            text_pad_id=self.pad_id,
         )
 
         # 4. Prepare phoneme channel embeddings (if phoneme tokenizer is configured)
@@ -770,6 +802,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             audio_codes=audio_codes,
             audio_codes_lens=audio_codes_lens,
             delay=audio_delay,
+            speech_eos_mask=speech_eos_mask,
         )
 
         # 6. Sum the channel embeddings element-wise
@@ -952,6 +985,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             phoneme_tokens=batch.get('phoneme_tokens'),
             phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
             mode="train",
+            task=batch.get('task'),
+            agent_mask=batch.get('agent_mask'),
         )
         loss = batch_output.loss
         codebook_loss = batch_output.codebook_loss
@@ -1049,6 +1084,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             phoneme_tokens=batch.get('phoneme_tokens'),
             phoneme_tokens_lens=batch.get('phoneme_tokens_lens'),
             mode="val",
+            task=batch.get('task'),
+            agent_mask=batch.get('agent_mask'),
         )
         # Access ProcessBatchOutput dataclass attributes
         # logits come from the parallel prediction head
@@ -1102,7 +1139,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
 
             # Get audio output directory
             audio_dir = self.trainer.log_dir
-            audio_dir = os.path.join(audio_dir, 'val_audios', f'epoch_{self.trainer.current_epoch}')
+            audio_dir = os.path.join(audio_dir, 'val_audios')
             os.makedirs(audio_dir, exist_ok=True)
 
             # Save predicted and context audio, collect paths for metrics
@@ -1392,26 +1429,55 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
     def get_lhotse_dataloader(self, dataset_cfg, mode='train') -> torch.utils.data.DataLoader:
         # TODO @xueyang: better to distinguish cfg. self.cfg is the model cfg, while cfg here is train_ds cfg. Also
         #   cfg is a classifier-free guidance.
-        dataset = MagpieTTSLhotseDataset(
-            sample_rate=self.sample_rate,
-            volume_norm=dataset_cfg.volume_norm,
-            codec_model_samples_per_frame=self.codec_model_samples_per_frame,
-            num_audio_codebooks=self.data_num_audio_codebooks,
-            prior_scaling_factor=0.0,
-            load_cached_codes_if_available=self.cfg.load_cached_codes_if_available,
-            dataset_type=mode,  # train or test used for setting phone prob to 1.0 in test dataset (worker_init_fn)
-            load_16khz_audio=False,
-            pad_context_text_to_max_duration=self.pad_context_text_to_max_duration,
-            context_duration_min=self.cfg.context_duration_min,
-            context_duration_max=self.cfg.context_duration_max,
-            use_text_conditioning_tokenizer=True,
-            text_conditioning_tokenizer_name=self.text_conditioning_tokenizer_name,
-            tokenizer_config=self.cfg.text_tokenizers,
-            phoneme_tokenizer_config=self.cfg.get("phoneme_tokenizer", None),
-            ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
-            ipa_as_text_prob=self.ipa_as_text_prob if mode == 'train' else 0.0,
-            add_language_to_context_text=self.add_language_to_context_text,
-        )
+        if self.cfg.get("use_multiturn_dataset", False):
+            dataset = MagpieTTSLhotseMultiturnDataset(
+                sample_rate=self.sample_rate,
+                volume_norm=dataset_cfg.volume_norm,
+                codec_model_samples_per_frame=self.codec_model_samples_per_frame,
+                codec_model_input_sample_rate=self.codec_model_input_sample_rate,
+                frame_stacking_factor=self.frame_stacking_factor,
+                num_audio_codebooks=self.data_num_audio_codebooks,
+                prior_scaling_factor=0.0,
+                load_cached_codes_if_available=self.cfg.load_cached_codes_if_available,
+                dataset_type=mode,
+                load_16khz_audio=False,
+                pad_context_text_to_max_duration=self.pad_context_text_to_max_duration,
+                context_duration_min=self.cfg.context_duration_min,
+                context_duration_max=self.cfg.context_duration_max,
+                use_text_conditioning_tokenizer=True,
+                text_conditioning_tokenizer_name=self.text_conditioning_tokenizer_name,
+                tokenizer_config=self.cfg.text_tokenizers,
+                phoneme_tokenizer_config=self.cfg.get("phoneme_tokenizer", None),
+                ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
+                add_language_to_context_text=self.add_language_to_context_text,
+                source_sample_rate=self.sample_rate,
+                input_roles=["user", "User"],
+                output_roles=["assistant", "Assistant", "agent", "Agent"],
+                add_text_bos=self.cfg.get("add_text_bos", False),
+                remove_user_turns_prob=self.cfg.get("remove_user_turns_prob", None),
+            )
+            dataset = FallbackDataset(dataset)
+        else:
+            dataset = MagpieTTSLhotseDataset(
+                sample_rate=self.sample_rate,
+                volume_norm=dataset_cfg.volume_norm,
+                codec_model_samples_per_frame=self.codec_model_samples_per_frame,
+                num_audio_codebooks=self.data_num_audio_codebooks,
+                prior_scaling_factor=0.0,
+                load_cached_codes_if_available=self.cfg.load_cached_codes_if_available,
+                dataset_type=mode,  # train or test used for setting phone prob to 1.0 in test dataset (worker_init_fn)
+                load_16khz_audio=False,
+                pad_context_text_to_max_duration=self.pad_context_text_to_max_duration,
+                context_duration_min=self.cfg.context_duration_min,
+                context_duration_max=self.cfg.context_duration_max,
+                use_text_conditioning_tokenizer=True,
+                text_conditioning_tokenizer_name=self.text_conditioning_tokenizer_name,
+                tokenizer_config=self.cfg.text_tokenizers,
+                phoneme_tokenizer_config=self.cfg.get("phoneme_tokenizer", None),
+                ignore_phoneme_languages=self.cfg.get("ignore_phoneme_languages", []),
+                ipa_as_text_prob=self.ipa_as_text_prob if mode == 'train' else 0.0,
+                add_language_to_context_text=self.add_language_to_context_text,
+            )
 
         data_loader = get_lhotse_dataloader_from_config(
             config=dataset_cfg.dataset,
