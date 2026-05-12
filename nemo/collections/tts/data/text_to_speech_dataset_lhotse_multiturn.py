@@ -14,6 +14,7 @@
 import random
 import re
 from typing import Dict, List, Union
+from copy import deepcopy
 
 import numpy as np
 import torch
@@ -28,6 +29,7 @@ from omegaconf import DictConfig
 from transformers import AutoTokenizer, T5Tokenizer
 
 from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import AggregatedTTSTokenizer, IPABPETokenizer
+from nemo.collections.speechlm2.data.utils import get_pad_id
 from nemo.collections.speechlm2.parts.precision import fp32_precision
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     beta_binomial_prior_distribution,
@@ -174,7 +176,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         add_text_bos: bool = False,
         remove_user_turns_prob: float = None,
     ):
-        super().__init__()
+        # super().__init__()
         self.sample_rate = sample_rate
         self.volume_norm = volume_norm
 
@@ -233,13 +235,8 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
             self.phoneme_tokenizer = instantiate(self.phoneme_tokenizer_config)
 
         cuts = cuts.transform_text(_strip_timestamps)
-        for cut in cuts:
-            if str(getattr(cut, "task", "tts")).lower() == "tts":
-                for supervision in cut.supervisions:
-                    supervision.speaker = "agent"
 
         batch_tokenizer_names = []
-        is_multiturn_flags = []
         remove_user_turn_flags = []
         for cut in cuts:
             if cut.has_custom("tokenizer_names"):
@@ -251,8 +248,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
             agent_sups = [sup for sup in cut.supervisions if sup.speaker in self.output_roles]
 
             # It is a multiturn if there's more than 1 agent turn
-            is_multiturn = not (len(agent_sups) <= 1)
-            is_multiturn_flags.append(is_multiturn)
+            is_multiturn = not (len(agent_sups) == 1)
 
             # Apply augmentation only if it's multiturn AND passes the probability check
             if is_multiturn and self.remove_user_turns_prob and random.random() < self.remove_user_turns_prob:
@@ -272,6 +268,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
             target_audio, target_audio_lens = collate_audio(
                 cuts.resample(self.sample_rate, recording_field="target_audio"), recording_field="target_audio"
             )
+            source_audio, source_audio_lens = collate_audio(cuts.resample(self.source_sample_rate))
             target_audio_list = []
             source_audio_list = []
             # normalize volume and apply audio the removal of user turn if needed
@@ -281,14 +278,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
                 
                 # Extract the raw, unpadded 1D numpy array for this specific cut
                 t_audio = target_audio[i, :target_audio_lens[i]].numpy()
-                # For single-turn cuts, source audio should mirror target audio.
-                # For multi-turn cuts, keep loading source audio from the cut recording.
-                
-                if is_multiturn_flags[i]:
-                    s_audio = cut.resample(self.source_sample_rate).load_audio().squeeze(0)
-                else:
-                    s_audio = cut.target_audio.resample(self.source_sample_rate).load_audio().squeeze(0)
-                
+                s_audio = source_audio[i, :source_audio_lens[i]].numpy()
                 if remove_user_turn_this_cut:
                     collapsed_t, collapsed_s = [], []
                     for sup in cut.supervisions:
@@ -611,7 +601,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         )
 
         batch_dict["agent_mask"] = agent_mask
-        batch_dict["agent_mask_lens"] = agent_mask_lens
+        batch_dict["agent_mask_lens"] = agent_mask
         return batch_dict
 
 
