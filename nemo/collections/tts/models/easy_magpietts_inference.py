@@ -255,6 +255,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.codebook_size = codebook_size
 
         self.codec_model_samples_per_frame = codec_model.samples_per_frame
+        self.codec_model_input_sample_rate = codec_model.sample_rate
         # Our codebooks start with actual audio codec tokens, followed by special tokens.
         # The `forced_*` options are for backward compatibility for models trained with older code.
         get_token_index = partial(SpecialAudioToken.get_index, base_codebook_size=self.codebook_size)
@@ -265,9 +266,13 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.mask_token_id = get_token_index(SpecialAudioToken.MASK_TOKEN)
         self.num_all_tokens_per_codebook = self.codebook_size + len(SpecialAudioToken)
         self.use_bpe_char_tokenizer = cfg.get('use_bpe_char_tokenizer', False)
-        self.use_text_embedding = cfg.get('use_text_embedding', True)
-        if not self.use_text_embedding and not self.use_bpe_char_tokenizer:
-            raise ValueError("`use_bpe_char_tokenizer` must be True when `use_text_embedding` is False.")
+        self.disable_subword_embedding = cfg.get('disable_subword_embedding', False)
+        self.disable_lm_text_head = cfg.get('disable_lm_text_head', False)
+        if self.disable_subword_embedding and not self.use_bpe_char_tokenizer:
+            logging.warning(
+                "`disable_subword_embedding=True` requires `use_bpe_char_tokenizer=True`; overriding automatically."
+            )
+            self.use_bpe_char_tokenizer = True
 
         # If specified, use this as the text conditioning tokenizer. Otherwise, use the first tokenizer.
         self.text_conditioning_tokenizer_name = cfg.get('text_conditioning_tokenizer_name', None)
@@ -322,11 +327,16 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             mode='train',
         )
 
-        num_tokens_tokenizer = len(self.tokenizer.tokens)
-        num_tokens = num_tokens_tokenizer + 3  # +3 for BOS, EOS, CFG_UNK
-        self.bos_id = num_tokens - 3
-        self.eos_id = num_tokens - 2
-        self.cfg_unk_token_id = num_tokens - 1
+        base_num_tokens = len(self.tokenizer.tokens)
+        self.bos_id = base_num_tokens
+        self.eos_id = base_num_tokens + 1
+        self.cfg_unk_token_id = base_num_tokens + 2
+        special_tokens_added = 3
+        if cfg.get("use_multiturn_dataset", False):
+            self.interruption_token_id = base_num_tokens + special_tokens_added
+            special_tokens_added += 1
+        num_tokens = base_num_tokens + special_tokens_added
+        self.pad_id = self.tokenizer.pad
         self.phoneme_tokenizer = None
         if cfg.get('phoneme_tokenizer', None) is not None:
             self.phoneme_tokenizer = instantiate(cfg.phoneme_tokenizer)
@@ -343,6 +353,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.pad_context_text_to_max_duration = False
         self.add_language_to_context_text = cfg.get('add_language_to_context_text', False)
         self.ignore_phoneme_languages = cfg.get('ignore_phoneme_languages', [])
+        self.ipa_as_text_prob = cfg.get('ipa_as_text_prob', 0.0)
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -423,8 +434,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                         type(module).__init__(module, module.config, device='cpu')
             else:
                 hf_transformer = AutoModelForCausalLM.from_config(self.transformer_backend_config)
+            if self.disable_lm_text_head:
+                hf_transformer.lm_head = None
             self.decoder = hf_transformer.model
-            self.lm_text_head = hf_transformer.lm_head
+            self.lm_text_head = None if self.disable_lm_text_head else hf_transformer.lm_head
 
         elif self.decoder_type == 'nemotron_h':
             # NemotronH hybrid Mamba2/Attention backend
@@ -437,8 +450,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 nemotron_h_config_dict['hidden_size'] = cfg.embedding_dim
             nemotron_config = NemotronHConfig(**nemotron_h_config_dict)
             nemotron_model = NemotronHForCausalLM(nemotron_config)
+            if self.disable_lm_text_head:
+                nemotron_model.lm_head = None
             self.decoder = nemotron_model.backbone
-            self.lm_text_head = nemotron_model.lm_head
+            self.lm_text_head = None if self.disable_lm_text_head else nemotron_model.lm_head
             logging.info(
                 f"NemotronH config: {nemotron_config.num_hidden_layers} layers, pattern={nemotron_config.hybrid_override_pattern[:20]}..."
             )
@@ -446,10 +461,16 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         else:
             raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Supported: 'huggingface', 'nemotron_h'")
 
-        # self.text_embedding = None
-        # if self.use_text_embedding:
-        self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
-        self.decoder.set_input_embeddings(self.text_embedding)
+        if self.disable_lm_text_head and hasattr(self.decoder, 'lm_head'):
+            self.decoder.lm_head = None
+
+        if self.disable_subword_embedding:
+            # Keep decoder without token embedding parameters when text is CAS-only.
+            self.text_embedding = None
+            self.decoder.set_input_embeddings(None)
+        else:
+            self.text_embedding = nn.Embedding(num_tokens, cfg.embedding_dim)
+            self.decoder.set_input_embeddings(self.text_embedding)
 
         # Task embedding for multi-mode training
         # Each mode has a unique task embedding that is prepended to the context
@@ -475,12 +496,18 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 '<EOS>': self.eos_id,
                 '<CFG_UNK>': self.cfg_unk_token_id,
             }
+            if cfg.get("use_multiturn_dataset", False):
+                special_vocab["<INTERRUPTION>"] = self.interruption_token_id
             self.cas_encoder = CharAwareSubwordEncoder(
                 d_embed=cfg.embedding_dim,
                 llm_tokenizer_vocab=subword_vocab,
                 subword_padding_idx=self.tokenizer.pad,
                 special_vocab=special_vocab,
+                n_layers=cfg.get('cas_encoder_n_layers', 1),
             )
+
+        if self.disable_subword_embedding and not hasattr(self, 'cas_encoder'):
+            raise ValueError("`disable_subword_embedding=True` requires CAS encoder initialization.")
 
         # Projection from hidden_dim to audio_embedding_dim before final_proj (Identity if same)
         if self.audio_embedding_dim != cfg.hidden_dim:
@@ -623,6 +650,23 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         # Project from audio_embedding_dim to embedding_dim
         audio_embedding = self.audio_in_projection(audio_embedding)
         return audio_embedding
+
+    def embed_text_tokens(self, text_tokens: torch.Tensor, text_lens: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Embed text tokens using decoder embedding + optional CAS, or CAS-only when configured."""
+        if text_lens is None:
+            text_lens = torch.full(
+                (text_tokens.size(0),), text_tokens.size(1), dtype=torch.long, device=text_tokens.device
+            )
+
+        text_mask = get_mask_from_lengths(text_lens)
+        if self.disable_subword_embedding:
+            return self.cas_encoder(text_tokens, subword_mask=text_mask)
+
+        text_embedded = self.decoder.get_input_embeddings()(text_tokens)
+        if self.use_bpe_char_tokenizer:
+            cas_embedding = self.cas_encoder(text_tokens, subword_mask=text_mask)
+            text_embedded = text_embedded + cas_embedding
+        return text_embedded
 
     def encode_context_audio_embeddings(self, context_audio_embedded: torch.Tensor, context_audio_lens: torch.Tensor):
         """Encode context audio embeddings with the speaker encoder."""
@@ -897,7 +941,9 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
         # Context Text
         context_text_lens = context_text_tokens_lens
-        context_text_embedded = self.decoder.get_input_embeddings()(context_text_tokens)  # (B, L, E)
+        context_text_embedded = self.embed_text_tokens(
+            context_text_tokens, text_lens=context_text_lens
+        )  # (B, L, E)
 
         # Prepare task embedding for multi-mode training
         task_embedding = None
@@ -922,8 +968,9 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         # Handle CFG unconditional dropout
         if dropout_conditional_input:
             cfg_token_id = self.cfg_unk_token_id
-            cfg_token_embedding = self.decoder.get_input_embeddings()(
-                torch.full((batch_size, 1), cfg_token_id, device=device)
+            cfg_token_embedding = self.embed_text_tokens(
+                torch.full((batch_size, 1), cfg_token_id, device=device),
+                text_lens=torch.ones(batch_size, dtype=torch.long, device=device),
             )  # (B, 1, E)
             # Expand CFG token to match context embedding size
             context_embedding = cfg_token_embedding.expand(-1, context_embedding.size(1), -1)  # (B, T_context, E)
@@ -1170,8 +1217,9 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             # Setup classifier-free guidance if enabled
             dummy_context_embedding_unconditional = None
             if use_cfg:
-                dummy_context_embedding_unconditional = self.decoder.get_input_embeddings()(
-                    torch.full((1, 1), self.cfg_unk_token_id, device=device)
+                dummy_context_embedding_unconditional = self.embed_text_tokens(
+                    torch.full((1, 1), self.cfg_unk_token_id, device=device),
+                    text_lens=torch.ones(1, dtype=torch.long, device=device),
                 )
                 # Create unconditional context (same length as conditional)
                 dummy_context_expanded = dummy_context_embedding_unconditional.expand(
@@ -1372,15 +1420,10 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         # --- Non-context phase items: handle text embedding ---
         if text_tokens is not None and needs_text.any():
             text_tokens_2d = text_tokens.unsqueeze(1)  # (B, 1)
-            if self.use_text_embedding:
-                text_embedded = self.decoder.get_input_embeddings()(text_tokens_2d)  # (B, 1, E)
-            else:
-                text_embedded = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
-
-            if self.use_bpe_char_tokenizer:
-                text_mask = torch.ones_like(text_tokens_2d, dtype=torch.bool)
-                cas_embedding = self.cas_encoder(text_tokens_2d, subword_mask=text_mask)  # (B, 1, E)
-                text_embedded = text_embedded + cas_embedding
+            text_embedded = self.embed_text_tokens(
+                text_tokens_2d,
+                text_lens=torch.ones(batch_size, dtype=torch.long, device=device),
+            )  # (B, 1, E)
 
             if force_dropout_text:
                 text_embedded = text_embedded * 0
