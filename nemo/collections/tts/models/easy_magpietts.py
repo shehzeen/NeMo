@@ -272,13 +272,44 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             active = active & valid_agent_mask
 
         prev_active = F.pad(active[:, :-1], (1, 0), value=False)
-        next_active = F.pad(active[:, 1:], (0, 1), value=False)
-        bot_mask = active & ~prev_active
-        eot_mask = active & ~next_active
+        original_bot_mask = active & ~prev_active
+        original_eot_mask = active & ~F.pad(active[:, 1:], (0, 1), value=False)
 
-        target[active] = self.AGENT_ACTIVITY_ACTIVE
+        extended_active = active.clone()
+        bot_extension_steps = self.agent_activity_bot_extension_steps
+        if bot_extension_steps > 0:
+            bot_float = original_bot_mask.float().unsqueeze(1)
+            extension_kernel = torch.ones(
+                1,
+                1,
+                bot_extension_steps + 1,
+                dtype=bot_float.dtype,
+                device=bot_float.device,
+            )
+            extension_mask = F.conv1d(F.pad(bot_float, (0, bot_extension_steps)), extension_kernel).squeeze(1) > 0
+            extended_active = extended_active | extension_mask
+
+        eot_extension_steps = self.agent_activity_eot_extension_steps
+        if eot_extension_steps > 0:
+            eot_float = original_eot_mask.float().unsqueeze(1)
+            extension_kernel = torch.ones(
+                1,
+                1,
+                eot_extension_steps + 1,
+                dtype=eot_float.dtype,
+                device=eot_float.device,
+            )
+            extension_mask = F.conv1d(F.pad(eot_float, (eot_extension_steps, 0)), extension_kernel).squeeze(1) > 0
+            extended_active = extended_active | extension_mask
+
+        valid_target_mask = get_mask_from_lengths(target_lens, x=target)
+        extended_active = extended_active & valid_target_mask
+        bot_mask = extended_active & ~F.pad(extended_active[:, :-1], (1, 0), value=False)
+        eot_mask = extended_active & ~F.pad(extended_active[:, 1:], (0, 1), value=False)
+
+        target[extended_active] = self.AGENT_ACTIVITY_ACTIVE
         target[bot_mask] = self.AGENT_ACTIVITY_BOT
-        # EOT is placed on the last active timestep, before the following inactive/zeroed audio input.
+        # EOT is placed after a configurable active extension, before the following inactive/zeroed audio input.
         target[eot_mask] = self.AGENT_ACTIVITY_EOT
         return target, target_lens
 
@@ -1096,7 +1127,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             loss = loss + self.phoneme_loss_weight * phoneme_loss
 
         import ipdb; ipdb.set_trace()
-        
+
         return ProcessBatchOutput(
             loss=loss,
             codebook_loss=codebook_loss,

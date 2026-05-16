@@ -131,13 +131,15 @@ it into four classes: inactive, active, beginning-of-turn (BOT), and end-of-turn
 states used for audio-code prediction, and adds a weighted CE loss scaled by
 ``model.agent_activity_loss_weight``.
 
-BOT is placed on the first active timestep of an assistant segment. EOT is placed
-on the last active timestep, before the following inactive region, so EOT is
-predicted while the teacher-forced assistant audio input is still non-zero. The
-teacher-forced assistant audio input is zeroed only for inactive timesteps. The
-assistant audio-code and local-transformer losses are computed only on active
-agent-speaking timesteps; inactive regions are covered by the agent-activity
-loss instead.
+BOT is placed before the detected turn start by a configurable extension
+(``model.agent_activity_bot_extension_steps``). EOT is placed after a
+configurable extension from the detected turn end
+(``model.agent_activity_eot_extension_steps``), before the following inactive
+region, so EOT is predicted while the teacher-forced assistant audio input is
+still non-zero. The teacher-forced assistant audio input is zeroed only for
+inactive timesteps. The assistant audio-code and local-transformer losses are
+computed only on active agent-speaking timesteps; inactive regions are covered by
+the agent-activity loss instead.
 
 Multi-Turn-Specific Model Behavior
 ##################################
@@ -222,6 +224,10 @@ starting point. The most relevant options are:
 * ``model.agent_activity_class_weights``: CE class weights for inactive, active,
   BOT, and EOT. Boundary classes should usually be weighted higher than ordinary
   active/inactive classes.
+* ``model.agent_activity_bot_extension_steps``: number of timesteps to extend
+  each assistant turn before placing the BOT target.
+* ``model.agent_activity_eot_extension_steps``: number of timesteps to extend
+  each assistant turn before placing the EOT target.
 * ``model.train_ds.dataset``: can mix regular TTS and duplex data with Lhotse
   ``multi_config`` and sampler weights.
 

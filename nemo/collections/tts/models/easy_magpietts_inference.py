@@ -533,6 +533,12 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.agent_activity_class_weights = cfg.get('agent_activity_class_weights', [0.1, 0.1, 1.0, 1.0])
         if len(self.agent_activity_class_weights) != 4:
             raise ValueError("agent_activity_class_weights must contain four values: inactive, active, bot, eot")
+        self.agent_activity_bot_extension_steps = cfg.get('agent_activity_bot_extension_steps', 2)
+        if self.agent_activity_bot_extension_steps < 0:
+            raise ValueError("agent_activity_bot_extension_steps must be non-negative")
+        self.agent_activity_eot_extension_steps = cfg.get('agent_activity_eot_extension_steps', 2)
+        if self.agent_activity_eot_extension_steps < 0:
+            raise ValueError("agent_activity_eot_extension_steps must be non-negative")
         if self.agent_activity_loss_weight > 0.0:
             self.agent_activity_head = nn.Linear(cfg.hidden_dim, 4)
         else:

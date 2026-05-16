@@ -91,6 +91,8 @@ model:
   user_audio_delay_max: 2
   agent_activity_loss_weight: 1.0
   agent_activity_class_weights: [0.1, 0.1, 1.0, 1.0] # inactive, active, bot, eot
+  agent_activity_bot_extension_steps: 2
+  agent_activity_eot_extension_steps: 2
   
   # Multi-mode training configuration
   training_modes:
