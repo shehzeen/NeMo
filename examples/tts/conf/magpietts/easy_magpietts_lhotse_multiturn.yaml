@@ -84,6 +84,13 @@ model:
   local_transformer_hidden_dim: 1536
 
   cfg_unconditional_prob: 0.05
+
+  # Multi-turn user-audio conditioning and agent activity prediction
+  use_user_audio_channel: true
+  user_audio_delay_min: 0
+  user_audio_delay_max: 2
+  agent_activity_loss_weight: 1.0
+  agent_activity_class_weights: [0.1, 0.1, 1.0, 1.0] # inactive, active, bot, eot
   
   # Multi-mode training configuration
   training_modes:

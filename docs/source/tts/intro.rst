@@ -20,5 +20,6 @@ We will illustrate details in the following sections.
     magpietts-finetuning
     magpietts-po
     magpietts-longform
+    easy_magpietts_multiturn
 
 .. include:: resources.rst

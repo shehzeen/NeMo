@@ -239,7 +239,6 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
                     supervision.speaker = "agent"
 
         batch_tokenizer_names = []
-        is_multiturn_flags = []
         remove_user_turn_flags = []
         for cut in cuts:
             if cut.has_custom("tokenizer_names"):
@@ -252,7 +251,6 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
 
             # It is a multiturn if there's more than 1 agent turn
             is_multiturn = not (len(agent_sups) <= 1)
-            is_multiturn_flags.append(is_multiturn)
 
             # Apply augmentation only if it's multiturn AND passes the probability check
             if is_multiturn and self.remove_user_turns_prob and random.random() < self.remove_user_turns_prob:
@@ -278,17 +276,17 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
 
             for i, cut in enumerate(cuts):
                 remove_user_turn_this_cut = remove_user_turn_flags[i]
-                
+
                 # Extract the raw, unpadded 1D numpy array for this specific cut
                 t_audio = target_audio[i, :target_audio_lens[i]].numpy()
-                # For single-turn cuts, source audio should mirror target audio.
+                # For tts/single-turn cuts, source audio should be zeros like target audio
                 # For multi-turn cuts, keep loading source audio from the cut recording.
-                
-                if is_multiturn_flags[i]:
-                    s_audio = cut.resample(self.source_sample_rate).load_audio().squeeze(0)
+                if str(getattr(cut, "task", "tts")).lower() == "tts":
+                    src_len = int(round(len(t_audio) / self.sample_rate * self.source_sample_rate))
+                    s_audio = np.zeros(src_len, dtype=t_audio.dtype)
                 else:
-                    s_audio = cut.target_audio.resample(self.source_sample_rate).load_audio().squeeze(0)
-                
+                    s_audio = cut.resample(self.source_sample_rate).load_audio().squeeze(0)
+
                 if remove_user_turn_this_cut:
                     collapsed_t, collapsed_s = [], []
                     for sup in cut.supervisions:

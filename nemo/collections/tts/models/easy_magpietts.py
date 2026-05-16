@@ -20,6 +20,7 @@ from typing import Optional, Tuple
 import numpy as np
 import soundfile as sf
 import torch
+import torch.nn.functional as F
 import wandb
 from hydra.utils import instantiate
 from lightning.pytorch import Trainer
@@ -68,13 +69,16 @@ class ProcessBatchOutput:
     Output dataclass from process_batch containing loss values and model predictions.
 
     Attributes:
-        loss: Total combined loss (codebook_loss + phoneme_loss + local_transformer_loss)
+        loss: Total combined loss (codebook_loss + phoneme_loss + local_transformer_loss + agent_activity_loss)
         codebook_loss: Cross-entropy loss for parallel audio codebook prediction
         phoneme_loss: Cross-entropy loss for phoneme prediction (None if no phoneme tokenizer)
         local_transformer_loss: Loss from local transformer (None if not used)
+        agent_activity_loss: Weighted CE loss for predicting inactive/active/BOT/EOT state (None if disabled)
         local_transformer_logits: Logits from local transformer (None if not used)
         logits: Predicted logits for audio codes (B, T', num_codebooks * num_tokens_per_codebook)
         phoneme_logits: Predicted logits for phoneme tokens (None if no phoneme tokenizer)
+        agent_activity_logits: Predicted agent activity logits (B, T', 4)
+        agent_activity_target: Agent activity class targets aligned to audio predictions (B, T')
         phoneme_tokens_target: Target phoneme tokens for loss computation
         phoneme_tokens_lens_target: Lengths of target phoneme tokens
         audio_codes_target: Target audio codes for loss computation (B, C, T'-1)
@@ -88,9 +92,12 @@ class ProcessBatchOutput:
     codebook_loss: torch.Tensor
     phoneme_loss: Optional[torch.Tensor]
     local_transformer_loss: Optional[torch.Tensor]
+    agent_activity_loss: Optional[torch.Tensor]
     local_transformer_logits: Optional[torch.Tensor]
     logits: torch.Tensor
     phoneme_logits: Optional[torch.Tensor]
+    agent_activity_logits: Optional[torch.Tensor]
+    agent_activity_target: Optional[torch.Tensor]
     phoneme_tokens_target: Optional[torch.Tensor]
     phoneme_tokens_lens_target: Optional[torch.Tensor]
     audio_codes_target: torch.Tensor
@@ -108,6 +115,11 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
     process_batch, data loading, and training-specific configuration (loss weights,
     phoneme corruption, eval models for validation metrics).
     """
+
+    AGENT_ACTIVITY_INACTIVE = 0
+    AGENT_ACTIVITY_ACTIVE = 1
+    AGENT_ACTIVITY_BOT = 2
+    AGENT_ACTIVITY_EOT = 3
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg=cfg, trainer=trainer)
@@ -170,7 +182,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             '_utmos_calculator',
         ]
 
-    def compute_loss(self, logits, audio_codes, audio_codes_lens):
+    def compute_loss(self, logits, audio_codes, audio_codes_lens, timestep_loss_mask=None):
         """
         Computes the audio codebook loss. Used by
         (1) The main Magpie-TTS transformer
@@ -180,7 +192,10 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         audio_codes: (B, C, T')
         audio_codes_lens: (B,)
         """
-        loss_mask = get_mask_from_lengths(audio_codes_lens)
+        loss_mask = get_mask_from_lengths(audio_codes_lens, x=audio_codes)
+        if timestep_loss_mask is not None:
+            active_mask = timestep_loss_mask.to(device=loss_mask.device, dtype=torch.bool)
+            loss_mask = loss_mask & active_mask
         loss_mask = loss_mask.unsqueeze(1).repeat(1, audio_codes.size(1), 1)
         total_codebook_loss = None
         for codebook in range(audio_codes.size(1)):
@@ -192,7 +207,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 codebook_logits.permute(0, 2, 1), codebook_targets.long()  # (B, num_tokens_per_codebook, T')
             )  # (B, T')
             codebook_loss = codebook_loss * loss_mask[:, codebook, :]
-            codebook_loss = codebook_loss.sum() / loss_mask[:, codebook, :].sum()
+            codebook_loss = codebook_loss.sum() / loss_mask[:, codebook, :].sum().clamp_min(1)
             if total_codebook_loss is None:
                 total_codebook_loss = codebook_loss
             else:
@@ -218,6 +233,54 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 total_phoneme_loss = total_phoneme_loss + phoneme_loss
         total_phoneme_loss = total_phoneme_loss / self.phoneme_stacking_factor
         return total_phoneme_loss, loss_mask
+
+    def compute_agent_activity_loss(self, logits, agent_activity_target, agent_activity_lens):
+        loss_mask = get_mask_from_lengths(agent_activity_lens, x=agent_activity_target)
+        class_weights = torch.tensor(
+            self.agent_activity_class_weights,
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        loss = F.cross_entropy(
+            logits.permute(0, 2, 1),
+            agent_activity_target.long(),
+            weight=class_weights,
+            reduction='none',
+        )
+        loss = loss * loss_mask
+        return loss.sum() / loss_mask.sum().clamp_min(1)
+
+    def prepare_agent_activity_target(self, agent_mask, agent_mask_lens, target_lens):
+        batch_size = target_lens.size(0)
+        max_target_len = int(target_lens.max().item())
+        target = torch.full(
+            (batch_size, max_target_len),
+            self.AGENT_ACTIVITY_INACTIVE,
+            dtype=torch.long,
+            device=target_lens.device,
+        )
+        if agent_mask is None:
+            return target, target_lens
+
+        agent_mask = agent_mask.to(device=target_lens.device, dtype=torch.bool)
+        copy_len = min(agent_mask.size(1), max_target_len)
+        active = torch.zeros_like(target, dtype=torch.bool)
+        active[:, :copy_len] = agent_mask[:, :copy_len]
+        if agent_mask_lens is not None:
+            agent_mask_lens = agent_mask_lens.to(device=target_lens.device)
+            valid_agent_mask = get_mask_from_lengths(agent_mask_lens.clamp(max=max_target_len), x=target)
+            active = active & valid_agent_mask
+
+        prev_active = F.pad(active[:, :-1], (1, 0), value=False)
+        next_active = F.pad(active[:, 1:], (0, 1), value=False)
+        bot_mask = active & ~prev_active
+        eot_mask = active & ~next_active
+
+        target[active] = self.AGENT_ACTIVITY_ACTIVE
+        target[bot_mask] = self.AGENT_ACTIVITY_BOT
+        # EOT is placed on the last active timestep, before the following inactive/zeroed audio input.
+        target[eot_mask] = self.AGENT_ACTIVITY_EOT
+        return target, target_lens
 
     def log_val_audio_example(
         self,
@@ -533,8 +596,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         audio_codes: torch.Tensor,
         audio_codes_lens: torch.Tensor,
         delay: torch.Tensor,
-        speech_eos_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        agent_activity_mask: Optional[torch.Tensor] = None,
+        agent_activity_mask_lens: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Prepare audio embeddings as a channel input with delay handling.
 
@@ -571,7 +635,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             codes_len=audio_codes_lens,
             bos_id=self.audio_bos_id,
             eos_id=self.audio_eos_id,
-            num_eos_tokens=1 if speech_eos_mask is None else 0,
+            num_eos_tokens=1,
         )
 
         # Stack audio codes across codebooks
@@ -584,14 +648,6 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             self.num_audio_codebooks,
         )
 
-        if speech_eos_mask is not None:
-            b_mask, t_mask = speech_eos_mask.shape
-            shifted_mask = torch.zeros((b_mask, t_mask + 2), dtype=torch.bool, device=device)
-            shifted_mask[:, 2:] = speech_eos_mask
-            min_t = min(shifted_mask.size(1), audio_codes.size(2))
-            expanded_mask = shifted_mask[:, :min_t].unsqueeze(1).expand(-1, audio_codes.size(1), -1)
-            audio_codes[:, :, :min_t][expanded_mask] = self.audio_eos_id
-
         # Prepare input and target for autoregressive training
         # Input: all tokens except the last (teacher forcing)
         # Target: all tokens except the first (shifted by one)
@@ -599,8 +655,15 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         audio_codes_target = audio_codes[:, :, 1:]  # (B, C, T'-1)
         audio_codes_input = audio_codes[:, :, :-1]  # (B, C, T'-1)
 
+        agent_activity_target, agent_activity_lens = self.prepare_agent_activity_target(
+            agent_activity_mask, agent_activity_mask_lens, audio_codes_lens_target
+        )
+
         # Embed audio tokens
         audio_embedded = self.embed_audio_tokens(audio_codes_input)  # (B, T'-1, E)
+        if agent_activity_mask is not None:
+            agent_audio_active_mask = agent_activity_target != self.AGENT_ACTIVITY_INACTIVE
+            audio_embedded = audio_embedded * agent_audio_active_mask.to(audio_embedded.dtype).unsqueeze(2)
 
         # Create zero tensor for delay padding
         max_delay = delay.max().item()
@@ -612,7 +675,46 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             lengths=[delay, audio_codes_lens_target],
         )
 
-        return audio_channel_embedding, audio_channel_lens, audio_codes_target, audio_codes_lens_target
+        return (
+            audio_channel_embedding,
+            audio_channel_lens,
+            audio_codes_target,
+            audio_codes_lens_target,
+            agent_activity_target,
+            agent_activity_lens,
+        )
+
+    def prepare_user_audio_channel_embeddings(
+        self,
+        source_audio_codes: torch.Tensor,
+        source_audio_codes_lens: torch.Tensor,
+        delay: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self._codec_converter is not None:
+            source_audio_codes = self._codec_converter.convert_original_to_new(
+                audio_tokens=source_audio_codes, audio_lens=source_audio_codes_lens
+            ).long()
+
+        source_audio_codes, source_audio_codes_lens = self.stack_codes(
+            source_audio_codes,
+            source_audio_codes_lens,
+            self.audio_bos_id,
+            self.audio_eos_id,
+            self.frame_stacking_factor,
+            self.num_audio_codebooks,
+        )
+        user_audio_embedded = self.embed_audio_tokens(source_audio_codes)
+
+        batch_size = source_audio_codes.size(0)
+        max_delay = delay.max().item()
+        zero_delay_tensor = torch.zeros(
+            batch_size, max_delay, self.cfg.embedding_dim, device=source_audio_codes.device
+        )
+        user_audio_channel_embedding, user_audio_channel_lens = self.join_embeddings_temporally(
+            embeddings=[zero_delay_tensor, user_audio_embedded],
+            lengths=[delay, source_audio_codes_lens],
+        )
+        return user_audio_channel_embedding, user_audio_channel_lens
 
     def slice_sequence_embeddings(self, sequence_embeddings, context_lens, target_lens):
         """
@@ -657,6 +759,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         training_mode: Optional[TrainingMode] = None,
         task: Optional[list] = None,
         agent_mask: Optional[torch.Tensor] = None,
+        agent_mask_lens: Optional[torch.Tensor] = None,
+        source_audio_codes: Optional[torch.Tensor] = None,
+        source_audio_codes_lens: Optional[torch.Tensor] = None,
     ) -> ProcessBatchOutput:
         """
         Simplified batch processing using channel-based embedding architecture.
@@ -690,6 +795,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             ProcessBatchOutput: Contains loss values and model predictions
         """
         # Select training mode
+        # import ipdb; ipdb.set_trace()
         selected_training_mode = training_mode
         if selected_training_mode is None:
             if mode == 'train':
@@ -737,13 +843,23 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             # Streaming mode: context_lens + speech_delay
             audio_delay = context_lens + current_streaming_speech_delay
 
-        speech_eos_mask = None
+        if mode == 'train' and self.user_audio_delay_max > self.user_audio_delay_min:
+            user_audio_delay_offset = torch.randint(
+                low=self.user_audio_delay_min,
+                high=self.user_audio_delay_max + 1,
+                size=context_lens.shape,
+                device=context_lens.device,
+            )
+        else:
+            user_audio_delay_offset = torch.full_like(context_lens, self.user_audio_delay_min)
+        user_audio_delay = context_lens + user_audio_delay_offset
+
         text_for_channel = text
         if self.cfg.get("use_multiturn_dataset", False):
-            speech_eos_mask = text == self.interruption_token_id
+            interruption_mask = text == self.interruption_token_id
             text_for_channel = text.clone()
             if not task or "interruption" not in str(task[0]):
-                text_for_channel[speech_eos_mask] = self.pad_id
+                text_for_channel[interruption_mask] = self.pad_id
 
         # 3. Prepare text channel embeddings
         text_channel_embedding, text_channel_lens = self.prepare_text_channel_embeddings(
@@ -798,19 +914,33 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             audio_channel_lens,
             audio_codes_target,
             audio_codes_lens_target,
+            agent_activity_target,
+            agent_activity_lens,
         ) = self.prepare_audio_channel_embeddings(
             audio_codes=audio_codes,
             audio_codes_lens=audio_codes_lens,
             delay=audio_delay,
-            speech_eos_mask=speech_eos_mask,
+            agent_activity_mask=agent_mask,
+            agent_activity_mask_lens=agent_mask_lens,
         )
 
-        # 6. Sum the channel embeddings element-wise
+        # 6. Prepare input-only user audio channel (if configured)
+        user_audio_channel_embedding = None
+        user_audio_channel_lens = None
+        if self.use_user_audio_channel and source_audio_codes is not None and source_audio_codes_lens is not None:
+            user_audio_channel_embedding, user_audio_channel_lens = self.prepare_user_audio_channel_embeddings(
+                source_audio_codes=source_audio_codes,
+                source_audio_codes_lens=source_audio_codes_lens,
+                delay=user_audio_delay,
+            )
+
+        # 7. Sum the channel embeddings element-wise
         # First, align all channels to the same length (max of all channel lengths)
         max_channel_len = max(
             text_channel_embedding.size(1),
             audio_channel_embedding.size(1),
             phoneme_channel_embedding.size(1) if phoneme_channel_embedding is not None else 0,
+            user_audio_channel_embedding.size(1) if user_audio_channel_embedding is not None else 0,
         )
 
         # Pad text channel if needed
@@ -833,6 +963,15 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             )
             audio_channel_embedding = torch.cat([audio_channel_embedding, padding], dim=1)
 
+        if user_audio_channel_embedding is not None and user_audio_channel_embedding.size(1) < max_channel_len:
+            padding = torch.zeros(
+                user_audio_channel_embedding.size(0),
+                max_channel_len - user_audio_channel_embedding.size(1),
+                user_audio_channel_embedding.size(2),
+                device=user_audio_channel_embedding.device,
+            )
+            user_audio_channel_embedding = torch.cat([user_audio_channel_embedding, padding], dim=1)
+
         # Sum channels
         combined_channel_embedding = text_channel_embedding + audio_channel_embedding
 
@@ -848,20 +987,17 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 phoneme_channel_embedding = torch.cat([phoneme_channel_embedding, padding], dim=1)
             combined_channel_embedding = combined_channel_embedding + phoneme_channel_embedding
 
-        # 7. Join context with combined channel embeddings
+        if user_audio_channel_embedding is not None:
+            combined_channel_embedding = combined_channel_embedding + user_audio_channel_embedding
+
+        # 8. Join context with combined channel embeddings
         # The combined_channel_lens is the max of all channel lens for each batch item
-        combined_channel_lens = (
-            torch.stack(
-                [
-                    text_channel_lens,
-                    audio_channel_lens,
-                    phoneme_channel_lens if phoneme_channel_embedding is not None else audio_channel_lens,
-                ],
-                dim=0,
-            )
-            .max(dim=0)
-            .values
-        )
+        channel_lens = [text_channel_lens, audio_channel_lens]
+        if phoneme_channel_embedding is not None:
+            channel_lens.append(phoneme_channel_lens)
+        if user_audio_channel_lens is not None:
+            channel_lens.append(user_audio_channel_lens)
+        combined_channel_lens = torch.stack(channel_lens, dim=0).max(dim=0).values
 
         # Right pad context embedding
         context_padding = torch.zeros(
@@ -874,14 +1010,14 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
 
         full_embedding = context_embedding_padded + combined_channel_embedding
 
-        # 8. Forward pass through transformer
+        # 9. Forward pass through transformer
         transformer_out = self.forward(
             inputs_embeds=full_embedding,
             attention_mask=get_mask_from_lengths(combined_channel_lens),
         )
         transformer_hidden_states = transformer_out.last_hidden_state  # (B, T_total, E)
 
-        # 9. Extract prediction embeddings and compute losses
+        # 10. Extract prediction embeddings and compute losses
         # Audio predictions start at audio_delay
         pred_embeddings = self.slice_sequence_embeddings(
             transformer_hidden_states,
@@ -894,8 +1030,27 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         logits = self.final_proj(pred_embeddings_audio)
 
         # Compute codebook loss
-        codebook_loss, _ = self.compute_loss(logits, audio_codes_target, audio_codes_lens_target)
+        active_audio_loss_mask = None
+        if agent_mask is not None:
+            active_audio_loss_mask = agent_activity_target != self.AGENT_ACTIVITY_INACTIVE
+        codebook_loss, _ = self.compute_loss(
+            logits,
+            audio_codes_target,
+            audio_codes_lens_target,
+            timestep_loss_mask=active_audio_loss_mask,
+        )
         loss = self.parallel_codebook_loss_scale * codebook_loss
+
+        agent_activity_loss = None
+        agent_activity_logits = None
+        if self.agent_activity_head is not None and agent_mask is not None:
+            agent_activity_logits = self.agent_activity_head(pred_embeddings)
+            agent_activity_loss = self.compute_agent_activity_loss(
+                agent_activity_logits,
+                agent_activity_target,
+                agent_activity_lens,
+            )
+            loss = loss + self.agent_activity_loss_weight * agent_activity_loss
 
         # Compute local transformer loss if applicable
         local_transformer_loss = None
@@ -906,7 +1061,10 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 pred_embeddings, audio_codes_target, targets_offset_by_one=False
             )
             local_transformer_loss, _ = self.compute_loss(
-                local_transformer_logits, audio_codes_target, audio_codes_lens_target
+                local_transformer_logits,
+                audio_codes_target,
+                audio_codes_lens_target,
+                timestep_loss_mask=active_audio_loss_mask,
             )
             loss = loss + self.local_transformer_loss_scale * local_transformer_loss
 
@@ -937,14 +1095,19 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
 
             loss = loss + self.phoneme_loss_weight * phoneme_loss
 
+        import ipdb; ipdb.set_trace()
+        
         return ProcessBatchOutput(
             loss=loss,
             codebook_loss=codebook_loss,
             phoneme_loss=phoneme_loss,
             local_transformer_loss=local_transformer_loss,
+            agent_activity_loss=agent_activity_loss,
             local_transformer_logits=local_transformer_logits,
             logits=logits,
             phoneme_logits=pb_phoneme_logits,
+            agent_activity_logits=agent_activity_logits,
+            agent_activity_target=agent_activity_target if agent_activity_logits is not None else None,
             phoneme_tokens_target=pb_phoneme_tokens_target,
             phoneme_tokens_lens_target=pb_phoneme_tokens_lens_target,
             audio_codes_target=audio_codes_target,
@@ -973,6 +1136,17 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             audio_lens = batch['audio_lens']
             audio_codes, audio_codes_lens = self._codec_helper.audio_to_codes(audio, audio_lens)
 
+        source_audio_codes = None
+        source_audio_codes_lens = None
+        if self.use_user_audio_channel:
+            if 'source_codes' in batch:
+                source_audio_codes = batch['source_codes']
+                source_audio_codes_lens = batch['source_codes_lens']
+            elif 'source_audio' in batch:
+                source_audio_codes, source_audio_codes_lens = self._codec_helper.audio_to_codes(
+                    batch['source_audio'], batch['source_audio_lens']
+                )
+
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
@@ -987,6 +1161,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             mode="train",
             task=batch.get('task'),
             agent_mask=batch.get('agent_mask'),
+            agent_mask_lens=batch.get('agent_mask_lens'),
+            source_audio_codes=source_audio_codes,
+            source_audio_codes_lens=source_audio_codes_lens,
         )
         loss = batch_output.loss
         codebook_loss = batch_output.codebook_loss
@@ -996,6 +1173,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         if self.phoneme_tokenizer is not None:
             phoneme_loss = batch_output.phoneme_loss
             self.log('train/phoneme_loss', phoneme_loss, prog_bar=True, sync_dist=True)
+
+        if batch_output.agent_activity_loss is not None:
+            self.log('train/agent_activity_loss', batch_output.agent_activity_loss, prog_bar=True, sync_dist=True)
 
         local_transformer_loss = batch_output.local_transformer_loss
         if local_transformer_loss is not None:
@@ -1072,6 +1252,17 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             audio_lens = batch['audio_lens']
             audio_codes, audio_codes_lens = self._codec_helper.audio_to_codes(audio, audio_lens)
 
+        source_audio_codes = None
+        source_audio_codes_lens = None
+        if self.use_user_audio_channel:
+            if 'source_codes' in batch:
+                source_audio_codes = batch['source_codes']
+                source_audio_codes_lens = batch['source_codes_lens']
+            elif 'source_audio' in batch:
+                source_audio_codes, source_audio_codes_lens = self._codec_helper.audio_to_codes(
+                    batch['source_audio'], batch['source_audio_lens']
+                )
+
         batch_output = self.process_batch(
             text=batch['text'],
             text_lens=batch['text_lens'],
@@ -1086,6 +1277,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             mode="val",
             task=batch.get('task'),
             agent_mask=batch.get('agent_mask'),
+            agent_mask_lens=batch.get('agent_mask_lens'),
+            source_audio_codes=source_audio_codes,
+            source_audio_codes_lens=source_audio_codes_lens,
         )
         # Access ProcessBatchOutput dataclass attributes
         # logits come from the parallel prediction head
@@ -1124,6 +1318,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         if self.phoneme_tokenizer is not None:
             phoneme_loss = batch_output.phoneme_loss
             val_output['val_phoneme_loss'] = phoneme_loss
+
+        if batch_output.agent_activity_loss is not None:
+            val_output['val_agent_activity_loss'] = batch_output.agent_activity_loss
 
         # Run inference and compute metrics if enabled
         if self.run_val_inference:
@@ -1356,6 +1553,12 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
         if self.phoneme_tokenizer is not None:
             val_phoneme_loss = collect("val_phoneme_loss")
             self.log("val/phoneme_loss", val_phoneme_loss, prog_bar=True, sync_dist=True)
+
+        if any("val_agent_activity_loss" in x for x in self.validation_step_outputs):
+            val_agent_activity_loss = torch.stack(
+                [x["val_agent_activity_loss"] for x in self.validation_step_outputs if "val_agent_activity_loss" in x]
+            ).mean()
+            self.log("val/agent_activity_loss", val_agent_activity_loss, prog_bar=True, sync_dist=True)
 
         if self.run_val_inference:
             # Collect metrics only from outputs that have them

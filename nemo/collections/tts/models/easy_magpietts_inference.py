@@ -264,10 +264,12 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.context_audio_bos_id = get_token_index(SpecialAudioToken.AUDIO_CONTEXT_BOS)
         self.context_audio_eos_id = get_token_index(SpecialAudioToken.AUDIO_CONTEXT_EOS)
         self.mask_token_id = get_token_index(SpecialAudioToken.MASK_TOKEN)
+        self.audio_user_speaking_id = get_token_index(SpecialAudioToken.USER_SPEAKING)
+        self.audio_user_speaking_end_id = get_token_index(SpecialAudioToken.USER_SPEAKING_END)
         self.num_all_tokens_per_codebook = self.codebook_size + len(SpecialAudioToken)
         self.use_bpe_char_tokenizer = cfg.get('use_bpe_char_tokenizer', False)
         self.disable_subword_embedding = cfg.get('disable_subword_embedding', False)
-        self.disable_lm_text_head = cfg.get('disable_lm_text_head', False)
+        self.disable_lm_text_head = cfg.get('disable_lm_text_head', True)
         if self.disable_subword_embedding and not self.use_bpe_char_tokenizer:
             logging.warning(
                 "`disable_subword_embedding=True` requires `use_bpe_char_tokenizer=True`; overriding automatically."
@@ -519,6 +521,22 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             self.audio_embedding_dim,
             self.num_audio_codebooks * self.num_all_tokens_per_codebook * self.frame_stacking_factor,
         )
+        self.use_user_audio_channel = cfg.get('use_user_audio_channel', False)
+        self.user_audio_delay_min = cfg.get('user_audio_delay_min', 0)
+        self.user_audio_delay_max = cfg.get('user_audio_delay_max', 0)
+        if self.user_audio_delay_min > self.user_audio_delay_max:
+            raise ValueError(
+                f"user_audio_delay_min ({self.user_audio_delay_min}) must be <= "
+                f"user_audio_delay_max ({self.user_audio_delay_max})"
+            )
+        self.agent_activity_loss_weight = cfg.get('agent_activity_loss_weight', 0.0)
+        self.agent_activity_class_weights = cfg.get('agent_activity_class_weights', [0.1, 0.1, 1.0, 1.0])
+        if len(self.agent_activity_class_weights) != 4:
+            raise ValueError("agent_activity_class_weights must contain four values: inactive, active, bot, eot")
+        if self.agent_activity_loss_weight > 0.0:
+            self.agent_activity_head = nn.Linear(cfg.hidden_dim, 4)
+        else:
+            self.agent_activity_head = None
 
         self.local_transformer_type = LocalTransformerType(cfg.get('local_transformer_type', 'none').lower())
         logging.info(f"Local transformer type: {self.local_transformer_type}")
