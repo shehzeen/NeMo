@@ -42,7 +42,9 @@ from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging
-
+import tempfile
+from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
+from nemo.collections.speechlm2.parts.pretrained import set_model_dict_for_partial_init
 
 @dataclass
 class TrainingMode:
@@ -524,11 +526,14 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         self.use_user_audio_channel = cfg.get('use_user_audio_channel', False)
         self.user_audio_delay_min = cfg.get('user_audio_delay_min', 0)
         self.user_audio_delay_max = cfg.get('user_audio_delay_max', 0)
+        self.user_audio_dropout_prob = cfg.get('user_audio_dropout_prob', 0.5)
         if self.user_audio_delay_min > self.user_audio_delay_max:
             raise ValueError(
                 f"user_audio_delay_min ({self.user_audio_delay_min}) must be <= "
                 f"user_audio_delay_max ({self.user_audio_delay_max})"
             )
+        if not 0.0 <= self.user_audio_dropout_prob <= 1.0:
+            raise ValueError("user_audio_dropout_prob must be in [0, 1]")
         self.agent_activity_loss_weight = cfg.get('agent_activity_loss_weight', 0.0)
         self.agent_activity_class_weights = cfg.get('agent_activity_class_weights', [0.1, 0.1, 1.0, 1.0])
         if len(self.agent_activity_class_weights) != 4:
@@ -594,6 +599,27 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 mask_token_id=self.mask_token_id,
                 codebook_size=self.codebook_size,
             )
+
+    def restore_from_pretrained_checkpoint(self, checkpoint_path):
+        """
+        Loads model weights a pretrained checkpoint file, supporting partial loading from safetensor and PyTorch formats.
+        Args:
+            checkpoint_path (str): Path to checkpoint file.
+        Returns:
+            None. The model is updated in-place.
+        """
+        if checkpoint_path is not None:
+            if '.nemo' in checkpoint_path:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    SaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
+                    checkpoint_path = f"{tmpdir}/model_weights.ckpt"
+                    checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
+            else:
+                checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
+            checkpoint_state = set_model_dict_for_partial_init(checkpoint_state, self.state_dict())
+
+            self.load_state_dict(checkpoint_state, strict=True)
+            logging.info(f"Model restored from the checkpoint: {checkpoint_path} !")
 
     def _get_state_dict_keys_to_exclude(self) -> List[str]:
         return [

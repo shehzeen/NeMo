@@ -123,6 +123,8 @@ training, this delay is sampled uniformly from
 ``model.user_audio_delay_min`` through ``model.user_audio_delay_max`` for each
 batch item. During validation it uses ``model.user_audio_delay_min``. This
 models possible user-audio latency differences without changing the dataset.
+During training, the full user-audio channel embedding is dropped to zero with
+probability ``model.user_audio_dropout_prob``.
 
 The dataset's ``agent_mask`` is also used to train an agent-activity stream. The
 model aligns ``agent_mask`` to the assistant audio prediction length and converts
@@ -219,6 +221,8 @@ starting point. The most relevant options are:
   stream.
 * ``model.user_audio_delay_min`` and ``model.user_audio_delay_max``: inclusive
   train-time delay range for the user-audio stream.
+* ``model.user_audio_dropout_prob``: train-time probability of zeroing the
+  entire user-audio channel embedding.
 * ``model.agent_activity_loss_weight``: scales the weighted CE loss for
   predicting the agent activity class.
 * ``model.agent_activity_class_weights``: CE class weights for inactive, active,

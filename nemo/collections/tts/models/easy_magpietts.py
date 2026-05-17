@@ -964,6 +964,8 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 source_audio_codes_lens=source_audio_codes_lens,
                 delay=user_audio_delay,
             )
+            if mode == 'train' and torch.rand(1, device=user_audio_channel_embedding.device).item() < self.user_audio_dropout_prob:
+                user_audio_channel_embedding = user_audio_channel_embedding * 0.0
 
         # 7. Sum the channel embeddings element-wise
         # First, align all channels to the same length (max of all channel lengths)
@@ -1125,9 +1127,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 phoneme_loss = torch.tensor(0.0, device=logits.device)
 
             loss = loss + self.phoneme_loss_weight * phoneme_loss
-
-        import ipdb; ipdb.set_trace()
-
+        
         return ProcessBatchOutput(
             loss=loss,
             codebook_loss=codebook_loss,
