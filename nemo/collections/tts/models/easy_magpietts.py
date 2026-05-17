@@ -1127,7 +1127,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 phoneme_loss = torch.tensor(0.0, device=logits.device)
 
             loss = loss + self.phoneme_loss_weight * phoneme_loss
-        
+        # import ipdb; ipdb.set_trace()
         return ProcessBatchOutput(
             loss=loss,
             codebook_loss=codebook_loss,

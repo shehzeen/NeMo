@@ -1,4 +1,18 @@
-"""Minimal single-utterance inference script for EasyMagpieTTS."""
+"""Minimal single-utterance inference script for EasyMagpieTTS.
+
+
+python examples/tts/easymagpie_single_infer.py \
+  --model_path /lustre/fsw/llmservice_nemo_speechlm/users/shehzeenh/mountdir/checkpoints/emtts_userturn_40k.nemo \
+  --codec_model_path /model_artifacts/25fps_spectral_codec_with_bandwidth_extension.nemo \
+  --phoneme_tokenizer_path /mountdir/bpe_ipa_tokenizer_2048_en_de_es_fr_hi_it_vi_zh_ko-KR_pt-BR_ar.json \
+  --context_audio_path /lustre/fsw/llmservice_nemo_speechlm/users/ecasanova/data/eval_data/expressive_emma/Emma_S3_A1_SC7_singleturntarget_21_channel_1_audio_in.wav \
+  --output_path /lustre/fsw/llmservice_nemo_speechlm/users/shehzeenh/test_inference.wav \
+  --multiturn_transcripts "Hello, this is the first turn, I am excited to hear it out." "Now this is the second turn, I am not sure about the first turn." \
+  --pad_factor_text_speech 10 \
+  --max_steps 200
+
+
+"""
 import argparse
 import os
 import sys
@@ -73,7 +87,19 @@ def load_model(model_path, codec_model_path, phoneme_tokenizer_path,
 
 def main():
     p = argparse.ArgumentParser(description="EasyMagpieTTS single inference")
-    p.add_argument("--transcript", required=True, help="Text to synthesize")
+    text_input = p.add_mutually_exclusive_group(required=True)
+    text_input.add_argument("--transcript", help="Text to synthesize")
+    text_input.add_argument(
+        "--multiturn_transcripts",
+        nargs="+",
+        help="One or more quoted text turns to synthesize with PAD gaps between turns",
+    )
+    p.add_argument(
+        "--pad_factor_text_speech",
+        type=int,
+        default=10,
+        help="PAD tokens between multi-turn text turns, as a multiple of the previous turn token length",
+    )
     p.add_argument("--codec_model_path", required=True, help="Path to .nemo codec model")
     p.add_argument("--output_path", required=True, help="Output .wav file path")
 
@@ -125,13 +151,23 @@ def main():
         context_text = args.context_text
         context_audio_path = None
 
-    transcript = args.transcript.strip()
-    if not transcript.endswith((".", "?", "!")):
-        transcript += "."
+    transcript = None
+    multiturn_transcripts = None
+    if args.transcript is not None:
+        transcript = args.transcript.strip()
+        if not transcript.endswith((".", "?", "!")):
+            transcript += "."
+    else:
+        multiturn_transcripts = [turn.strip() for turn in args.multiturn_transcripts]
+        multiturn_transcripts = [
+            turn if turn.endswith((".", "?", "!")) else f"{turn}." for turn in multiturn_transcripts
+        ]
 
     # --- infer ---
     audio, audio_len = model.do_tts(
         transcript=transcript,
+        multiturn_transcripts=multiturn_transcripts,
+        pad_factor_text_speech=args.pad_factor_text_speech,
         context_audio_file_path=context_audio_path,
         context_text=context_text,
         use_cfg=args.use_cfg,
