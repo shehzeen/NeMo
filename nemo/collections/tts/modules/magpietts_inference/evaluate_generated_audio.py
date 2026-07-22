@@ -402,6 +402,7 @@ def evaluate_dir(
     language="en",
     sv_model_type="titanet",
     asr_model_name="stt_en_conformer_transducer_large",
+    asr_model_type="nemo",
     with_utmosv2=True,
     strip_text_annotations_for_metrics=False,
     with_emotion_metrics=False,
