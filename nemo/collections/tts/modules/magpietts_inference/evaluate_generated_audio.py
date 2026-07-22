@@ -89,6 +89,7 @@ def strip_text_annotations_from_text(text: str) -> str:
     text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
     return text.strip()
 
+
 KATAKANA_METRICS_TO_SAVE = [
     'katakana_cer',
     'gt_katakana',
