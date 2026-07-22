@@ -59,6 +59,11 @@ except (ImportError, ModuleNotFoundError) as e:
     )
 
 
+KATAKANA_METRICS_TO_SAVE = [
+    'katakana_cer',
+    'gt_katakana',
+    'pred_katakana',
+]
 # Regexes mirrored from the IPA preprocessing script that creates
 # custom["text_without_annotation"]. This is used only for text inputs
 # during metric computation when requested.
@@ -89,12 +94,6 @@ def strip_text_annotations_from_text(text: str) -> str:
     text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
     return text.strip()
 
-
-KATAKANA_METRICS_TO_SAVE = [
-    'katakana_cer',
-    'gt_katakana',
-    'pred_katakana',
-]
 
 FILEWISE_METRICS_TO_SAVE = [
     'cer',
@@ -266,7 +265,6 @@ def compute_utmosv2_scores(audio_dir, device):
 
 
 def load_evaluation_models(
-    language="en",
     sv_model_type="titanet",
     asr_model_name="stt_en_conformer_transducer_large",
     asr_model_type="nemo",
@@ -280,6 +278,7 @@ def load_evaluation_models(
     Args:
         sv_model_type: Speaker verification model type ("wavlm" or "titanet").
         asr_model_name: Name of the NeMo ASR model (used only when language is "en").
+        asr_model_type: Type of ASR mode ("nemo" or "nemo_with_prompt" or "whisper").
         device: Device to place models on.
 
     Returns:
@@ -382,7 +381,6 @@ def evaluate_dir(
     language="en",
     sv_model_type="titanet",
     asr_model_name="stt_en_conformer_transducer_large",
-    asr_model_type="nemo",
     with_utmosv2=True,
     strip_text_annotations_for_metrics=False,
     with_emotion_metrics=False,
@@ -422,9 +420,9 @@ def evaluate_dir(
 
     # 2. Load models
     models = load_evaluation_models(
-        language,
         sv_model_type,
         asr_model_name,
+        asr_model_type,
         device,
         with_emotion_metrics=with_emotion_metrics,
         emotion_model_size=emotion_model_size,
@@ -461,31 +459,13 @@ def evaluate_dir(
 
     # Transcribe predicted audios
     text_processor = get_text_processor(language)
-    pred_texts = transcribed_batched(
-        audio_file_lists,
-        language,
-        asr_model,
-        whisper_model,
-        whisper_processor,
-        device,
-        asr_batch_size,
-        label="predicted",
-    )
+    pred_texts = asr_model.transcribe(audio_paths=audio_file_lists, language=language, batch_size=asr_batch_size)
     if strip_text_annotations_for_metrics:
         pred_texts = [strip_text_annotations_from_text(text) for text in pred_texts]
     pred_texts = [text_processor.process_text_for_wer(text) for text in pred_texts]
     # Transcribe ground truth audios
     if len(gt_audio_paths) > 0:
-        gt_audio_texts = transcribed_batched(
-            gt_audio_paths,
-            language,
-            asr_model,
-            whisper_model,
-            whisper_processor,
-            device,
-            asr_batch_size,
-            label="ground truth",
-        )
+        gt_audio_texts = asr_model.transcribe(audio_paths=gt_audio_paths, language=language, batch_size=asr_batch_size)
         if strip_text_annotations_for_metrics:
             gt_audio_texts = [strip_text_annotations_from_text(text) for text in gt_audio_texts]
         gt_audio_texts = [text_processor.process_text_for_wer(text) for text in gt_audio_texts]
@@ -534,16 +514,6 @@ def evaluate_dir(
         detailed_cer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=True)
         detailed_wer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=False)
 
-        pred_gt_esim = float('NaN')
-        pred_gt_ems = float('NaN')
-        if with_emotion_metrics:
-            pred_gt_esim, pred_gt_ems = compute_emotion_pair_metrics(
-                emotion_model,
-                gt_audio_filepath,
-                pred_audio_filepath,
-                embedding_type=emotion_embedding_type,
-            )
-
         # Japanese: additional reading-based CER on Katakana (pyopenjtalk g2p), robust to
         # kanji/kana spelling differences between reference and ASR hypothesis.
         gt_katakana = pred_katakana = None
@@ -554,6 +524,16 @@ def evaluate_dir(
             katakana_cer = word_error_rate_detail(hypotheses=[pred_katakana], references=[gt_katakana], use_cer=True)[
                 0
             ]
+
+        pred_gt_esim = float('NaN')
+        pred_gt_ems = float('NaN')
+        if with_emotion_metrics:
+            pred_gt_esim, pred_gt_ems = compute_emotion_pair_metrics(
+                emotion_model,
+                gt_audio_filepath,
+                pred_audio_filepath,
+                embedding_type=emotion_embedding_type,
+            )
 
         logging.info(f"{ridx} GT Text: {gt_text}")
         logging.info(f"{ridx} Pr Text: {pred_text}")
