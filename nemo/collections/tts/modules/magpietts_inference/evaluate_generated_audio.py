@@ -30,13 +30,19 @@ import librosa
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector, WhisperForConditionalGeneration, WhisperProcessor
+from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
 from nemo.collections.tts.metrics.eou_classifier import EoUClassification, EoUClassifier, EoUType
 from nemo.collections.tts.metrics.frechet_codec_distance import FrechetCodecDistance
-from nemo.collections.tts.parts.utils.tts_dataset_utils import get_text_processor
+from nemo.collections.tts.parts.utils.tts_dataset_utils import (
+    JapaneseTextProcessor,
+    NemoTranscriber,
+    NemoTranscriberWithPrompt,
+    WhisperTranscriber,
+    get_text_processor,
+)
 from nemo.utils import logging
 
 # Optional import for UTMOSv2 (audio quality metric)
@@ -83,6 +89,11 @@ def strip_text_annotations_from_text(text: str) -> str:
     text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
     return text.strip()
 
+KATAKANA_METRICS_TO_SAVE = [
+    'katakana_cer',
+    'gt_katakana',
+    'pred_katakana',
+]
 
 FILEWISE_METRICS_TO_SAVE = [
     'cer',
@@ -91,6 +102,7 @@ FILEWISE_METRICS_TO_SAVE = [
     'pred_gt_esim',
     'pred_gt_ems',
     'pred_text',
+    'gt_audio_text',
     'gt_text',
     'predicted_phoneme_text',
     'predicted_phoneme_tokens',
@@ -119,6 +131,13 @@ def load_evalset_config(config_path: Optional[str] = None, dataset_base_path: Op
         manifest_path = Path(info["manifest_path"])
         audio_dir = Path(info["audio_dir"])
 
+        asr_model_path = None
+        asr_model = info.get("asr_model")
+        if asr_model:
+            asr_model_name = asr_model["name"]
+            if asr_model_name.endswith(".nemo"):
+                asr_model_path = Path(asr_model_name)
+
         if dataset_base_path:
             # Replace relative paths with absolute paths where appropriate
             if not manifest_path.is_absolute():
@@ -129,11 +148,18 @@ def load_evalset_config(config_path: Optional[str] = None, dataset_base_path: Op
                 audio_dir = dataset_base_path / audio_dir
                 info["audio_dir"] = str(audio_dir)
 
+            if asr_model_path and not asr_model_path.is_absolute():
+                asr_model_path = dataset_base_path / asr_model_path
+                info["asr_model"]["name"] = str(asr_model_path)
+
         if not manifest_path.exists():
             raise ValueError(f"Manifest does not exist for dataset {dataset_name}: {manifest_path}")
 
         if not audio_dir.exists():
             raise ValueError(f"Audio directory does not exist for dataset {dataset_name}: {audio_dir}")
+
+        if asr_model_path and not asr_model_path.exists():
+            raise ValueError(f"ASR model file does not exist for dataset {dataset_name}: {asr_model_path}")
 
     return dataset_meta_info
 
@@ -187,48 +213,6 @@ def read_manifest(manifest_path):
     return records
 
 
-def transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=8, label=""):
-    """Transcribe multiple audio files with a NeMo ASR model in batches. Returns list of transcriptions (one per path)."""
-    all_transcriptions = []
-    for start in range(0, len(audio_paths), batch_size):
-        batch_paths = audio_paths[start : start + batch_size]
-        try:
-            with torch.inference_mode():
-                batch_results = asr_model.transcribe(batch_paths, batch_size=len(batch_paths), use_lhotse=False)
-            for r in batch_results:
-                all_transcriptions.append(r.text)
-        except Exception as e:
-            logging.info("Error during batched ASR ({} audio): {}".format(label, e))
-            all_transcriptions.extend([""] * len(batch_paths))
-    return all_transcriptions
-
-
-def transcribe_with_whisper_batched(
-    whisper_model, whisper_processor, audio_paths, language, device, batch_size=8, label=""
-):
-    """Transcribe multiple audio files with Whisper in batches. Returns list of transcriptions (one per path)."""
-    forced_decoder_ids = (
-        whisper_processor.get_decoder_prompt_ids(language=language, task="transcribe") if language else None
-    )
-    all_transcriptions = []
-    for start in range(0, len(audio_paths), batch_size):
-        batch_paths = audio_paths[start : start + batch_size]
-        try:
-            speech_arrays = [librosa.load(p, sr=16000)[0] for p in batch_paths]
-            inputs = whisper_processor(
-                speech_arrays, sampling_rate=16000, return_tensors="pt", padding=True
-            ).input_features
-            inputs = inputs.to(device)
-            with torch.inference_mode():
-                predicted_ids = whisper_model.generate(inputs, forced_decoder_ids=forced_decoder_ids)
-            transcriptions = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)
-            all_transcriptions.extend(transcriptions)
-        except Exception as e:
-            logging.info("Error during batched Whisper ASR ({} audio): {}".format(label, e))
-            all_transcriptions.extend([""] * len(batch_paths))
-    return all_transcriptions
-
-
 def pad_audio_to_min_length(audio_np: np.ndarray, sampling_rate: int, min_seconds: float) -> np.ndarray:
     """
     Pad audio to make it at least `min_seconds` long by adding silence at the end if needed.
@@ -280,31 +264,11 @@ def compute_utmosv2_scores(audio_dir, device):
     return utmosv2_scores_dict
 
 
-def transcribed_batched(
-    audio_paths,
-    language,
-    asr_model,
-    whisper_model,
-    whisper_processor,
-    device,
-    asr_batch_size,
-    label="",
-):
-    """Transcribe a list of audio files using NeMo ASR (English) or Whisper (other languages)."""
-    if language == "en":
-        texts = transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=asr_batch_size, label=label)
-    else:
-        texts = transcribe_with_whisper_batched(
-            whisper_model, whisper_processor, audio_paths, language, device, batch_size=asr_batch_size, label=label
-        )
-
-    return texts
-
-
 def load_evaluation_models(
     language="en",
     sv_model_type="titanet",
     asr_model_name="stt_en_conformer_transducer_large",
+    asr_model_type="nemo",
     device="cuda",
     with_emotion_metrics=False,
     emotion_model_size="small",
@@ -313,7 +277,6 @@ def load_evaluation_models(
     """Load ASR and speaker verification models used for evaluation.
 
     Args:
-        language: Language code. "en" uses a NeMo ASR model; other languages use Whisper.
         sv_model_type: Speaker verification model type ("wavlm" or "titanet").
         asr_model_name: Name of the NeMo ASR model (used only when language is "en").
         device: Device to place models on.
@@ -330,18 +293,14 @@ def load_evaluation_models(
         'emotion_model': None,
     }
 
-    if language == "en":
-        if os.path.isfile(asr_model_name) and asr_model_name.endswith('.nemo'):
-            models['asr_model'] = nemo_asr.models.ASRModel.restore_from(restore_path=asr_model_name).to(device).eval()
-        elif asr_model_name.startswith("nvidia/") or asr_model_name in ["stt_en_conformer_transducer_large"]:
-            models['asr_model'] = nemo_asr.models.ASRModel.from_pretrained(model_name=asr_model_name).to(device).eval()
-        else:
-            raise ValueError(f"ASR model {asr_model_name} not supported")
+    if asr_model_type == "nemo":
+        models['asr_model'] = NemoTranscriber(model_name=asr_model_name, device=device)
+    elif asr_model_type == "nemo_with_prompt":
+        models['asr_model'] = NemoTranscriberWithPrompt(model_name=asr_model_name, device=device)
+    elif asr_model_type == "whisper":
+        models['asr_model'] = WhisperTranscriber(model_name=asr_model_name, device=device)
     else:
-        models['whisper_processor'] = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-        models['whisper_model'] = (
-            WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3").to(device).eval()
-        )
+        raise ValueError(f"Unknown ASR model type {asr_model_name}")
 
     if sv_model_type == "wavlm":
         models['feature_extractor'] = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
@@ -422,6 +381,7 @@ def evaluate_dir(
     language="en",
     sv_model_type="titanet",
     asr_model_name="stt_en_conformer_transducer_large",
+    asr_model_type="nemo",
     with_utmosv2=True,
     strip_text_annotations_for_metrics=False,
     with_emotion_metrics=False,
@@ -471,8 +431,6 @@ def evaluate_dir(
     )
 
     asr_model = models['asr_model']
-    whisper_model = models['whisper_model']
-    whisper_processor = models['whisper_processor']
     feature_extractor = models['feature_extractor']
     speaker_verification_model = models['sv_model']
     speaker_verification_model_alternate = models['sv_model_alternate']
@@ -585,6 +543,17 @@ def evaluate_dir(
                 embedding_type=emotion_embedding_type,
             )
 
+        # Japanese: additional reading-based CER on Katakana (pyopenjtalk g2p), robust to
+        # kanji/kana spelling differences between reference and ASR hypothesis.
+        gt_katakana = pred_katakana = None
+        katakana_cer = None
+        if isinstance(text_processor, JapaneseTextProcessor):
+            gt_katakana = text_processor.text_to_katakana(gt_text)
+            pred_katakana = text_processor.text_to_katakana(pred_text)
+            katakana_cer = word_error_rate_detail(hypotheses=[pred_katakana], references=[gt_katakana], use_cer=True)[
+                0
+            ]
+
         logging.info(f"{ridx} GT Text: {gt_text}")
         logging.info(f"{ridx} Pr Text: {pred_text}")
         # Format cer and wer to 2 decimal places
@@ -681,6 +650,9 @@ def evaluate_dir(
             'detailed_wer': detailed_wer,
             'cer': detailed_cer[0],
             'wer': detailed_wer[0],
+            'katakana_cer': katakana_cer,
+            'gt_katakana': gt_katakana,
+            'pred_katakana': pred_katakana,
             'pred_gt_ssim': pred_gt_ssim,
             'pred_context_ssim': pred_context_ssim,
             'gt_context_ssim': gt_context_ssim,
@@ -713,6 +685,7 @@ def evaluate(
     language="en",
     sv_model_type="titanet",
     asr_model_name="stt_en_conformer_transducer_large",
+    asr_model_type="nemo",
     with_utmosv2=True,
     strip_text_annotations_for_metrics=False,
     with_fcd=True,
@@ -755,6 +728,7 @@ def evaluate(
         language=language,
         sv_model_type=sv_model_type,
         asr_model_name=asr_model_name,
+        asr_model_type=asr_model_type,
         with_utmosv2=with_utmosv2,
         strip_text_annotations_for_metrics=strip_text_annotations_for_metrics,
         with_emotion_metrics=with_emotion_metrics,
@@ -784,7 +758,11 @@ def evaluate(
     elapsed = time.time() - start_time
     logging.info(f"evaluate() completed in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
 
-    filtered_filewise = [{k: m[k] for k in FILEWISE_METRICS_TO_SAVE if k in m} for m in filewise_metrics]
+    filewise_metrics_to_save = list(FILEWISE_METRICS_TO_SAVE)
+    if (language or "").replace("_", "-").lower().split("-")[0] == "ja":
+        filewise_metrics_to_save[2:2] = KATAKANA_METRICS_TO_SAVE
+
+    filtered_filewise = [{k: m[k] for k in filewise_metrics_to_save if k in m} for m in filewise_metrics]
     return avg_metrics, filtered_filewise
 
 
@@ -842,6 +820,15 @@ def compute_global_metrics(
     avg_metrics['wer_cumulative'] = word_error_rate_detail(hypotheses=pred_texts, references=gt_texts, use_cer=False)[
         0
     ]
+    # Japanese reading-based CER (Katakana via pyopenjtalk); only present for ja datasets.
+    kata = [m for m in filewise_metrics if m.get('katakana_cer') is not None]
+    if kata:
+        avg_metrics['katakana_cer_filewise_avg'] = sum(m['katakana_cer'] for m in kata) / len(kata)
+        avg_metrics['katakana_cer_cumulative'] = word_error_rate_detail(
+            hypotheses=[m['pred_katakana'] for m in kata],
+            references=[m['gt_katakana'] for m in kata],
+            use_cer=True,
+        )[0]
     avg_metrics['ssim_pred_gt_avg'] = sum(m['pred_gt_ssim'] for m in filewise_metrics) / n
     avg_metrics['ssim_pred_context_avg'] = sum(m['pred_context_ssim'] for m in filewise_metrics) / n
     avg_metrics['ssim_gt_context_avg'] = sum(m['gt_context_ssim'] for m in filewise_metrics) / n
@@ -904,7 +891,7 @@ def main():
     parser.add_argument('--manifest_path', type=str, default=None)
     parser.add_argument('--audio_dir', type=str, default=None)
     parser.add_argument('--generated_audio_dir', type=str, default=None)
-    parser.add_argument('--whisper_language', type=str, default="en")
+    parser.add_argument('--language', type=str, default="en")
     parser.add_argument('--evalset', type=str, default=None)
     parser.add_argument('--with_emotion_metrics', action='store_true')
     parser.add_argument(
@@ -932,7 +919,7 @@ def main():
         args.manifest_path,
         args.audio_dir,
         args.generated_audio_dir,
-        args.whisper_language,
+        args.language,
         sv_model_type="wavlm",
         asr_model_name="nvidia/parakeet-ctc-0.6b",
         with_emotion_metrics=args.with_emotion_metrics,
