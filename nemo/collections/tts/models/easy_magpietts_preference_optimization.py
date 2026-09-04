@@ -63,8 +63,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
     1. Sample multiple generations per prompt.
     2. Compute rewards (CER/SSIM/UTMOSv2).
     3. Compute group-normalized advantages.
-    4. Run teacher-forced policy forward on generated codes and optimize GRPO objective.
-    5. Add auxiliary phoneme loss from the same forward pass with GT phoneme tokens.
+    4. Run teacher-forced policy forward on the generated audio and phoneme tokens.
+    5. Optimize both parts of the sampled trajectory with the same GRPO advantage.
     """
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
@@ -134,8 +134,30 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.scale_rewards = self.cfg.get('scale_rewards', True)
         self.max_decoder_steps = self.cfg.get('max_decoder_steps', 220)
         self.aux_phoneme_loss_weight = self.cfg.get('aux_phoneme_loss_weight', 1.0)
+        self.phoneme_po_loss_weight = self.cfg.get('phoneme_po_loss_weight', 0.0)
+        if self.phoneme_po_loss_weight < 0.0:
+            raise ValueError(f"phoneme_po_loss_weight must be non-negative, got {self.phoneme_po_loss_weight}.")
         self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
         self.batch_size_for_chunked_tf = self.cfg.get('batch_size_for_chunked_tf', 4)
+
+        phoneme_sampling_method = self.cfg.get('inference_phoneme_sampling_method', 'argmax')
+        if self.phoneme_po_loss_weight > 0.0:
+            phoneme_temperature = float(self.cfg.get('inference_temperature', 0.7))
+            phoneme_topk = int(self.cfg.get('inference_topk', 80))
+            if phoneme_sampling_method != 'sample' or phoneme_temperature <= 0.0 or phoneme_topk < 2:
+                raise ValueError(
+                    "Phoneme PO requires stochastic phoneme trajectories: set "
+                    "inference_phoneme_sampling_method='sample', inference_temperature > 0, and inference_topk >= 2."
+                )
+            if phoneme_topk > self.phoneme_vocab_size:
+                raise ValueError(
+                    f"inference_topk={phoneme_topk} exceeds phoneme_vocab_size={self.phoneme_vocab_size}."
+                )
+            if self.phoneme_confidence_unk_threshold > 0.0:
+                raise ValueError(
+                    "Phoneme PO requires phoneme_confidence_unk_threshold=0. Confidence-based UNK replacement "
+                    "changes sampled actions without a corresponding policy likelihood."
+                )
 
         self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
         if reward_asr_model == 'whisper' and self._normalize_whisper_transcript:
@@ -234,10 +256,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def setup_optimizer_param_groups(self):
         """
-        Exclude frozen eval/reference modules AND modules that receive no gradients
-        from the PO loss (final_proj, lm_text_head, phoneme_final_proj) from the
-        optimizer. Including them would subject their weights to weight decay without
-        any learning signal, slowly degrading them.
+        Exclude frozen eval/reference modules and output modules that receive no
+        active training signal. Including them would apply weight decay without a
+        learning signal, slowly degrading their weights.
         """
         modules_to_exclude = {
             '_speaker_verification_model',
@@ -252,8 +273,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             # Including them would only apply weight decay, degrading their weights.
             'final_proj',
             'lm_text_head',
-            'phoneme_final_proj',
         }
+        # Keep legacy GT-phoneme runs optimizer-compatible: the final phoneme
+        # projection is trainable only when reward directly optimizes phoneme actions.
+        if self.phoneme_po_loss_weight <= 0.0:
+            modules_to_exclude.add('phoneme_final_proj')
 
         excluded_param_ids = set()
         for name, module in self.named_children():
@@ -313,6 +337,14 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             per_token_logps = per_token_logps * loss_mask.float()
         return per_token_logps
 
+    @staticmethod
+    def _apply_sampling_transform(logits: torch.Tensor, temperature: float, topk: int) -> torch.Tensor:
+        """Apply the same temperature and top-k transform used to sample phonemes."""
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=100.0, neginf=-100.0).clamp(-100.0, 100.0)
+        topk_values = torch.topk(logits, topk, dim=-1).values
+        logits = logits.masked_fill(logits < topk_values[..., -1, None], float('-inf'))
+        return logits / temperature
+
     def compute_local_transformer_logits(self, dec_out, audio_codes_target, targets_offset_by_one=False):
         """
         Override parent to force fp32 computation for the entire local transformer logits path.
@@ -349,6 +381,54 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             else:
                 repeated_batch[key] = value
         return repeated_batch
+
+    def _unstack_rollout_phoneme_tokens(self, output) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert inference's offset stacked phoneme timeline into padded token sequences.
+
+        ``infer_batch`` records predictions in a shared stacked timeline because items can
+        enter and leave phoneme generation at different decoder steps. ``process_batch``
+        instead expects one unstacked sequence per item, including BOS and EOS. Preserve
+        exactly the actions sampled for each item so the teacher-forced likelihood is
+        evaluated on the rollout trajectory rather than on GT or recomputed phonemes.
+        """
+        predicted = output.predicted_phoneme_tokens
+        step_lens = output.predicted_phoneme_tokens_lens
+        start_indices = output.phoneme_prediction_start_idx
+        if predicted is None or step_lens is None or start_indices is None:
+            raise RuntimeError("Predicted-phoneme rollouts did not return phoneme tokens, lengths, and start indices.")
+
+        batch_size, stacking_factor, timeline_steps = predicted.shape
+        if batch_size != step_lens.numel() or batch_size != start_indices.numel():
+            raise RuntimeError(
+                "Predicted-phoneme rollout metadata has inconsistent batch dimensions: "
+                f"tokens={batch_size}, lengths={step_lens.numel()}, starts={start_indices.numel()}."
+            )
+
+        token_lens = step_lens.long() * stacking_factor + 1  # Include the autoregressive BOS input.
+        max_token_len = int(token_lens.max().item())
+        phoneme_tokens = torch.full(
+            (batch_size, max_token_len),
+            self.phoneme_tokenizer.eos_token_id,
+            dtype=predicted.dtype,
+            device=predicted.device,
+        )
+        phoneme_tokens[:, 0] = self.phoneme_tokenizer.bos_token_id
+
+        for item_idx in range(batch_size):
+            start = int(start_indices[item_idx].item())
+            num_steps = int(step_lens[item_idx].item())
+            end = start + num_steps
+            if start < 0 or num_steps <= 0 or end > timeline_steps:
+                raise RuntimeError(
+                    "Invalid predicted-phoneme rollout span for item "
+                    f"{item_idx}: start={start}, length={num_steps}, timeline={timeline_steps}."
+                )
+            # stack_codes groups consecutive source tokens into channels, so invert
+            # that layout by traversing time first and stacked channel second.
+            sampled_tokens = predicted[item_idx, :, start:end].transpose(0, 1).reshape(-1)
+            phoneme_tokens[item_idx, 1 : 1 + sampled_tokens.numel()] = sampled_tokens
+
+        return phoneme_tokens, token_lens
 
     def _get_audio_dir(self) -> str:
         """Return (and create if needed) the directory used to store intermediate waveforms during PO."""
@@ -691,6 +771,10 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         predicted_audio_lens = output.predicted_audio_lens
         predicted_codes = output.predicted_codes
         predicted_codes_lens = output.predicted_codes_lens
+        predicted_phoneme_tokens = None
+        predicted_phoneme_tokens_lens = None
+        if phoneme_input_type == 'pred':
+            predicted_phoneme_tokens, predicted_phoneme_tokens_lens = self._unstack_rollout_phoneme_tokens(output)
         save_start_time = time.perf_counter()
         predicted_audio_paths = self._save_waveforms_to_paths(
             waveforms=predicted_audio,
@@ -867,6 +951,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'metrics': batch_metrics,
             'predicted_codes': predicted_codes,
             'predicted_codes_lens': predicted_codes_lens,
+            'predicted_phoneme_tokens': predicted_phoneme_tokens,
+            'predicted_phoneme_tokens_lens': predicted_phoneme_tokens_lens,
             'advantages': advantages,
             'group_validities': group_validities,
             'rollout_phoneme_input_type': phoneme_input_type,
@@ -901,6 +987,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'std_reward': generated_codes_and_metrics['std_reward'],
             'loss': chunked_outputs['loss'],
             'po_loss': chunked_outputs['po_loss'],
+            'audio_po_loss': chunked_outputs['audio_po_loss'],
+            'phoneme_po_loss': chunked_outputs['phoneme_po_loss'],
             'phoneme_aux_loss': chunked_outputs['phoneme_aux_loss'],
             'kl_loss': chunked_outputs['kl_loss'],
             'used_gt_phoneme_input': chunked_outputs['used_gt_phoneme_input'],
@@ -980,12 +1068,110 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         )
         batch_repeated['audio_codes'] = predicted_codes
         batch_repeated['audio_codes_lens'] = predicted_codes_lens
+        if generated_codes_and_metrics.get('rollout_phoneme_input_type') == 'pred':
+            batch_repeated['phoneme_tokens'] = generated_codes_and_metrics['predicted_phoneme_tokens']
+            batch_repeated['phoneme_tokens_lens'] = generated_codes_and_metrics['predicted_phoneme_tokens_lens']
         if 'audio' in batch_repeated:
             del batch_repeated['audio']
         if 'audio_lens' in batch_repeated:
             del batch_repeated['audio_lens']
 
         return generated_codes_and_metrics, batch_repeated, predicted_codes, predicted_codes_lens
+
+    def _compute_action_po_components(
+        self,
+        logits: torch.Tensor,
+        reference_logits: Optional[torch.Tensor],
+        targets: torch.Tensor,
+        target_lens: torch.Tensor,
+        vocab_size: int,
+        advantages: torch.Tensor,
+        group_validities: torch.Tensor,
+        sampling_temperature: Optional[float] = None,
+        sampling_topk: Optional[int] = None,
+    ):
+        """Compute normalized GRPO, KL, and entropy for parallel action streams."""
+        if (sampling_temperature is None) != (sampling_topk is None):
+            raise ValueError("sampling_temperature and sampling_topk must either both be set or both be None.")
+        loss_mask = get_mask_from_lengths(target_lens).float()
+        num_streams = targets.size(1)
+        total_loss = logits.new_zeros((), dtype=torch.float32)
+        total_kl = logits.new_zeros((), dtype=torch.float32)
+        total_entropy = logits.new_zeros((), dtype=torch.float32)
+
+        for stream_idx in range(num_streams):
+            si = stream_idx * vocab_size
+            ei = si + vocab_size
+            stream_logits = logits[:, :, si:ei]
+            if sampling_temperature is not None:
+                assert sampling_topk is not None
+                stream_logits = self._apply_sampling_transform(
+                    stream_logits, temperature=sampling_temperature, topk=sampling_topk
+                )
+            stream_labels = targets[:, stream_idx, :].long()
+            per_token_logps = self._get_per_token_logps(stream_logits, stream_labels, loss_mask)
+
+            # This on-policy surrogate is value-identical to -advantage, while its
+            # gradient is -advantage * grad(log pi(action)).
+            with torch.cuda.amp.autocast(enabled=False):
+                per_token_loss = -(
+                    torch.exp(per_token_logps.float() - per_token_logps.float().detach())
+                    * advantages.float().unsqueeze(1)
+                )
+                per_token_loss = per_token_loss * group_validities.float().unsqueeze(1)
+
+                logits_fp32 = stream_logits.float()
+                log_probs = logits_fp32.log_softmax(-1)
+                probs = log_probs.exp()
+                per_token_entropy = -torch.xlogy(probs, probs).sum(-1)
+
+            stream_entropy = (
+                (per_token_entropy * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp_min(1e-8)
+            ).mean()
+
+            grpo_beta = float(self.cfg.get('grpo_beta', 0.0))
+            if not self.reference_free and reference_logits is not None and grpo_beta > 0.0:
+                with torch.no_grad():
+                    ref_stream_logits = reference_logits[:, :, si:ei]
+                    if sampling_temperature is not None:
+                        # Keep full reference support. Independently truncating the
+                        # reference top-k can assign zero probability to policy actions.
+                        ref_stream_logits = (
+                            torch.nan_to_num(ref_stream_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+                            .clamp(-100.0, 100.0)
+                            .div(sampling_temperature)
+                        )
+                    per_token_ref_logps = self._get_per_token_logps(
+                        ref_stream_logits, stream_labels, loss_mask
+                    )
+                with torch.cuda.amp.autocast(enabled=False):
+                    per_token_kl = (
+                        torch.exp(per_token_ref_logps.float() - per_token_logps.float())
+                        - (per_token_ref_logps.float() - per_token_logps.float())
+                        - 1
+                    )
+                    per_token_loss = per_token_loss + grpo_beta * per_token_kl
+                stream_kl = (
+                    (per_token_kl * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp_min(1e-8)
+                ).mean()
+            else:
+                stream_kl = logits.new_zeros((), dtype=torch.float32)
+
+            if self.loss_type == "grpo":
+                stream_loss = (
+                    (per_token_loss * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp_min(1e-8)
+                ).mean()
+            elif self.loss_type == "dr_grpo":
+                total_tokens = per_token_loss.shape[0] * self.max_decoder_steps
+                stream_loss = (per_token_loss * loss_mask).sum() / max(total_tokens, 1)
+            else:
+                raise ValueError(f"Unknown loss function: {self.loss_type}")
+
+            total_loss = total_loss + stream_loss
+            total_kl = total_kl + stream_kl
+            total_entropy = total_entropy + stream_entropy
+
+        return total_loss / num_streams, total_kl / num_streams, total_entropy / num_streams
 
     def _compute_po_losses_from_outputs(
         self,
@@ -995,111 +1181,77 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         group_validities: torch.Tensor,
         rollout_phoneme_input_type: str,
     ):
-        """Compute the GRPO (or DR-GRPO) policy-optimization loss, KL divergence against the
-        reference model, per-token entropy, and the optional auxiliary phoneme loss.
-
-        Returns:
-            Dict with keys ``loss``, ``po_loss``, ``phoneme_aux_loss``, ``kl_loss``,
-            ``entropy``, and ``used_gt_phoneme_input``.
-        """
-        logits = policy_output.local_transformer_logits
-        if logits is None:
-            logits = policy_output.logits
-        ref_logits = None
+        """Compute joint audio/phoneme GRPO and optional GT-phoneme auxiliary loss."""
+        audio_logits = policy_output.local_transformer_logits
+        if audio_logits is None:
+            audio_logits = policy_output.logits
+        reference_audio_logits = None
         if reference_output is not None:
-            ref_logits = reference_output.local_transformer_logits
-            if ref_logits is None:
-                ref_logits = reference_output.logits
+            reference_audio_logits = reference_output.local_transformer_logits
+            if reference_audio_logits is None:
+                reference_audio_logits = reference_output.logits
 
-        audio_codes_target = policy_output.audio_codes_target.long()
-        audio_codes_lens_target = policy_output.audio_codes_lens_target
-        audio_loss_mask = get_mask_from_lengths(audio_codes_lens_target).float()
+        audio_po_loss, audio_kl, audio_entropy = self._compute_action_po_components(
+            logits=audio_logits,
+            reference_logits=reference_audio_logits,
+            targets=policy_output.audio_codes_target,
+            target_lens=policy_output.audio_codes_lens_target,
+            vocab_size=self.num_all_tokens_per_codebook,
+            advantages=advantages,
+            group_validities=group_validities,
+        )
 
-        n_codebooks = audio_codes_target.size(1)
-        total_loss = None
-        total_kl = None
-        total_entropy = None
-        for codebook_idx in range(n_codebooks):
-            si = codebook_idx * self.num_all_tokens_per_codebook
-            ei = si + self.num_all_tokens_per_codebook
-            codebook_logits = logits[:, :, si:ei]
-            codebook_labels = audio_codes_target[:, codebook_idx, :]
-            per_token_logps = self._get_per_token_logps(codebook_logits, codebook_labels, audio_loss_mask)
-            # Ensure the GRPO policy gradient trick stays in fp32 to preserve gradient signal
-            with torch.cuda.amp.autocast(enabled=False):
-                per_token_loss = -(
-                    torch.exp(per_token_logps.float() - per_token_logps.float().detach())
-                    * advantages.float().unsqueeze(1)
-                )
-                per_token_loss = per_token_loss * group_validities.float().unsqueeze(1)
+        zero = audio_logits.new_zeros((), dtype=torch.float32)
+        phoneme_po_loss = zero
+        phoneme_kl = zero
+        phoneme_entropy = zero
+        if rollout_phoneme_input_type == 'pred' and self.phoneme_po_loss_weight > 0.0:
+            if (
+                policy_output.phoneme_logits is None
+                or policy_output.phoneme_tokens_target is None
+                or policy_output.phoneme_tokens_lens_target is None
+            ):
+                raise RuntimeError("Predicted-phoneme PO requires phoneme logits, targets, and target lengths.")
+            reference_phoneme_logits = (
+                reference_output.phoneme_logits if reference_output is not None else None
+            )
+            phoneme_po_loss, phoneme_kl, phoneme_entropy = self._compute_action_po_components(
+                logits=policy_output.phoneme_logits,
+                reference_logits=reference_phoneme_logits,
+                targets=policy_output.phoneme_tokens_target,
+                target_lens=policy_output.phoneme_tokens_lens_target,
+                vocab_size=self.phoneme_vocab_size,
+                advantages=advantages,
+                group_validities=group_validities,
+                sampling_temperature=float(self.cfg.get('inference_temperature', 0.7)),
+                sampling_topk=int(self.cfg.get('inference_topk', 80)),
+            )
 
-            # Per-token entropy of the policy distribution (always computed for logging).
-            with torch.cuda.amp.autocast(enabled=False):
-                logits_fp32 = codebook_logits.float()
-                log_probs = logits_fp32.log_softmax(-1)  # [B, T, V]
-                probs = log_probs.exp()  # [B, T, V]
-                per_token_entropy = -(probs * log_probs).sum(-1)  # [B, T]
-            codebook_entropy = (
-                (per_token_entropy * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
-            ).mean()
-
-            if not self.reference_free and ref_logits is not None:
-                with torch.no_grad():
-                    ref_codebook_logits = ref_logits[:, :, si:ei]
-                    per_token_ref_logps = self._get_per_token_logps(
-                        ref_codebook_logits, codebook_labels, audio_loss_mask
-                    )
-                with torch.cuda.amp.autocast(enabled=False):
-                    per_token_kl = (
-                        torch.exp(per_token_ref_logps.float() - per_token_logps.float())
-                        - (per_token_ref_logps.float() - per_token_logps.float())
-                        - 1
-                    )
-                    per_token_loss = per_token_loss + self.cfg.get('grpo_beta', 0.0) * per_token_kl
-                codebook_kl_loss_mean = (
-                    (per_token_kl * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
-                ).mean()
-            else:
-                codebook_kl_loss_mean = torch.tensor(0.0, device=self.device)
-
-            if self.loss_type == "grpo":
-                codebook_loss = (
-                    (per_token_loss * audio_loss_mask).sum(dim=1) / audio_loss_mask.sum(dim=1).clamp_min(1e-8)
-                ).mean()
-            elif self.loss_type == "dr_grpo":
-                total_tokens = per_token_loss.shape[0] * self.max_decoder_steps
-                codebook_loss = (per_token_loss * audio_loss_mask).sum() / max(total_tokens, 1)
-            else:
-                raise ValueError(f"Unknown loss function: {self.loss_type}")
-
-            if total_loss is None:
-                total_loss = codebook_loss
-                total_kl = codebook_kl_loss_mean
-                total_entropy = codebook_entropy
-            else:
-                total_loss += codebook_loss
-                total_kl += codebook_kl_loss_mean
-                total_entropy += codebook_entropy
-
-        total_po_loss = total_loss / n_codebooks
-        total_kl = total_kl / n_codebooks
-        total_entropy = total_entropy / n_codebooks
-
-        phoneme_aux_loss = policy_output.phoneme_loss if rollout_phoneme_input_type == 'gt' else None
+        # GT phonemes are supervised targets, not sampled policy actions. Retain the
+        # existing auxiliary objective only for GT-conditioned rollouts.
+        phoneme_aux_loss = policy_output.phoneme_loss if rollout_phoneme_input_type == 'gt' else zero
         if phoneme_aux_loss is None:
-            phoneme_aux_loss = torch.tensor(0.0, device=self.device)
+            phoneme_aux_loss = zero
 
-        # Subtracting entropy encourages higher entropy (more exploration / prevents mode collapse).
-        total_loss = total_po_loss + self.aux_phoneme_loss_weight * phoneme_aux_loss
+        po_loss = audio_po_loss + self.phoneme_po_loss_weight * phoneme_po_loss
+        kl_loss = audio_kl + self.phoneme_po_loss_weight * phoneme_kl
+        entropy = audio_entropy + self.phoneme_po_loss_weight * phoneme_entropy
+        total_loss = po_loss + self.aux_phoneme_loss_weight * phoneme_aux_loss
         if self.entropy_coeff > 0:
-            total_loss = total_loss - self.entropy_coeff * total_entropy
+            total_loss = total_loss - self.entropy_coeff * entropy
 
         return {
             'loss': total_loss,
-            'po_loss': total_po_loss,
+            'po_loss': po_loss,
+            'audio_po_loss': audio_po_loss,
+            'phoneme_po_loss': phoneme_po_loss,
             'phoneme_aux_loss': phoneme_aux_loss,
-            'kl_loss': total_kl,
-            'entropy': total_entropy,
+            'kl_loss': kl_loss,
+            'audio_kl_loss': audio_kl,
+            'phoneme_kl_loss': phoneme_kl,
+            'entropy': entropy,
+            'audio_entropy': audio_entropy,
+            'phoneme_entropy': phoneme_entropy,
             'used_gt_phoneme_input': float(rollout_phoneme_input_type == 'gt'),
         }
 
@@ -1132,9 +1284,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
         accumulated_loss = torch.tensor(0.0, device=self.device)
         accumulated_po_loss = torch.tensor(0.0, device=self.device)
+        accumulated_audio_po_loss = torch.tensor(0.0, device=self.device)
+        accumulated_phoneme_po_loss = torch.tensor(0.0, device=self.device)
         accumulated_phoneme_aux_loss = torch.tensor(0.0, device=self.device)
         accumulated_kl_loss = torch.tensor(0.0, device=self.device)
+        accumulated_audio_kl_loss = torch.tensor(0.0, device=self.device)
+        accumulated_phoneme_kl_loss = torch.tensor(0.0, device=self.device)
         accumulated_entropy = torch.tensor(0.0, device=self.device)
+        accumulated_audio_entropy = torch.tensor(0.0, device=self.device)
+        accumulated_phoneme_entropy = torch.tensor(0.0, device=self.device)
         used_gt_phoneme_input = 0.0
 
         for item_start_idx in range(0, total_items, chunk_size):
@@ -1183,19 +1341,43 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
             accumulated_loss = accumulated_loss + chunk_outputs['loss'].detach() * chunk_weight
             accumulated_po_loss = accumulated_po_loss + chunk_outputs['po_loss'].detach() * chunk_weight
+            accumulated_audio_po_loss = (
+                accumulated_audio_po_loss + chunk_outputs['audio_po_loss'].detach() * chunk_weight
+            )
+            accumulated_phoneme_po_loss = (
+                accumulated_phoneme_po_loss + chunk_outputs['phoneme_po_loss'].detach() * chunk_weight
+            )
             accumulated_phoneme_aux_loss = (
                 accumulated_phoneme_aux_loss + chunk_outputs['phoneme_aux_loss'].detach() * chunk_weight
             )
             accumulated_kl_loss = accumulated_kl_loss + chunk_outputs['kl_loss'].detach() * chunk_weight
+            accumulated_audio_kl_loss = (
+                accumulated_audio_kl_loss + chunk_outputs['audio_kl_loss'].detach() * chunk_weight
+            )
+            accumulated_phoneme_kl_loss = (
+                accumulated_phoneme_kl_loss + chunk_outputs['phoneme_kl_loss'].detach() * chunk_weight
+            )
             accumulated_entropy = accumulated_entropy + chunk_outputs['entropy'].detach() * chunk_weight
+            accumulated_audio_entropy = (
+                accumulated_audio_entropy + chunk_outputs['audio_entropy'].detach() * chunk_weight
+            )
+            accumulated_phoneme_entropy = (
+                accumulated_phoneme_entropy + chunk_outputs['phoneme_entropy'].detach() * chunk_weight
+            )
             used_gt_phoneme_input = max(used_gt_phoneme_input, chunk_outputs['used_gt_phoneme_input'])
 
         return {
             'loss': accumulated_loss,
             'po_loss': accumulated_po_loss,
+            'audio_po_loss': accumulated_audio_po_loss,
+            'phoneme_po_loss': accumulated_phoneme_po_loss,
             'phoneme_aux_loss': accumulated_phoneme_aux_loss,
             'kl_loss': accumulated_kl_loss,
+            'audio_kl_loss': accumulated_audio_kl_loss,
+            'phoneme_kl_loss': accumulated_phoneme_kl_loss,
             'entropy': accumulated_entropy,
+            'audio_entropy': accumulated_audio_entropy,
+            'phoneme_entropy': accumulated_phoneme_entropy,
             'used_gt_phoneme_input': used_gt_phoneme_input,
         }
 
@@ -1264,9 +1446,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         # Core training metrics.
         self.log('train_loss', po_outputs['loss'], prog_bar=True, sync_dist=True)
         self.log('train_po_loss', po_outputs['po_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_audio_po_loss', po_outputs['audio_po_loss'], prog_bar=False, sync_dist=True)
+        self.log('train_phoneme_po_loss', po_outputs['phoneme_po_loss'], prog_bar=True, sync_dist=True)
         self.log('train_phoneme_aux_loss', po_outputs['phoneme_aux_loss'], prog_bar=True, sync_dist=True)
         self.log('train_kl_loss', po_outputs['kl_loss'], prog_bar=True, sync_dist=True)
+        self.log('train_audio_kl_loss', po_outputs['audio_kl_loss'], prog_bar=False, sync_dist=True)
+        self.log('train_phoneme_kl_loss', po_outputs['phoneme_kl_loss'], prog_bar=False, sync_dist=True)
         self.log('train_entropy', po_outputs['entropy'], prog_bar=True, sync_dist=True)
+        self.log('train_audio_entropy', po_outputs['audio_entropy'], prog_bar=False, sync_dist=True)
+        self.log('train_phoneme_entropy', po_outputs['phoneme_entropy'], prog_bar=False, sync_dist=True)
         self.log('train_used_gt_phoneme_input', po_outputs['used_gt_phoneme_input'], prog_bar=True, sync_dist=True)
         self.log('train_mean_reward', generated_codes_and_metrics['mean_reward'], prog_bar=True, sync_dist=True)
         self.log('train_std_reward', generated_codes_and_metrics['std_reward'], prog_bar=True, sync_dist=True)
