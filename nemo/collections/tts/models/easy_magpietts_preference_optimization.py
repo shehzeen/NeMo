@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
 import copy
 import os
 import random
+import shutil
 import time
 from typing import Dict, List, Optional
 
@@ -350,6 +352,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
     def _get_audio_dir(self) -> str:
         """Return (and create if needed) the directory used to store intermediate waveforms during PO."""
+        if not self.cfg.get('save_reward_audios', True):
+            if not hasattr(self, '_tmp_reward_audio_dir'):
+                job_id = os.environ.get('SLURM_JOB_ID', 'local')
+                self._tmp_reward_audio_dir = os.path.join(
+                    '/dev/shm', f'easy_magpie_rewards_{job_id}_rank{self.global_rank}'
+                )
+                os.makedirs(self._tmp_reward_audio_dir, exist_ok=True)
+                atexit.register(shutil.rmtree, self._tmp_reward_audio_dir, ignore_errors=True)
+            return self._tmp_reward_audio_dir
+
         if self.logger is not None and hasattr(self.logger, "log_dir") and self.logger.log_dir is not None:
             log_dir = self.logger.log_dir
         elif self.trainer is not None and self.trainer.log_dir is not None:
@@ -515,6 +527,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         prompt_text = str(batch['raw_texts'][group_idx]).replace("\n", " ")
         if len(prompt_text) > 120:
             prompt_text = f"{prompt_text[:117]}..."
+        languages = batch.get('languages', [])
+        language = str(languages[group_idx]) if group_idx < len(languages) else "unknown"
 
         rows = []
         for local_idx, metric_idx in enumerate(range(group_start_idx, group_end_idx)):
@@ -535,7 +549,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             headers=["item", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows
         )
         logging.info(
-            f"[generate_and_reward] group={group_idx} valid={is_group_valid} "
+            f"[generate_and_reward] group={group_idx} language={language} valid={is_group_valid} "
             f"mean_reward={mean_reward:.4f} std_reward={std_reward:.4f}\n"
             f"prompt: {prompt_text}\n{table}\n"
         )
@@ -713,6 +727,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         # UTMOSv2 reward shaping parameters (MOS scale is 1–5).
         mean_utmos_dataset = self.cfg.get('mean_utmos_dataset', 3.5)
         best_utmos_achievable = self.cfg.get('best_utmos_achievable', 4.5)
+        languages = batch_repeated.get('languages', [])
 
         for idx in range(predicted_audio.size(0)):
             pred_transcript = pred_transcripts[idx]
@@ -739,6 +754,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 'gt_transcript': gt_transcript,
                 'codes_len': int(predicted_codes_lens[idx].item()),
                 'utmos': float(utmos_score),
+                'language': str(languages[idx]) if idx < len(languages) else "unknown",
             }
 
             best_ssim_achievable = self.cfg.get('best_ssim_achievable', 0.9)
