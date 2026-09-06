@@ -107,6 +107,15 @@ def test_sampling_transform_matches_temperature_and_topk_policy():
     assert torch.isneginf(transformed[0, 0, 2:]).all()
 
 
+def test_sampling_transform_has_full_support_when_topk_equals_vocab_size():
+    logits = torch.tensor([[[4.0, 2.0, 1.0, -1.0]]])
+
+    transformed = EasyMagpieTTSModelOnlinePO._apply_sampling_transform(logits, temperature=0.5, topk=4)
+
+    assert torch.isfinite(transformed).all()
+    assert transformed.tolist() == [[[8.0, 4.0, 2.0, -2.0]]]
+
+
 def test_action_po_entropy_is_finite_with_topk_masking():
     model = SimpleNamespace(
         reference_free=True,

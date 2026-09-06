@@ -137,21 +137,36 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.phoneme_po_loss_weight = self.cfg.get('phoneme_po_loss_weight', 0.0)
         if self.phoneme_po_loss_weight < 0.0:
             raise ValueError(f"phoneme_po_loss_weight must be non-negative, got {self.phoneme_po_loss_weight}.")
+        self.phoneme_sampling_temperature = float(
+            self.cfg.get('inference_phoneme_temperature', self.cfg.get('inference_temperature', 0.7))
+        )
+        self.phoneme_sampling_topk = int(
+            self.cfg.get(
+                'inference_phoneme_topk',
+                self.phoneme_vocab_size
+                if self.phoneme_po_loss_weight > 0.0
+                else self.cfg.get('inference_topk', 80),
+            )
+        )
         self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
         self.batch_size_for_chunked_tf = self.cfg.get('batch_size_for_chunked_tf', 4)
 
         phoneme_sampling_method = self.cfg.get('inference_phoneme_sampling_method', 'argmax')
         if self.phoneme_po_loss_weight > 0.0:
-            phoneme_temperature = float(self.cfg.get('inference_temperature', 0.7))
-            phoneme_topk = int(self.cfg.get('inference_topk', 80))
-            if phoneme_sampling_method != 'sample' or phoneme_temperature <= 0.0 or phoneme_topk < 2:
+            if (
+                phoneme_sampling_method != 'sample'
+                or self.phoneme_sampling_temperature <= 0.0
+                or self.phoneme_sampling_topk < 2
+            ):
                 raise ValueError(
                     "Phoneme PO requires stochastic phoneme trajectories: set "
-                    "inference_phoneme_sampling_method='sample', inference_temperature > 0, and inference_topk >= 2."
+                    "inference_phoneme_sampling_method='sample', inference_phoneme_temperature > 0, "
+                    "and inference_phoneme_topk >= 2."
                 )
-            if phoneme_topk > self.phoneme_vocab_size:
+            if self.phoneme_sampling_topk > self.phoneme_vocab_size:
                 raise ValueError(
-                    f"inference_topk={phoneme_topk} exceeds phoneme_vocab_size={self.phoneme_vocab_size}."
+                    f"inference_phoneme_topk={self.phoneme_sampling_topk} exceeds "
+                    f"phoneme_vocab_size={self.phoneme_vocab_size}."
                 )
             if self.phoneme_confidence_unk_threshold > 0.0:
                 raise ValueError(
@@ -346,8 +361,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
     def _apply_sampling_transform(logits: torch.Tensor, temperature: float, topk: int) -> torch.Tensor:
         """Apply the same temperature and top-k transform used to sample phonemes."""
         logits = torch.nan_to_num(logits, nan=0.0, posinf=100.0, neginf=-100.0).clamp(-100.0, 100.0)
-        topk_values = torch.topk(logits, topk, dim=-1).values
-        logits = logits.masked_fill(logits < topk_values[..., -1, None], float('-inf'))
+        if topk < logits.size(-1):
+            topk_values = torch.topk(logits, topk, dim=-1).values
+            logits = logits.masked_fill(logits < topk_values[..., -1, None], float('-inf'))
         return logits / temperature
 
     def compute_local_transformer_logits(self, dec_out, audio_codes_target, targets_offset_by_one=False):
@@ -760,6 +776,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             max_decoder_steps=self.max_decoder_steps,
             temperature=self.cfg.get('inference_temperature', 0.7),
             topk=self.cfg.get('inference_topk', 80),
+            phoneme_temperature=self.phoneme_sampling_temperature,
+            phoneme_topk=self.phoneme_sampling_topk,
             use_cfg=use_cfg,
             cfg_scale=cfg_scale,
             use_local_transformer_for_inference=use_local_transformer_for_inference,
@@ -1234,8 +1252,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 vocab_size=self.phoneme_vocab_size,
                 advantages=advantages,
                 group_validities=group_validities,
-                sampling_temperature=float(self.cfg.get('inference_temperature', 0.7)),
-                sampling_topk=int(self.cfg.get('inference_topk', 80)),
+                sampling_temperature=self.phoneme_sampling_temperature,
+                sampling_topk=self.phoneme_sampling_topk,
             )
 
         # GT phonemes are supervised targets, not sampled policy actions. Retain the
