@@ -334,7 +334,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         with torch.cuda.amp.autocast(enabled=False):
             logits_fp32 = logits.float()
             per_token_logps = torch.gather(logits_fp32.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
-            per_token_logps = per_token_logps * loss_mask.float()
+            # Top-k sampling assigns -inf to tokens outside its support. Padded
+            # labels may select one of those tokens, so multiplication by a zero
+            # mask would produce `-inf * 0 = NaN`. Select masked values instead.
+            per_token_logps = torch.where(
+                loss_mask.bool(), per_token_logps, torch.zeros_like(per_token_logps)
+            )
         return per_token_logps
 
     @staticmethod
@@ -1110,6 +1115,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 )
             stream_labels = targets[:, stream_idx, :].long()
             per_token_logps = self._get_per_token_logps(stream_logits, stream_labels, loss_mask)
+            valid_logps = per_token_logps[loss_mask.bool()]
+            if not torch.isfinite(valid_logps).all():
+                raise FloatingPointError(
+                    "A valid sampled action has a non-finite teacher-forced log-probability. "
+                    "The rollout action may be outside the recomputed policy support."
+                )
 
             # This on-policy surrogate is value-identical to -advantage, while its
             # gradient is -advantage * grad(log pi(action)).
@@ -1337,6 +1348,10 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             )
 
             if do_backward:
+                if not torch.isfinite(chunk_outputs['loss']).all():
+                    raise FloatingPointError(
+                        f"Non-finite PO loss before backward for items [{item_start_idx}, {item_end_idx})."
+                    )
                 self.manual_backward(chunk_outputs['loss'] * chunk_weight)
 
             accumulated_loss = accumulated_loss + chunk_outputs['loss'].detach() * chunk_weight
@@ -1416,12 +1431,15 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         teacher_forced_time_sec = time.perf_counter() - teacher_forced_start_time
 
         # Clip gradients to prevent catastrophic updates from outlier batches.
+        # Even when clipping is disabled, compute the norm with error_if_nonfinite
+        # so an invalid update cannot corrupt the policy or its next checkpoint.
         max_grad_norm = self.cfg.get('max_grad_norm', 0.0)
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in self.parameters() if p.requires_grad and p.grad is not None],
-                max_norm=max_grad_norm,
-            )
+        params_with_grad = [p for p in self.parameters() if p.requires_grad and p.grad is not None]
+        torch.nn.utils.clip_grad_norm_(
+            params_with_grad,
+            max_norm=max_grad_norm if max_grad_norm > 0 else float('inf'),
+            error_if_nonfinite=True,
+        )
 
         # Compute gradient/weight metrics AFTER clipping but BEFORE optimizer.step() clears them.
         grad_weight_metrics = self._compute_grad_and_weight_metrics()

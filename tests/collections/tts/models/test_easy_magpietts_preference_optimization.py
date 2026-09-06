@@ -23,6 +23,23 @@ from nemo.collections.tts.models.easy_magpietts_preference_optimization import E
 pytestmark = pytest.mark.unit
 
 
+def test_per_token_logps_masks_negative_infinity_without_nan():
+    model = SimpleNamespace()
+    logits = torch.tensor(
+        [[[4.0, 2.0, float('-inf')], [4.0, 2.0, float('-inf')]]],
+        requires_grad=True,
+    )
+    labels = torch.tensor([[0, 2]])
+    loss_mask = torch.tensor([[1.0, 0.0]])
+
+    logps = EasyMagpieTTSModelOnlinePO._get_per_token_logps(model, logits, labels, loss_mask)
+    logps.sum().backward()
+
+    assert torch.isfinite(logps).all()
+    assert logps[0, 1].item() == 0.0
+    assert torch.isfinite(logits.grad).all()
+
+
 def test_unstack_rollout_phoneme_tokens_uses_per_item_spans():
     model = SimpleNamespace(
         phoneme_tokenizer=SimpleNamespace(
