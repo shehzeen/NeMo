@@ -107,6 +107,18 @@ def test_sampling_transform_matches_temperature_and_topk_policy():
     assert torch.isneginf(transformed[0, 0, 2:]).all()
 
 
+def test_sampling_transform_masks_forbidden_tokens_before_topk():
+    logits = torch.tensor([[[5.0, 4.0, 3.0, 2.0]]])
+
+    transformed = EasyMagpieTTSModelOnlinePO._apply_sampling_transform(
+        logits, temperature=1.0, topk=2, forbidden_token_ids=[0]
+    )
+
+    assert torch.isneginf(transformed[0, 0, 0])
+    assert torch.isfinite(transformed[0, 0, 1:3]).all()
+    assert torch.isneginf(transformed[0, 0, 3])
+
+
 def test_sampling_transform_has_full_support_when_topk_equals_vocab_size():
     logits = torch.tensor([[[4.0, 2.0, 1.0, -1.0]]])
 

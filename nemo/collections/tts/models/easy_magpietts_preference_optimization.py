@@ -30,6 +30,7 @@ import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
+from nemo.collections.tts.modules.magpietts_modules import SpecialAudioToken
 from nemo.collections.tts.parts.utils.helpers import (
     get_mask_from_lengths,
     get_speaker_embeddings_from_filepaths,
@@ -358,9 +359,17 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         return per_token_logps
 
     @staticmethod
-    def _apply_sampling_transform(logits: torch.Tensor, temperature: float, topk: int) -> torch.Tensor:
-        """Apply the same temperature and top-k transform used to sample phonemes."""
+    def _apply_sampling_transform(
+        logits: torch.Tensor,
+        temperature: float,
+        topk: int,
+        forbidden_token_ids: Optional[List[int]] = None,
+    ) -> torch.Tensor:
+        """Apply the same sanitization, token masking, temperature, and top-k used for sampling."""
         logits = torch.nan_to_num(logits, nan=0.0, posinf=100.0, neginf=-100.0).clamp(-100.0, 100.0)
+        if forbidden_token_ids:
+            logits = logits.clone()
+            logits[..., forbidden_token_ids] = float('-inf')
         if topk < logits.size(-1):
             topk_values = torch.topk(logits, topk, dim=-1).values
             logits = logits.masked_fill(logits < topk_values[..., -1, None], float('-inf'))
@@ -1112,6 +1121,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         group_validities: torch.Tensor,
         sampling_temperature: Optional[float] = None,
         sampling_topk: Optional[int] = None,
+        forbidden_token_ids: Optional[List[int]] = None,
     ):
         """Compute normalized GRPO, KL, and entropy for parallel action streams."""
         if (sampling_temperature is None) != (sampling_topk is None):
@@ -1129,7 +1139,10 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             if sampling_temperature is not None:
                 assert sampling_topk is not None
                 stream_logits = self._apply_sampling_transform(
-                    stream_logits, temperature=sampling_temperature, topk=sampling_topk
+                    stream_logits,
+                    temperature=sampling_temperature,
+                    topk=sampling_topk,
+                    forbidden_token_ids=forbidden_token_ids,
                 )
             stream_labels = targets[:, stream_idx, :].long()
             per_token_logps = self._get_per_token_logps(stream_logits, stream_labels, loss_mask)
@@ -1228,6 +1241,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             vocab_size=self.num_all_tokens_per_codebook,
             advantages=advantages,
             group_validities=group_validities,
+            sampling_temperature=float(self.cfg.get('inference_temperature', 0.7)),
+            sampling_topk=int(self.cfg.get('inference_topk', 80)),
+            forbidden_token_ids=SpecialAudioToken.get_forbidden_tokens(
+                self.codebook_size, forbid_audio_eos=False
+            ),
         )
 
         zero = audio_logits.new_zeros((), dtype=torch.float32)
