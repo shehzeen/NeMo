@@ -138,15 +138,24 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.phoneme_po_loss_weight = self.cfg.get('phoneme_po_loss_weight', 0.0)
         if self.phoneme_po_loss_weight < 0.0:
             raise ValueError(f"phoneme_po_loss_weight must be non-negative, got {self.phoneme_po_loss_weight}.")
+        self.audio_sampling_temperature = float(self.cfg.get('inference_temperature', 0.7))
+        self.audio_sampling_topk = int(self.cfg.get('inference_topk', 80))
+        if self.audio_sampling_topk <= 0:
+            self.audio_sampling_topk = self.num_all_tokens_per_codebook
+        if self.audio_sampling_topk > self.num_all_tokens_per_codebook:
+            raise ValueError(
+                f"inference_topk={self.audio_sampling_topk} exceeds "
+                f"num_all_tokens_per_codebook={self.num_all_tokens_per_codebook}."
+            )
         self.phoneme_sampling_temperature = float(
-            self.cfg.get('inference_phoneme_temperature', self.cfg.get('inference_temperature', 0.7))
+            self.cfg.get('inference_phoneme_temperature', self.audio_sampling_temperature)
         )
         self.phoneme_sampling_topk = int(
             self.cfg.get(
                 'inference_phoneme_topk',
                 self.phoneme_vocab_size
                 if self.phoneme_po_loss_weight > 0.0
-                else self.cfg.get('inference_topk', 80),
+                else self.audio_sampling_topk,
             )
         )
         self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
@@ -783,8 +792,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         output = self.infer_batch(
             batch=batch_repeated,
             max_decoder_steps=self.max_decoder_steps,
-            temperature=self.cfg.get('inference_temperature', 0.7),
-            topk=self.cfg.get('inference_topk', 80),
+            temperature=self.audio_sampling_temperature,
+            topk=self.audio_sampling_topk,
             phoneme_temperature=self.phoneme_sampling_temperature,
             phoneme_topk=self.phoneme_sampling_topk,
             use_cfg=use_cfg,
@@ -1241,8 +1250,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             vocab_size=self.num_all_tokens_per_codebook,
             advantages=advantages,
             group_validities=group_validities,
-            sampling_temperature=float(self.cfg.get('inference_temperature', 0.7)),
-            sampling_topk=int(self.cfg.get('inference_topk', 80)),
+            sampling_temperature=self.audio_sampling_temperature,
+            sampling_topk=self.audio_sampling_topk,
             forbidden_token_ids=SpecialAudioToken.get_forbidden_tokens(
                 self.codebook_size, forbid_audio_eos=False
             ),
