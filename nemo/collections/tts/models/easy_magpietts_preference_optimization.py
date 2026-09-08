@@ -147,36 +147,13 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 f"inference_topk={self.audio_sampling_topk} exceeds "
                 f"num_all_tokens_per_codebook={self.num_all_tokens_per_codebook}."
             )
-        self.phoneme_sampling_temperature = float(
-            self.cfg.get('inference_phoneme_temperature', self.audio_sampling_temperature)
-        )
-        self.phoneme_sampling_topk = int(
-            self.cfg.get(
-                'inference_phoneme_topk',
-                self.phoneme_vocab_size
-                if self.phoneme_po_loss_weight > 0.0
-                else self.audio_sampling_topk,
-            )
-        )
         self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
         self.batch_size_for_chunked_tf = self.cfg.get('batch_size_for_chunked_tf', 4)
 
-        phoneme_sampling_method = self.cfg.get('inference_phoneme_sampling_method', 'argmax')
         if self.phoneme_po_loss_weight > 0.0:
-            if (
-                phoneme_sampling_method != 'sample'
-                or self.phoneme_sampling_temperature <= 0.0
-                or self.phoneme_sampling_topk < 2
-            ):
+            if self.audio_sampling_temperature <= 0.0:
                 raise ValueError(
-                    "Phoneme PO requires stochastic phoneme trajectories: set "
-                    "inference_phoneme_sampling_method='sample', inference_phoneme_temperature > 0, "
-                    "and inference_phoneme_topk >= 2."
-                )
-            if self.phoneme_sampling_topk > self.phoneme_vocab_size:
-                raise ValueError(
-                    f"inference_phoneme_topk={self.phoneme_sampling_topk} exceeds "
-                    f"phoneme_vocab_size={self.phoneme_vocab_size}."
+                    "Phoneme PO requires stochastic phoneme trajectories: set inference_temperature > 0."
                 )
             if self.phoneme_confidence_unk_threshold > 0.0:
                 raise ValueError(
@@ -794,13 +771,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             max_decoder_steps=self.max_decoder_steps,
             temperature=self.audio_sampling_temperature,
             topk=self.audio_sampling_topk,
-            phoneme_temperature=self.phoneme_sampling_temperature,
-            phoneme_topk=self.phoneme_sampling_topk,
             use_cfg=use_cfg,
             cfg_scale=cfg_scale,
             use_local_transformer_for_inference=use_local_transformer_for_inference,
             phoneme_input_type=phoneme_input_type,
-            phoneme_sampling_method=self.cfg.get('inference_phoneme_sampling_method', 'argmax'),
+            phoneme_sampling_method='sample' if self.phoneme_po_loss_weight > 0.0 else 'argmax',
             force_dropout_text=False,
             use_teacher_forced=False,
             use_inference_mode=False,
@@ -1279,8 +1254,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 vocab_size=self.phoneme_vocab_size,
                 advantages=advantages,
                 group_validities=group_validities,
-                sampling_temperature=self.phoneme_sampling_temperature,
-                sampling_topk=self.phoneme_sampling_topk,
+                sampling_temperature=self.audio_sampling_temperature,
+                sampling_topk=self.phoneme_vocab_size,
             )
 
         # GT phonemes are supervised targets, not sampled policy actions. Retain the

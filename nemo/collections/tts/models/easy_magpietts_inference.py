@@ -93,8 +93,6 @@ class StreamingConfig:
         use_local_transformer: Whether to use local transformer for inference.
         temperature: Sampling temperature.
         topk: Top-k sampling parameter.
-        phoneme_temperature: Sampling temperature for predicted phonemes.
-        phoneme_topk: Top-k sampling parameter for predicted phonemes.
         phoneme_input_type: 'gt' or 'pred' for phoneme tokens.
         phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
         dummy_context_embedding_unconditional: Unconditional embedding for CFG (if enabled).
@@ -111,8 +109,6 @@ class StreamingConfig:
     phoneme_input_type: str
     phoneme_sampling_method: str
     dummy_context_embedding_unconditional: Optional[torch.Tensor]
-    phoneme_temperature: Optional[float] = None
-    phoneme_topk: Optional[int] = None
 
 
 @dataclass
@@ -1529,8 +1525,6 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         gt_audio_codes: Optional[torch.Tensor] = None,
         gt_audio_codes_lens: Optional[torch.Tensor] = None,
         use_inference_mode: bool = True,
-        phoneme_temperature: Optional[float] = None,
-        phoneme_topk: Optional[int] = None,
     ) -> StreamingState:
         """
         Initialize streaming TTS inference state.
@@ -1565,8 +1559,6 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             use_local_transformer: Whether to use local transformer for AR sampling.
             temperature: Sampling temperature for audio codes.
             topk: Top-k sampling parameter.
-            phoneme_temperature: Sampling temperature for predicted phonemes. Defaults to ``temperature``.
-            phoneme_topk: Top-k sampling parameter for predicted phonemes. Defaults to ``topk``.
             phoneme_input_type: 'gt' or 'predicted' for phoneme tokens (use 'predicted' for streaming).
             phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
             gt_phoneme_tokens: Optional GT phoneme tokens (B, L) with BOS/EOS for teacher forcing.
@@ -1676,8 +1668,6 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 use_local_transformer=use_local_transformer,
                 temperature=temperature,
                 topk=topk,
-                phoneme_temperature=temperature if phoneme_temperature is None else phoneme_temperature,
-                phoneme_topk=topk if phoneme_topk is None else phoneme_topk,
                 phoneme_input_type=phoneme_input_type,
                 phoneme_sampling_method=phoneme_sampling_method,
                 dummy_context_embedding_unconditional=dummy_context_embedding_unconditional,
@@ -2206,12 +2196,8 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         else:
             pred_phoneme_tokens = self.sample_codes_from_logits_phoneme(
                 all_code_logits_t_phoneme,
-                temperature=(
-                    state.config.temperature
-                    if state.config.phoneme_temperature is None
-                    else state.config.phoneme_temperature
-                ),
-                topk=state.config.topk if state.config.phoneme_topk is None else state.config.phoneme_topk,
+                temperature=state.config.temperature,
+                topk=self.phoneme_vocab_size,
             )
 
         # In prediction mode, low-confidence phoneme steps are replaced with UNK across
@@ -2390,8 +2376,6 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         force_dropout_text: bool = False,
         use_teacher_forced: bool = False,
         use_inference_mode: bool = True,
-        phoneme_temperature: Optional[float] = None,
-        phoneme_topk: Optional[int] = None,
     ) -> InferBatchOutput:
         """
         Batch inference using streaming infrastructure.
@@ -2415,8 +2399,6 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             max_decoder_steps: Maximum number of decoder steps.
             temperature: Sampling temperature for audio codes. Use 0.0 for argmax.
             topk: Top-k sampling parameter.
-            phoneme_temperature: Sampling temperature for predicted phonemes. Defaults to ``temperature``.
-            phoneme_topk: Top-k sampling parameter for predicted phonemes. Defaults to ``topk``.
             use_cfg: Whether to use classifier-free guidance.
             cfg_scale: CFG scale factor.
             use_local_transformer_for_inference: Whether to use local transformer.
@@ -2511,8 +2493,6 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 use_local_transformer=use_local_transformer_for_inference,
                 temperature=temperature,
                 topk=topk,
-                phoneme_temperature=phoneme_temperature,
-                phoneme_topk=phoneme_topk,
                 phoneme_input_type=phoneme_input_type,
                 phoneme_sampling_method=phoneme_sampling_method,
                 gt_phoneme_tokens=gt_phoneme_tokens,
