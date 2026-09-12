@@ -138,6 +138,13 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.phoneme_po_loss_weight = self.cfg.get('phoneme_po_loss_weight', 0.0)
         if self.phoneme_po_loss_weight < 0.0:
             raise ValueError(f"phoneme_po_loss_weight must be non-negative, got {self.phoneme_po_loss_weight}.")
+        prompt_repetition_prob = float(self.cfg.get('prompt_repetition_augmentation_prob', 0.0))
+        gt_phoneme_input_prob = float(self.cfg.get('gt_phoneme_input_prob', 0.0))
+        if prompt_repetition_prob > 0.0 and gt_phoneme_input_prob > 0.0:
+            raise ValueError(
+                "Prompt repetition augmentation changes text without updating IPA. "
+                "Set gt_phoneme_input_prob=0 to use predicted phonemes."
+            )
         self.audio_sampling_temperature = float(self.cfg.get('inference_temperature', 0.7))
         self.audio_sampling_topk = int(self.cfg.get('inference_topk', 80))
         if self.audio_sampling_topk <= 0:

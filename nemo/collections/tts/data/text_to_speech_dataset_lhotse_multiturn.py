@@ -60,13 +60,39 @@ def _count_words_ignoring_punctuation(text: str, _PUNCTUATION_PATTERN=re.compile
     return len(text.split())
 
 
+_NORMALIZED_NUMBER_WORDS = frozenset(
+    """
+    zero one two three four five six seven eight nine
+    null eins zwei drei vier fünf sechs sieben acht neun
+    cero uno dos tres cuatro cinco seis siete ocho nueve
+    zéro un deux trois quatre cinq six sept huit neuf
+    zero uno due tre quattro cinque sei sette otto nove
+    zero um dois três quatro cinco seis sete oito nove
+    không một hai ba bốn năm sáu bảy tám chín
+    صفر واحد اثنان ثلاثة أربعة خمسة ستة سبعة ثمانية تسعة
+    शून्य एक दो तीन चार पाँच छह सात आठ नौ
+    영 공 일 이 삼 사 오 육 칠 팔 구
+    """.split()
+)
+
+
+def _is_normalized_number_word(word: str) -> bool:
+    word = re.sub(r"[^\w]", "", word.casefold())
+    return any(char.isnumeric() for char in word) or word in _NORMALIZED_NUMBER_WORDS
+
+
+def _get_supervision_text(supervision) -> str:
+    normalized_text = getattr(supervision, "normalized_text", None)
+    return normalized_text if isinstance(normalized_text, str) and normalized_text.strip() else supervision.text
+
+
 def _repeat_prompt_span(text: str) -> str:
     """Repeat an existing word, short span, or number in a prompt."""
     words = _strip_timestamps(text).split()
     if not words:
         return text
 
-    number_indices = [idx for idx, word in enumerate(words) if any(char.isdigit() for char in word)]
+    number_indices = [idx for idx, word in enumerate(words) if _is_normalized_number_word(word)]
     if number_indices and random.random() < 0.5:
         start = random.choice(number_indices)
         span_len = 1
@@ -280,16 +306,16 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
                 for cut in cuts
                 if str(getattr(cut, "task", "tts")).lower() == "tts"
                 for supervision in cut.supervisions
-                if supervision.speaker in self.output_roles and supervision.text.strip()
+                if supervision.speaker in self.output_roles and _get_supervision_text(supervision).strip()
             ]
             if candidates:
                 supervision = random.choice(candidates)
-                supervision.text = _repeat_prompt_span(supervision.text)
-                if isinstance(supervision.custom, dict):
-                    # IPA metadata no longer aligns after changing the text. Predicted-
-                    # phoneme GRPO does not consume these GT targets.
-                    supervision.custom.pop("ipa", None)
-                    supervision.custom.pop("ipa_alignment", None)
+                augmented_text = _repeat_prompt_span(_get_supervision_text(supervision))
+                # raw_texts is built from supervision.text, while tokenization
+                # prioritizes normalized_text. Keep both inputs synchronized.
+                supervision.text = augmented_text
+                if supervision.has_custom("normalized_text"):
+                    supervision.normalized_text = augmented_text
 
         batch_tokenizer_names = []
         for cut in cuts:
