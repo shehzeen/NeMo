@@ -1990,6 +1990,7 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 phoneme_turn_dropout_batch_prob=self.cfg.get("phoneme_turn_dropout_batch_prob", 0.0),
                 phoneme_turn_dropout_turn_prob=self.cfg.get("phoneme_turn_dropout_turn_prob", 0.0),
                 phoneme_turn_max_words_to_drop=self.cfg.get("phoneme_turn_max_words_to_drop", 2),
+                prompt_repetition_augmentation_prob=self.cfg.get("prompt_repetition_augmentation_prob", 0.0),
             )
             dataset = FallbackDataset(dataset)
         else:

@@ -60,6 +60,27 @@ def _count_words_ignoring_punctuation(text: str, _PUNCTUATION_PATTERN=re.compile
     return len(text.split())
 
 
+def _repeat_prompt_span(text: str) -> str:
+    """Repeat an existing word, short span, or number in a prompt."""
+    words = _strip_timestamps(text).split()
+    if not words:
+        return text
+
+    number_indices = [idx for idx, word in enumerate(words) if any(char.isdigit() for char in word)]
+    if number_indices and random.random() < 0.5:
+        start = random.choice(number_indices)
+        span_len = 1
+        num_copies = random.randint(3, 6)
+    else:
+        span_len = random.randint(1, min(3, len(words)))
+        start = random.randint(0, len(words) - span_len)
+        num_copies = random.randint(2, 4)
+
+    span = words[start : start + span_len]
+    words[start : start + span_len] = span * num_copies
+    return " ".join(words)
+
+
 def _get_supervision_ipa_text(supervision) -> str:
     """Return IPA for a supervision, preferring top-level field over custom."""
     ipa_text = getattr(supervision, "ipa", None)
@@ -130,6 +151,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         text_context_remapping: Dict defining mapping of multiple text contexts to a single text context.
         text_context_remapping_prob: Probability of remapping the original text context to a remapped text context.
         phoneme_turn_max_words_to_drop: Turns with this many words or fewer keep empty phoneme string.
+        prompt_repetition_augmentation_prob: Probability of augmenting one TTS prompt in a training batch.
     """
 
     def __init__(
@@ -169,6 +191,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         phoneme_turn_dropout_batch_prob: float = 0.0,
         phoneme_turn_dropout_turn_prob: float = 0.0,
         phoneme_turn_max_words_to_drop: int = 2,
+        prompt_repetition_augmentation_prob: float = 0.0,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -210,6 +233,9 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         self.phoneme_turn_dropout_batch_prob = phoneme_turn_dropout_batch_prob
         self.phoneme_turn_dropout_turn_prob = phoneme_turn_dropout_turn_prob
         self.phoneme_turn_max_words_to_drop = phoneme_turn_max_words_to_drop
+        if not 0.0 <= prompt_repetition_augmentation_prob <= 1.0:
+            raise ValueError("prompt_repetition_augmentation_prob must be between 0 and 1.")
+        self.prompt_repetition_augmentation_prob = prompt_repetition_augmentation_prob
 
         self.frame_length = (
             self.codec_model_samples_per_frame / codec_model_input_sample_rate
@@ -245,6 +271,25 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
             if str(getattr(cut, "task", "tts")).lower() == "tts":
                 for supervision in cut.supervisions:
                     supervision.speaker = "agent"
+
+        # This changes text without changing target audio and is intended only for
+        # online PO, where generated audio replaces the dataset target.
+        if self.dataset_type == 'train' and random.random() < self.prompt_repetition_augmentation_prob:
+            candidates = [
+                supervision
+                for cut in cuts
+                if str(getattr(cut, "task", "tts")).lower() == "tts"
+                for supervision in cut.supervisions
+                if supervision.speaker in self.output_roles and supervision.text.strip()
+            ]
+            if candidates:
+                supervision = random.choice(candidates)
+                supervision.text = _repeat_prompt_span(supervision.text)
+                if isinstance(supervision.custom, dict):
+                    # IPA metadata no longer aligns after changing the text. Predicted-
+                    # phoneme GRPO does not consume these GT targets.
+                    supervision.custom.pop("ipa", None)
+                    supervision.custom.pop("ipa_alignment", None)
 
         batch_tokenizer_names = []
         for cut in cuts:
