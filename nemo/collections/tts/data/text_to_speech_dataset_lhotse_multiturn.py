@@ -262,6 +262,11 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         if not 0.0 <= prompt_repetition_augmentation_prob <= 1.0:
             raise ValueError("prompt_repetition_augmentation_prob must be between 0 and 1.")
         self.prompt_repetition_augmentation_prob = prompt_repetition_augmentation_prob
+        if self.prompt_repetition_augmentation_prob > 0.0:
+            logging.info(
+                f"Prompt repetition augmentation enabled with batch probability "
+                f"{self.prompt_repetition_augmentation_prob:.4f}"
+            )
 
         self.frame_length = (
             self.codec_model_samples_per_frame / codec_model_input_sample_rate
@@ -310,12 +315,19 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
             ]
             if candidates:
                 supervision = random.choice(candidates)
-                augmented_text = _repeat_prompt_span(_get_supervision_text(supervision))
+                uses_normalized_text = supervision.has_custom("normalized_text")
+                original_text = _get_supervision_text(supervision)
+                augmented_text = _repeat_prompt_span(original_text)
                 # raw_texts is built from supervision.text, while tokenization
                 # prioritizes normalized_text. Keep both inputs synchronized.
                 supervision.text = augmented_text
-                if supervision.has_custom("normalized_text"):
+                if uses_normalized_text:
                     supervision.normalized_text = augmented_text
+                logging.info(
+                    f"[prompt_repetition_augmentation] source="
+                    f"{'normalized_text' if uses_normalized_text else 'text'} "
+                    f"original={original_text[:160]!r} augmented={augmented_text[:160]!r}"
+                )
 
         batch_tokenizer_names = []
         for cut in cuts:
