@@ -153,6 +153,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         )
         self.po_groups_per_subbatch = max(int(self.cfg.get('po_groups_per_subbatch', 1)), 1)
         self.batch_size_for_chunked_tf = self.cfg.get('batch_size_for_chunked_tf', 4)
+        self.sft_step_interval = int(self.cfg.get('sft_step_interval', 0))
+        if self.sft_step_interval < 0:
+            raise ValueError(f"sft_step_interval must be non-negative, got {self.sft_step_interval}.")
 
         phoneme_sampling_method = self.cfg.get('inference_phoneme_sampling_method', 'argmax')
         if self.phoneme_po_loss_weight > 0.0:
@@ -1448,6 +1451,48 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 raise ValueError(f"Expected a single optimizer, got {len(optimizer)}.")
             optimizer = optimizer[0]
         optimizer.zero_grad(set_to_none=True)
+
+        is_sft_step = self.sft_step_interval > 0 and (self.global_step + 1) % self.sft_step_interval == 0
+        if is_sft_step:
+            prev_weights = self._snapshot_trainable_weights()
+            sft_loss = super().training_step(batch, batch_idx)
+            batch_augmented = bool(batch.get('prompt_repetition_augmented', False))
+            effective_sft_loss = sft_loss * (0.0 if batch_augmented else 1.0)
+            self.manual_backward(effective_sft_loss)
+
+            max_grad_norm = self.cfg.get('max_grad_norm', 0.0)
+            params_with_grad = [p for p in self.parameters() if p.requires_grad and p.grad is not None]
+            torch.nn.utils.clip_grad_norm_(
+                params_with_grad,
+                max_norm=max_grad_norm if max_grad_norm > 0 else float('inf'),
+                error_if_nonfinite=True,
+            )
+            grad_weight_metrics = self._compute_grad_and_weight_metrics()
+            optimizer.step()
+
+            lr_schedulers = self.lr_schedulers()
+            if lr_schedulers is not None:
+                if isinstance(lr_schedulers, (list, tuple)):
+                    for sched in lr_schedulers:
+                        sched.step()
+                else:
+                    lr_schedulers.step()
+
+            grad_weight_metrics.update(self._compute_weight_update_metrics(prev_weights))
+            self.log('learning_rate', optimizer.param_groups[0]['lr'], prog_bar=False, sync_dist=True)
+            self.log('train_is_sft_step', 1.0, prog_bar=True, sync_dist=True)
+            self.log('train_sft_loss', effective_sft_loss.detach(), prog_bar=True, sync_dist=True)
+            self.log('train_sft_batch_augmented', float(batch_augmented), prog_bar=False, sync_dist=True)
+            for metric_name, metric_value in grad_weight_metrics.items():
+                self.log(f'train_{metric_name}', metric_value, prog_bar=False, sync_dist=True)
+            print_grad_weight_summary(
+                metrics=grad_weight_metrics,
+                step=self.global_step,
+                is_global_zero=getattr(self.trainer, "is_global_zero", True),
+            )
+            return effective_sft_loss.detach()
+
+        self.log('train_is_sft_step', 0.0, prog_bar=False, sync_dist=True)
 
         # Snapshot weights before optimizer step to measure weight deltas.
         prev_weights = self._snapshot_trainable_weights()

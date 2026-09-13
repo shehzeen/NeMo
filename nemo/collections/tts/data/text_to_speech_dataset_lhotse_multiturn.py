@@ -296,7 +296,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         if self.phoneme_tokenizer is None and self.phoneme_tokenizer_config is not None:
             self.phoneme_tokenizer = safe_instantiate(self.phoneme_tokenizer_config)
 
-    def _prepare_cuts(self, cuts: CutSet) -> tuple[CutSet, list[str]]:
+    def _prepare_cuts(self, cuts: CutSet) -> tuple[CutSet, list[str], bool]:
         cuts = cuts.transform_text(_strip_timestamps)
         for cut in cuts:
             if str(getattr(cut, "task", "tts")).lower() == "tts":
@@ -305,6 +305,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
 
         # This changes text without changing target audio and is intended only for
         # online PO, where generated audio replaces the dataset target.
+        prompt_repetition_augmented = False
         if self.dataset_type == 'train' and random.random() < self.prompt_repetition_augmentation_prob:
             candidates = [
                 supervision
@@ -323,6 +324,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
                 supervision.text = augmented_text
                 if uses_normalized_text:
                     supervision.normalized_text = augmented_text
+                prompt_repetition_augmented = True
                 logging.info(
                     f"[prompt_repetition_augmentation] source="
                     f"{'normalized_text' if uses_normalized_text else 'text'} "
@@ -336,7 +338,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
             else:
                 batch_tokenizer_names.append("english_phoneme")
 
-        return cuts, batch_tokenizer_names
+        return cuts, batch_tokenizer_names, prompt_repetition_augmented
 
     def _align_codebooks(self, tensor: torch.Tensor) -> torch.Tensor:
         num_codebooks = tensor.shape[1]
@@ -814,6 +816,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         text_data: Dict[str, torch.Tensor],
         phoneme_data: Dict[str, Union[torch.Tensor, None]],
         features: Dict[str, List],
+        prompt_repetition_augmented: bool,
     ) -> Dict[str, Union[torch.Tensor, List]]:
         batch_dict = {
             "sample_id": [str(cut.id) for cut in cuts],
@@ -831,6 +834,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
                 " ".join(s.text for s in cut.supervisions if s.speaker in self.output_roles) for cut in cuts
             ],
             "task": [getattr(cut, "task", "tts") for cut in cuts],
+            "prompt_repetition_augmented": prompt_repetition_augmented,
             "user_audio_turn_splitted": audio_data["user_audio_turn_splitted"],
             "user_audio_turn_splitted_lens": audio_data["user_audio_turn_splitted_lens"],
             "user_audio_turn_splitted_indices": audio_data["user_audio_turn_splitted_indices"],
@@ -858,14 +862,16 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List]]:
         self._initialize_tokenizers()
-        cuts, batch_tokenizer_names = self._prepare_cuts(cuts)
+        cuts, batch_tokenizer_names, prompt_repetition_augmented = self._prepare_cuts(cuts)
 
         audio_data = self._collate_audio_channels(cuts)
         text_data = self._collate_text_channels(cuts, batch_tokenizer_names)
         phoneme_data = self._collate_phoneme_tokens(cuts)
         features = self._collect_cut_features(cuts, batch_tokenizer_names, audio_data["target_audio_lens"])
 
-        return self._build_batch_dict(cuts, audio_data, text_data, phoneme_data, features)
+        return self._build_batch_dict(
+            cuts, audio_data, text_data, phoneme_data, features, prompt_repetition_augmented
+        )
 
 
 def collate_token_channel(
