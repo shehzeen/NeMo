@@ -1480,7 +1480,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
 
             grad_weight_metrics.update(self._compute_weight_update_metrics(prev_weights))
             self.log('learning_rate', optimizer.param_groups[0]['lr'], prog_bar=False, sync_dist=True)
-            self.log('train_is_sft_step', 1.0, prog_bar=True, sync_dist=True)
+            self.log('train_is_sft_step', 1.0, prog_bar=False, sync_dist=True)
             self.log('train_sft_loss', effective_sft_loss.detach(), prog_bar=True, sync_dist=True)
             self.log('train_sft_batch_augmented', float(batch_augmented), prog_bar=False, sync_dist=True)
             for metric_name, metric_value in grad_weight_metrics.items():
