@@ -53,6 +53,14 @@ class UTMOSv2Calculator:
         self.model.to(self.device)
         self.verbose = verbose
 
+    def to(self, device: str | torch.device):
+        """Move the scorer to ``device`` and return this calculator."""
+        device = torch.device(device)
+        if device != self.device:
+            self.model.to(device)
+            self.device = device
+        return self
+
     def __call__(self, file_path):
         """
         Estimate the MOS of the given speech audio file using UTMOSv2.
