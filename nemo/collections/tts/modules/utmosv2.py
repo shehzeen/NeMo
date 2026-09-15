@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from pathlib import Path
 
 try:
     import utmosv2
@@ -101,6 +102,15 @@ class UTMOSv2Calculator:
                     val_list=val_list,
                     verbose=self.verbose,
                 )
+        if val_list is not None:
+            requested_names = [Path(path).name for path in val_list]
+            results_by_name = {Path(str(item["file_path"])).name: item for item in results}
+            if len(results_by_name) != len(results):
+                raise RuntimeError("UTMOSv2 returned duplicate file paths.")
+            missing_names = [name for name in requested_names if name not in results_by_name]
+            if missing_names:
+                raise RuntimeError(f"UTMOSv2 did not return scores for: {missing_names}")
+            results = [results_by_name[name] for name in requested_names]
         return results
 
 
