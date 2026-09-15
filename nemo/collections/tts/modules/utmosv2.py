@@ -48,10 +48,19 @@ class UTMOSv2Calculator:
     def __init__(self, device: Optional[str] = None, verbose: bool = True):
         if device is None:
             device = get_available_device()
+        self.device = torch.device(device)
         self.model = utmosv2.create_model()
         self.model.eval()
-        self.model.to(torch.device(device))
+        self.model.to(self.device)
         self.verbose = verbose
+
+    def to(self, device: str | torch.device):
+        """Move the scorer to ``device`` and return this calculator."""
+        device = torch.device(device)
+        if device != self.device:
+            self.model.to(device)
+            self.device = device
+        return self
 
     def __call__(self, file_path):
         """
@@ -62,7 +71,11 @@ class UTMOSv2Calculator:
             # without actually speeding up prediction. Limit to 4 threads.
             with threadpool_limits(limits=4):
                 mos_score = self.model.predict(
-                    input_path=file_path, num_repetitions=1, num_workers=0, verbose=self.verbose
+                    input_path=file_path,
+                    device=self.device,
+                    num_repetitions=1,
+                    num_workers=0,
+                    verbose=self.verbose,
                 )
         return mos_score
 
@@ -96,6 +109,7 @@ class UTMOSv2Calculator:
             with threadpool_limits(limits=1):
                 results = self.model.predict(
                     input_dir=input_dir,
+                    device=self.device,
                     num_repetitions=1,
                     num_workers=num_workers,
                     batch_size=batch_size,
