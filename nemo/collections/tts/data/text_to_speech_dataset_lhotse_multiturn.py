@@ -169,6 +169,8 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         phoneme_turn_dropout_batch_prob: float = 0.0,
         phoneme_turn_dropout_turn_prob: float = 0.0,
         phoneme_turn_max_words_to_drop: int = 2,
+        challenging_texts_path: str = None,
+        challenging_text_replacement_prob: float = 0.0,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -210,6 +212,21 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         self.phoneme_turn_dropout_batch_prob = phoneme_turn_dropout_batch_prob
         self.phoneme_turn_dropout_turn_prob = phoneme_turn_dropout_turn_prob
         self.phoneme_turn_max_words_to_drop = phoneme_turn_max_words_to_drop
+        if not 0.0 <= challenging_text_replacement_prob <= 1.0:
+            raise ValueError("challenging_text_replacement_prob must be between 0 and 1.")
+        self.challenging_text_replacement_prob = challenging_text_replacement_prob
+        self.challenging_texts = []
+        if self.challenging_text_replacement_prob > 0.0:
+            if not challenging_texts_path:
+                raise ValueError("challenging_texts_path is required when challenging text replacement is enabled.")
+            with open(challenging_texts_path, encoding="utf-8") as input_file:
+                self.challenging_texts = [line.strip() for line in input_file if line.strip()]
+            if not self.challenging_texts:
+                raise ValueError(f"No challenging texts found in {challenging_texts_path}.")
+            logging.info(
+                f"Loaded {len(self.challenging_texts)} challenging texts from {challenging_texts_path}; "
+                f"batch replacement probability={self.challenging_text_replacement_prob:.4f}"
+            )
 
         self.frame_length = (
             self.codec_model_samples_per_frame / codec_model_input_sample_rate
@@ -252,6 +269,49 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
                 batch_tokenizer_names.append(random.choice(cut.tokenizer_names))
             else:
                 batch_tokenizer_names.append("english_phoneme")
+
+        if self.dataset_type == 'train' and random.random() < self.challenging_text_replacement_prob:
+            candidates = [
+                (cut_idx, cut, supervision)
+                for cut_idx, cut in enumerate(cuts)
+                if str(getattr(cut, "task", "tts")).lower() == "tts" and self._get_language(cut) == "en"
+                for supervision in cut.supervisions
+                if supervision.speaker in self.output_roles
+            ]
+            if candidates:
+                cut_idx, cut, supervision = random.choice(candidates)
+                total_slots = compute_num_frames(cut.duration, self.frame_length, cut.sampling_rate)
+                start_slot = compute_num_frames(supervision.start, self.frame_length, cut.sampling_rate)
+                available_slots = total_slots - start_slot
+                for replacement_text in random.sample(
+                    self.challenging_texts, min(32, len(self.challenging_texts))
+                ):
+                    replacement_ids = tokenize_text_with_phoneme_spans(
+                        text_tokenizer=self.text_tokenizer,
+                        text_str=replacement_text,
+                        tokenizer_name=batch_tokenizer_names[cut_idx],
+                        enable_phoneme_text_input=self.enable_phoneme_text_input,
+                        phoneme_tokenizer=self.phoneme_tokenizer,
+                        text_phoneme_token_offset=self.text_phoneme_token_offset,
+                        bop_marker=self.phoneme_text_bop_marker,
+                        eop_marker=self.phoneme_text_eop_marker,
+                    )
+                    required_slots = len(replacement_ids) + 1 + int(self.add_text_bos)
+                    if required_slots > available_slots:
+                        continue
+                    uses_normalized_text = supervision.has_custom("normalized_text")
+                    original_text = supervision.normalized_text if uses_normalized_text else supervision.text
+                    supervision.text = replacement_text
+                    if uses_normalized_text:
+                        supervision.normalized_text = replacement_text
+                    supervision.challenging_text_replaced = True
+                    logging.info(
+                        f"[challenging_text_replacement] source="
+                        f"{'normalized_text' if uses_normalized_text else 'text'} "
+                        f"required_slots={required_slots} available_slots={available_slots} "
+                        f"original={original_text[:160]!r} replacement={replacement_text[:160]!r}"
+                    )
+                    break
 
         return cuts, batch_tokenizer_names
 
@@ -906,6 +966,7 @@ def build_token_channel(
                 and enable_phoneme_text_input
                 and partial_phoneme_text_prob > 0.0
                 and language not in (ignore_phoneme_languages or [])
+                and not supervision.has_custom("challenging_text_replaced")
                 and supervision.has_custom("ipa_alignment")
                 and not has_phoneme_text_spans(
                     text,
