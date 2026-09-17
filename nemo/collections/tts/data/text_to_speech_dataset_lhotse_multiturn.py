@@ -130,6 +130,8 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         text_context_remapping: Dict defining mapping of multiple text contexts to a single text context.
         text_context_remapping_prob: Probability of remapping the original text context to a remapped text context.
         phoneme_turn_max_words_to_drop: Turns with this many words or fewer keep empty phoneme string.
+        context_audio_shuffle_batch_prob: Probability of replacing valid audio contexts with audio contexts
+            from other items in the same training batch. Text contexts are not changed.
     """
 
     def __init__(
@@ -171,6 +173,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         phoneme_turn_max_words_to_drop: int = 2,
         challenging_texts_path: str = None,
         challenging_text_replacement_prob: float = 0.0,
+        context_audio_shuffle_batch_prob: float = 0.0,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -212,6 +215,9 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         self.phoneme_turn_dropout_batch_prob = phoneme_turn_dropout_batch_prob
         self.phoneme_turn_dropout_turn_prob = phoneme_turn_dropout_turn_prob
         self.phoneme_turn_max_words_to_drop = phoneme_turn_max_words_to_drop
+        if not 0.0 <= context_audio_shuffle_batch_prob <= 1.0:
+            raise ValueError("context_audio_shuffle_batch_prob must be between 0 and 1.")
+        self.context_audio_shuffle_batch_prob = context_audio_shuffle_batch_prob
         if not 0.0 <= challenging_text_replacement_prob <= 1.0:
             raise ValueError("challenging_text_replacement_prob must be between 0 and 1.")
         self.challenging_text_replacement_prob = challenging_text_replacement_prob
@@ -728,6 +734,69 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
 
         return features
 
+    def _maybe_shuffle_context_audio(self, features: Dict[str, List]) -> None:
+        if (
+            self.dataset_type != 'train'
+            or self.context_audio_shuffle_batch_prob <= 0.0
+            or random.random() >= self.context_audio_shuffle_batch_prob
+        ):
+            return
+
+        batch_size = len(features["languages"])
+        has_text_context = features["has_text_context"]
+        if len(has_text_context) != batch_size:
+            has_text_context = [False] * batch_size
+
+        if len(features["context_audio_codes"]) == batch_size:
+            context_key = "context_audio_codes"
+            context_lens_key = "context_audio_codes_lens"
+            minimum_valid_context_len = 3
+        elif len(features["context_audio"]) == batch_size:
+            context_key = "context_audio"
+            context_lens_key = "context_audio_lens"
+            minimum_valid_context_len = self.codec_model_samples_per_frame + 1
+        else:
+            return
+
+        context_lens = features[context_lens_key]
+        eligible_indices = [
+            idx
+            for idx in range(batch_size)
+            if not has_text_context[idx] and context_lens[idx] >= minimum_valid_context_len
+        ]
+        if len(eligible_indices) < 2:
+            return
+
+        languages = features["languages"]
+        donor_indices = {}
+        for target_idx in eligible_indices:
+            candidates = [
+                donor_idx
+                for donor_idx in eligible_indices
+                if donor_idx != target_idx and languages[donor_idx] != languages[target_idx]
+            ]
+            if not candidates:
+                candidates = [donor_idx for donor_idx in eligible_indices if donor_idx != target_idx]
+            donor_indices[target_idx] = random.choice(candidates)
+
+        original_contexts = list(features[context_key])
+        original_context_lens = list(context_lens)
+        for target_idx, donor_idx in donor_indices.items():
+            features[context_key][target_idx] = original_contexts[donor_idx]
+            context_lens[target_idx] = original_context_lens[donor_idx]
+
+        cross_lingual_count = sum(
+            languages[target_idx] != languages[donor_idx] for target_idx, donor_idx in donor_indices.items()
+        )
+        language_pairs = ", ".join(
+            f"{languages[target_idx]}<-{languages[donor_idx]}"
+            for target_idx, donor_idx in donor_indices.items()
+        )
+        logging.info(
+            f"[context_audio_shuffle] shuffled={len(donor_indices)} "
+            f"cross_lingual={cross_lingual_count}/{len(donor_indices)} pairs={language_pairs}"
+        )
+
     def _add_optional_batch_fields(
         self,
         batch_dict: Dict[str, Union[torch.Tensor, List]],
@@ -841,6 +910,7 @@ class MagpieTTSLhotseMultiturnDataset(torch.utils.data.Dataset):
         text_data = self._collate_text_channels(cuts, batch_tokenizer_names)
         phoneme_data = self._collate_phoneme_tokens(cuts)
         features = self._collect_cut_features(cuts, batch_tokenizer_names, audio_data["target_audio_lens"])
+        self._maybe_shuffle_context_audio(features)
 
         return self._build_batch_dict(cuts, audio_data, text_data, phoneme_data, features)
 

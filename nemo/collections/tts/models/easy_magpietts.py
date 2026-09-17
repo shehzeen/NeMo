@@ -1999,6 +1999,9 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
                 challenging_text_replacement_prob=dataset_cfg.dataset.get(
                     "challenging_text_replacement_prob", 0.0
                 ),
+                context_audio_shuffle_batch_prob=dataset_cfg.dataset.get(
+                    "context_audio_shuffle_batch_prob", 0.0
+                ),
             )
             dataset = FallbackDataset(dataset)
         else:
