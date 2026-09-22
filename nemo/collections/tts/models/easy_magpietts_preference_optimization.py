@@ -16,6 +16,7 @@ import atexit
 import copy
 import os
 import random
+import re
 import shutil
 import time
 from typing import Dict, List, Optional
@@ -28,6 +29,14 @@ from omegaconf import DictConfig, open_dict
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate
+from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (
+    EncDecHybridRNNTCTCBPEModelWithPrompt,
+    HybridRNNTCTCPromptTranscribeConfig,
+)
+from nemo.collections.asr.models.rnnt_bpe_models_prompt import (
+    EncDecRNNTBPEModelWithPrompt,
+    RNNTPromptTranscribeConfig,
+)
 from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
 from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
 from nemo.collections.tts.modules.magpietts_modules import SpecialAudioToken
@@ -39,6 +48,22 @@ from nemo.collections.tts.parts.utils.helpers import (
     transcribe_with_whisper_from_filepaths,
 )
 from nemo.utils import logging
+
+NEMOTRON_ASR_LANGUAGE_MAP = {
+    "ar": "ar-AR",
+    "de": "de-DE",
+    "en": "en-US",
+    "es": "es-ES",
+    "fr": "fr-FR",
+    "hi": "hi-IN",
+    "it": "it-IT",
+    "ja": "ja-JP",
+    "ko": "ko-KR",
+    "pt": "pt-BR",
+    "vi": "vi-VN",
+    "zh": "zh-CN",
+}
+NEMOTRON_ASR_LANGUAGE_TAG_PATTERN = re.compile(r"\s*<[a-z]{2,3}(?:-[A-Za-z]{2,4})?>\s*")
 
 try:
     from nemo_text_processing.text_normalization.normalize import Normalizer
@@ -86,6 +111,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             logging.info("Reference model loaded and frozen")
 
         reward_asr_model = cfg.get('reward_asr_model', 'nemo')
+        self._reward_asr_model = None
+        self.reward_asr_batch_size = max(int(cfg.get('reward_asr_batch_size', 16)), 1)
+        self.reward_asr_log_samples = max(int(cfg.get('reward_asr_log_samples', 0)), 0)
+        self.reward_asr_language_map = dict(
+            cfg.get('reward_asr_language_map', NEMOTRON_ASR_LANGUAGE_MAP)
+        )
         if reward_asr_model == 'nemo':
             self._eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
                 model_name=cfg.get('reward_asr_model_name', "nvidia/parakeet-ctc-0.6b")
@@ -93,6 +124,29 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             self._eval_asr_model.freeze()
             self.whisper_processor = None
             self.whisper_model = None
+        elif reward_asr_model == 'nemotron':
+            model_name = cfg.get('reward_asr_model_name', "nvidia/nemotron-3.5-asr-streaming-0.6b")
+            if str(model_name).endswith(".nemo"):
+                self._reward_asr_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_name)
+            else:
+                self._reward_asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+            if not isinstance(
+                self._reward_asr_model,
+                (EncDecHybridRNNTCTCBPEModelWithPrompt, EncDecRNNTBPEModelWithPrompt),
+            ):
+                raise TypeError(
+                    f"Nemotron reward ASR must support language prompts, got {type(self._reward_asr_model).__name__}."
+                )
+            prompt_dictionary = self._reward_asr_model.cfg.model_defaults.get('prompt_dictionary', {})
+            missing_locales = sorted(set(self.reward_asr_language_map.values()) - set(prompt_dictionary))
+            if missing_locales:
+                raise ValueError(f"Nemotron reward ASR does not support configured locales: {missing_locales}")
+            self._reward_asr_model.freeze()
+            self._reward_asr_model._no_state_dict = True
+            logging.info(
+                f"Using Nemotron reward ASR {model_name} with batch size {self.reward_asr_batch_size} "
+                f"and language map {self.reward_asr_language_map}"
+            )
         elif reward_asr_model == 'whisper':
             from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
@@ -178,7 +232,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 )
 
         self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
-        if reward_asr_model == 'whisper' and self._normalize_whisper_transcript:
+        if reward_asr_model in {'whisper', 'nemotron'} and self._normalize_whisper_transcript:
             self._normalizer_cache = {}
 
         # Entropy bonus coefficient – encourages exploration and prevents mode collapse.
@@ -309,7 +363,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         """Return the model state dict, excluding reference model and UTMOSv2 calculator weights."""
         state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
-        keys_substrings_to_exclude = ['_reference_model', '_utmos_calculator']
+        keys_substrings_to_exclude = ['_reference_model', '_reward_asr_model', '_utmos_calculator']
         for key in list(state_dict.keys()):
             if any(substring in key for substring in keys_substrings_to_exclude):
                 del state_dict[key]
@@ -678,7 +732,74 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                     use_lhotse=False, batch_size=len(predicted_audio_paths), num_workers=0
                 ),
             )
-            return [process_text_for_cer(transcript.text) for transcript in pred_transcripts]
+            return [
+                process_text_for_cer(transcript.text if hasattr(transcript, "text") else str(transcript))
+                for transcript in pred_transcripts
+            ]
+
+        if reward_asr_model == 'nemotron':
+            self._reward_asr_model.to(self.device)
+            pred_transcripts = [""] * len(predicted_audio_paths)
+            langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
+            language_groups = {}
+            for item_idx, audio_path in enumerate(predicted_audio_paths):
+                language = langs[item_idx] if item_idx < len(langs) else 'en'
+                language_groups.setdefault(language, []).append((item_idx, audio_path))
+
+            for language, grouped_items in language_groups.items():
+                if language not in self.reward_asr_language_map:
+                    raise ValueError(
+                        f"No Nemotron ASR locale configured for language {language!r}; "
+                        f"available mappings: {sorted(self.reward_asr_language_map)}"
+                    )
+                target_lang = self.reward_asr_language_map[language]
+                normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+                num_logged = 0
+                for start_idx in range(0, len(grouped_items), self.reward_asr_batch_size):
+                    chunk = grouped_items[start_idx : start_idx + self.reward_asr_batch_size]
+                    chunk_paths = [audio_path for _, audio_path in chunk]
+                    transcribe_config_cls = (
+                        HybridRNNTCTCPromptTranscribeConfig
+                        if isinstance(self._reward_asr_model, EncDecHybridRNNTCTCBPEModelWithPrompt)
+                        else RNNTPromptTranscribeConfig
+                    )
+                    transcribe_cfg = transcribe_config_cls(
+                        use_lhotse=False,
+                        batch_size=len(chunk_paths),
+                        return_hypotheses=False,
+                        num_workers=0,
+                        verbose=False,
+                        target_lang=target_lang,
+                    )
+                    chunk_transcripts = self._reward_asr_model.transcribe(
+                        chunk_paths,
+                        batch_size=len(chunk_paths),
+                        override_config=transcribe_cfg,
+                    )
+                    for (item_idx, _), transcript in zip(chunk, chunk_transcripts):
+                        raw_transcript = transcript.text if hasattr(transcript, "text") else str(transcript)
+                        transcript_without_language_tags = NEMOTRON_ASR_LANGUAGE_TAG_PATTERN.sub(
+                            " ", raw_transcript
+                        ).strip()
+                        normalized_transcript = (
+                            normalizer.normalize(transcript_without_language_tags)
+                            if normalizer is not None
+                            else transcript_without_language_tags
+                        )
+                        pred_transcripts[item_idx] = process_text_for_cer(normalized_transcript)
+                        if (
+                            num_logged < self.reward_asr_log_samples
+                            and getattr(self.trainer, "is_global_zero", True)
+                        ):
+                            gt_text = str(batch_repeated['raw_texts'][item_idx]).replace("\n", " ")
+                            logging.info(
+                                f"[reward_asr_transcript] backend=nemotron language={language} "
+                                f"target_lang={target_lang} gt={gt_text[:240]!r} "
+                                f"raw_pred={raw_transcript[:240]!r} "
+                                f"normalized_pred={pred_transcripts[item_idx][:240]!r}"
+                            )
+                            num_logged += 1
+            return pred_transcripts
 
         self.whisper_model.to(self.device)
         pred_transcripts = [""] * len(predicted_audio_paths)
