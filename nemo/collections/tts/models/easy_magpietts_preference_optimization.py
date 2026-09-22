@@ -352,8 +352,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         with torch.cuda.amp.autocast(enabled=False):
             logits_fp32 = logits.float()
             per_token_logps = torch.gather(logits_fp32.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
-            # Top-k sampling assigns -inf to tokens outside its support. Padded
-            # labels may select one of those tokens, so multiplication by a zero
+            # Masked tokens have -inf log-probability. Padded labels may select
+            # one of those tokens, so multiplication by a zero
             # mask would produce `-inf * 0 = NaN`. Select masked values instead.
             per_token_logps = torch.where(
                 loss_mask.bool(), per_token_logps, torch.zeros_like(per_token_logps)
@@ -361,20 +361,16 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         return per_token_logps
 
     @staticmethod
-    def _apply_sampling_transform(
+    def _apply_teacher_forced_transform(
         logits: torch.Tensor,
         temperature: float,
-        topk: int,
         forbidden_token_ids: Optional[List[int]] = None,
     ) -> torch.Tensor:
-        """Apply the same sanitization, token masking, temperature, and top-k used for sampling."""
+        """Apply sanitization, token masking, and temperature scaling for policy likelihoods."""
         logits = torch.nan_to_num(logits, nan=0.0, posinf=100.0, neginf=-100.0).clamp(-100.0, 100.0)
         if forbidden_token_ids:
             logits = logits.clone()
             logits[..., forbidden_token_ids] = float('-inf')
-        if topk < logits.size(-1):
-            topk_values = torch.topk(logits, topk, dim=-1).values
-            logits = logits.masked_fill(logits < topk_values[..., -1, None], float('-inf'))
         return logits / temperature
 
     def compute_local_transformer_logits(self, dec_out, audio_codes_target, targets_offset_by_one=False):
@@ -1124,12 +1120,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         advantages: torch.Tensor,
         group_validities: torch.Tensor,
         sampling_temperature: Optional[float] = None,
-        sampling_topk: Optional[int] = None,
         forbidden_token_ids: Optional[List[int]] = None,
     ):
         """Compute normalized GRPO, KL, and entropy for parallel action streams."""
-        if (sampling_temperature is None) != (sampling_topk is None):
-            raise ValueError("sampling_temperature and sampling_topk must either both be set or both be None.")
         loss_mask = get_mask_from_lengths(target_lens).float()
         num_streams = targets.size(1)
         total_loss = logits.new_zeros((), dtype=torch.float32)
@@ -1141,11 +1134,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             ei = si + vocab_size
             stream_logits = logits[:, :, si:ei]
             if sampling_temperature is not None:
-                assert sampling_topk is not None
-                stream_logits = self._apply_sampling_transform(
+                stream_logits = self._apply_teacher_forced_transform(
                     stream_logits,
                     temperature=sampling_temperature,
-                    topk=sampling_topk,
                     forbidden_token_ids=forbidden_token_ids,
                 )
             stream_labels = targets[:, stream_idx, :].long()
@@ -1246,7 +1237,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             advantages=advantages,
             group_validities=group_validities,
             sampling_temperature=self.audio_sampling_temperature,
-            sampling_topk=self.audio_sampling_topk,
             forbidden_token_ids=SpecialAudioToken.get_forbidden_tokens(
                 self.codebook_size, forbid_audio_eos=False
             ),
@@ -1275,7 +1265,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 advantages=advantages,
                 group_validities=group_validities,
                 sampling_temperature=self.phoneme_sampling_temperature,
-                sampling_topk=self.phoneme_sampling_topk,
             )
 
         # GT phonemes are supervised targets, not sampled policy actions. Retain the
