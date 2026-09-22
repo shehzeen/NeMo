@@ -369,6 +369,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 del state_dict[key]
         return state_dict
 
+    def _get_state_dict_keys_to_exclude(self):
+        return super()._get_state_dict_keys_to_exclude() + ['_reference_model', '_reward_asr_model']
+
     def _get_cached_normalizer(self, lang_key: Optional[str]):
         """Return a cached ``Normalizer`` for the given language, creating one on first access.
 
