@@ -147,7 +147,11 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 f"Using Nemotron reward ASR {model_name} with batch size {self.reward_asr_batch_size} "
                 f"and language map {self.reward_asr_language_map}"
             )
-            if self.use_multilingual_asr and not hasattr(self, 'whisper_model'):
+            if (
+                self.use_multilingual_asr
+                and self.cfg.get('validation_asr_model', 'whisper') == 'whisper'
+                and not hasattr(self, 'whisper_model')
+            ):
                 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
                 self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")

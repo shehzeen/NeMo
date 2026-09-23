@@ -1714,7 +1714,18 @@ class EasyMagpieTTSModel(EasyMagpieTTSInferenceModel):
             if predicted_audio_paths and context_audio_paths:
                 with torch.no_grad():
                     # ASR transcription for CER/WER
-                    if self.use_multilingual_asr:
+                    validation_asr_model = self.cfg.get('validation_asr_model', 'whisper')
+                    if validation_asr_model == 'reward':
+                        if not hasattr(self, '_compute_pred_transcripts'):
+                            raise RuntimeError(
+                                "validation_asr_model='reward' requires a model with reward ASR transcription support."
+                            )
+                        pred_transcripts = self._compute_pred_transcripts(
+                            predicted_audio_paths,
+                            batch,
+                            self.cfg.get('reward_asr_model', 'nemo'),
+                        )
+                    elif self.use_multilingual_asr:
                         self.whisper_model.to(self.device)
                         languages = batch.get('languages', None)
                         if languages is None:
