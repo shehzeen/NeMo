@@ -14,11 +14,15 @@
 
 import atexit
 import copy
+import json
 import os
 import random
 import re
 import shutil
+import subprocess
+import tempfile
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -114,9 +118,17 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self._reward_asr_model = None
         self.reward_asr_batch_size = max(int(cfg.get('reward_asr_batch_size', 16)), 1)
         self.reward_asr_log_samples = max(int(cfg.get('reward_asr_log_samples', 0)), 0)
+        self.reward_asr_att_context_size = list(cfg.get('reward_asr_att_context_size', [56, 13]))
         self.reward_asr_language_map = dict(
             cfg.get('reward_asr_language_map', NEMOTRON_ASR_LANGUAGE_MAP)
         )
+        self._qwen_asr_process = None
+        self._qwen_asr_stderr = None
+        self.qwen_asr_model_name = cfg.get('qwen_asr_model_name', "Qwen/Qwen3-ASR-0.6B")
+        self.qwen_asr_python = cfg.get('qwen_asr_python', "/qwen_asr_env/bin/python")
+        self.qwen_asr_batch_size = max(int(cfg.get('qwen_asr_batch_size', 16)), 1)
+        self.qwen_asr_max_new_tokens = max(int(cfg.get('qwen_asr_max_new_tokens', 1024)), 1)
+        self.qwen_asr_whisper_languages = set(cfg.get('qwen_asr_whisper_languages', ['hi']))
         if reward_asr_model == 'nemo':
             self._eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
                 model_name=cfg.get('reward_asr_model_name', "nvidia/parakeet-ctc-0.6b")
@@ -141,11 +153,19 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             missing_locales = sorted(set(self.reward_asr_language_map.values()) - set(prompt_dictionary))
             if missing_locales:
                 raise ValueError(f"Nemotron reward ASR does not support configured locales: {missing_locales}")
+            available_context_sizes = [list(context) for context in self._reward_asr_model.encoder.att_context_size_all]
+            if self.reward_asr_att_context_size not in available_context_sizes:
+                raise ValueError(
+                    f"Unsupported Nemotron ASR attention context {self.reward_asr_att_context_size}; "
+                    f"available contexts: {available_context_sizes}"
+                )
+            self._reward_asr_model.encoder.set_default_att_context_size(self.reward_asr_att_context_size)
             self._reward_asr_model.freeze()
             self._reward_asr_model._no_state_dict = True
             logging.info(
                 f"Using Nemotron reward ASR {model_name} with batch size {self.reward_asr_batch_size} "
-                f"and language map {self.reward_asr_language_map}"
+                f"attention context {self.reward_asr_att_context_size}, and language map "
+                f"{self.reward_asr_language_map}"
             )
             if (
                 self.use_multilingual_asr
@@ -169,6 +189,21 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             for param in self.whisper_model.parameters():
                 param.requires_grad = False
             self.use_multilingual_asr = True
+        elif reward_asr_model == 'qwen_whisper':
+            from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+            self._eval_asr_model = None
+            self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+            self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3")
+            self.whisper_model.eval()
+            for param in self.whisper_model.parameters():
+                param.requires_grad = False
+            self.use_multilingual_asr = True
+            atexit.register(self._shutdown_qwen_asr_worker)
+            logging.info(
+                f"Using Qwen ASR {self.qwen_asr_model_name} with batch size {self.qwen_asr_batch_size}; "
+                f"Whisper fallback languages={sorted(self.qwen_asr_whisper_languages)}"
+            )
         else:
             raise ValueError(f"Unknown reward_asr_model: {reward_asr_model}")
 
@@ -244,7 +279,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 )
 
         self._normalize_whisper_transcript = self.cfg.get('normalize_whisper_transcript', True)
-        if reward_asr_model in {'whisper', 'nemotron'} and self._normalize_whisper_transcript:
+        if reward_asr_model in {'whisper', 'nemotron', 'qwen_whisper'} and self._normalize_whisper_transcript:
             self._normalizer_cache = {}
 
         # Entropy bonus coefficient – encourages exploration and prevents mode collapse.
@@ -684,6 +719,87 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         ]
         return "\n".join([header_line, separator] + row_lines)
 
+    def _start_qwen_asr_worker(self) -> None:
+        if self._qwen_asr_process is not None and self._qwen_asr_process.poll() is None:
+            return
+        if not os.path.isfile(self.qwen_asr_python):
+            raise FileNotFoundError(f"Qwen ASR Python executable not found: {self.qwen_asr_python}")
+
+        worker_script = Path(__file__).resolve().parents[4] / "examples" / "tts" / "qwen_asr_reward_worker.py"
+        if not worker_script.is_file():
+            raise FileNotFoundError(f"Qwen ASR reward worker not found: {worker_script}")
+
+        device_idx = self.device.index if self.device.index is not None else 0
+        stderr_path = os.path.join(
+            tempfile.gettempdir(), f"qwen_asr_worker_rank{getattr(self, 'global_rank', 0)}.log"
+        )
+        self._qwen_asr_stderr = open(stderr_path, "a", encoding="utf-8")
+        self._qwen_asr_process = subprocess.Popen(
+            [
+                self.qwen_asr_python,
+                str(worker_script),
+                "--model",
+                str(self.qwen_asr_model_name),
+                "--device",
+                f"cuda:{device_idx}",
+                "--batch-size",
+                str(self.qwen_asr_batch_size),
+                "--max-new-tokens",
+                str(self.qwen_asr_max_new_tokens),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self._qwen_asr_stderr,
+            text=True,
+            bufsize=1,
+            env=os.environ.copy(),
+        )
+        ready_line = self._qwen_asr_process.stdout.readline()
+        if not ready_line:
+            raise RuntimeError(f"Qwen ASR worker exited during startup; see {stderr_path}")
+        ready = json.loads(ready_line)
+        if ready.get("status") != "ready":
+            raise RuntimeError(f"Unexpected Qwen ASR worker startup response: {ready}")
+        logging.info(
+            f"Qwen ASR worker ready on {ready.get('device')} with model {ready.get('model')} "
+            f"(stderr: {stderr_path})"
+        )
+
+    def _shutdown_qwen_asr_worker(self) -> None:
+        process = self._qwen_asr_process
+        if process is not None and process.poll() is None:
+            try:
+                process.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+                process.stdin.flush()
+                process.wait(timeout=10)
+            except Exception:
+                process.terminate()
+        self._qwen_asr_process = None
+        if self._qwen_asr_stderr is not None:
+            self._qwen_asr_stderr.close()
+            self._qwen_asr_stderr = None
+
+    def _transcribe_with_qwen(self, items: List[tuple[int, str]], languages: List[str]):
+        """Transcribe indexed audio paths with the persistent Qwen ASR worker."""
+        self._start_qwen_asr_worker()
+        request = {
+            "command": "transcribe",
+            "audio_paths": [audio_path for _, audio_path in items],
+            "languages": languages,
+        }
+        self._qwen_asr_process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+        self._qwen_asr_process.stdin.flush()
+        response_line = self._qwen_asr_process.stdout.readline()
+        if not response_line:
+            raise RuntimeError("Qwen ASR worker exited without returning transcripts.")
+        response = json.loads(response_line)
+        if response.get("status") != "ok":
+            raise RuntimeError(f"Qwen ASR worker failed: {response}")
+        transcripts = response.get("transcripts", [])
+        if len(transcripts) != len(items):
+            raise RuntimeError(f"Qwen ASR returned {len(transcripts)} transcripts for {len(items)} inputs.")
+        return [(item_idx, transcript) for (item_idx, _), transcript in zip(items, transcripts)]
+
     def _print_group_cer_wer_table(
         self,
         batch: Dict,
@@ -814,6 +930,68 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                                 f"normalized_pred={pred_transcripts[item_idx][:240]!r}"
                             )
                             num_logged += 1
+            return pred_transcripts
+
+        if reward_asr_model == 'qwen_whisper':
+            pred_transcripts = [""] * len(predicted_audio_paths)
+            langs = batch_repeated.get('languages', ['en'] * len(predicted_audio_paths))
+            qwen_items = []
+            qwen_languages = []
+            whisper_groups = {}
+            for item_idx, audio_path in enumerate(predicted_audio_paths):
+                language = langs[item_idx] if item_idx < len(langs) else 'en'
+                if language in self.qwen_asr_whisper_languages:
+                    whisper_groups.setdefault(language, []).append((item_idx, audio_path))
+                else:
+                    qwen_items.append((item_idx, audio_path))
+                    qwen_languages.append(language)
+
+            if qwen_items:
+                logged_languages = set()
+                for item_idx, transcript in self._transcribe_with_qwen(qwen_items, qwen_languages):
+                    language = langs[item_idx] if item_idx < len(langs) else 'en'
+                    normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+                    normalized_transcript = (
+                        normalizer.normalize(transcript) if normalizer is not None else transcript
+                    )
+                    pred_transcripts[item_idx] = process_text_for_cer(normalized_transcript)
+                    if (
+                        language not in logged_languages
+                        and self.reward_asr_log_samples > 0
+                        and getattr(self.trainer, "is_global_zero", True)
+                    ):
+                        gt_text = str(batch_repeated['raw_texts'][item_idx]).replace("\n", " ")
+                        logging.info(
+                            f"[reward_asr_transcript] backend=qwen language={language} "
+                            f"gt={gt_text[:240]!r} raw_pred={transcript[:240]!r} "
+                            f"normalized_pred={pred_transcripts[item_idx][:240]!r}"
+                        )
+                        logged_languages.add(language)
+
+            if whisper_groups:
+                self.whisper_model.to(self.device)
+                for language, grouped_items in whisper_groups.items():
+                    normalizer = self._get_cached_normalizer(language) if self._normalize_whisper_transcript else None
+                    grouped_paths = [audio_path for _, audio_path in grouped_items]
+                    group_transcripts = transcribe_with_whisper_from_filepaths(
+                        audio_filepaths=grouped_paths,
+                        language=language,
+                        whisper_processor=self.whisper_processor,
+                        whisper_model=self.whisper_model,
+                        device=self.device,
+                        normalizer=normalizer,
+                    )
+                    for local_idx, ((item_idx, _), transcript) in enumerate(zip(grouped_items, group_transcripts)):
+                        pred_transcripts[item_idx] = process_text_for_cer(transcript)
+                        if (
+                            local_idx < self.reward_asr_log_samples
+                            and getattr(self.trainer, "is_global_zero", True)
+                        ):
+                            gt_text = str(batch_repeated['raw_texts'][item_idx]).replace("\n", " ")
+                            logging.info(
+                                f"[reward_asr_transcript] backend=whisper language={language} "
+                                f"gt={gt_text[:240]!r} normalized_pred={pred_transcripts[item_idx][:240]!r}"
+                            )
             return pred_transcripts
 
         self.whisper_model.to(self.device)
