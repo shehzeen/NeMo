@@ -126,8 +126,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self._qwen_asr_stderr = None
         self.qwen_asr_model_name = cfg.get('qwen_asr_model_name', "Qwen/Qwen3-ASR-0.6B")
         self.qwen_asr_python = cfg.get('qwen_asr_python', "/qwen_asr_env/bin/python")
-        self.qwen_asr_batch_size = max(int(cfg.get('qwen_asr_batch_size', 16)), 1)
-        self.qwen_asr_max_new_tokens = max(int(cfg.get('qwen_asr_max_new_tokens', 1024)), 1)
+        self.qwen_asr_batch_size = max(int(cfg.get('qwen_asr_batch_size', 4)), 1)
+        self.qwen_asr_max_new_tokens = max(int(cfg.get('qwen_asr_max_new_tokens', 256)), 1)
         self.qwen_asr_whisper_languages = set(cfg.get('qwen_asr_whisper_languages', ['hi']))
         if reward_asr_model == 'nemo':
             self._eval_asr_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
@@ -730,6 +730,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             raise FileNotFoundError(f"Qwen ASR reward worker not found: {worker_script}")
 
         device_idx = self.device.index if self.device.index is not None else 0
+        worker_env = os.environ.copy()
+        worker_env["CUDA_VISIBLE_DEVICES"] = str(device_idx)
         stderr_path = os.path.join(
             tempfile.gettempdir(), f"qwen_asr_worker_rank{getattr(self, 'global_rank', 0)}.log"
         )
@@ -741,7 +743,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 "--model",
                 str(self.qwen_asr_model_name),
                 "--device",
-                f"cuda:{device_idx}",
+                "cuda:0",
                 "--batch-size",
                 str(self.qwen_asr_batch_size),
                 "--max-new-tokens",
@@ -752,7 +754,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             stderr=self._qwen_asr_stderr,
             text=True,
             bufsize=1,
-            env=os.environ.copy(),
+            env=worker_env,
         )
         ready_line = self._qwen_asr_process.stdout.readline()
         if not ready_line:
