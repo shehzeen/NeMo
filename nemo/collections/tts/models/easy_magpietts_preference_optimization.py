@@ -174,6 +174,12 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             )
         self.audio_sampling_temperature = float(self.cfg.get('inference_temperature', 0.7))
         self.audio_sampling_topk = int(self.cfg.get('inference_topk', 80))
+        self.rollout_cfg_mode = str(self.cfg.get('rollout_cfg_mode', 'off'))
+        if self.rollout_cfg_mode not in {'off', 'alternate', 'half'}:
+            raise ValueError(
+                f"rollout_cfg_mode must be one of ['off', 'alternate', 'half'], got {self.rollout_cfg_mode!r}."
+            )
+        self.inference_cfg_scale = float(self.cfg.get('inference_cfg_scale', 2.5))
         if self.audio_sampling_topk <= 0:
             self.audio_sampling_topk = self.num_all_tokens_per_codebook
         if self.audio_sampling_topk > self.num_all_tokens_per_codebook:
@@ -690,6 +696,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             rows.append(
                 [
                     str(local_idx),
+                    "on" if item_metrics.get('used_cfg', False) else "off",
                     f"{item_metrics['cer_gt']:.4f}",
                     f"{item_metrics['wer_gt']:.4f}",
                     f"{item_metrics['spk_similarity']:.4f}",
@@ -700,7 +707,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             )
 
         table = self._format_text_table(
-            headers=["item", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows
+            headers=["item", "cfg", "cer", "wer", "ssim", "utmos", "reward", "advantage"], rows=rows
         )
         logging.info(
             f"[generate_and_reward] group={group_idx} language={language} valid={is_group_valid} "
@@ -775,6 +782,77 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         )
         return [float(item['predicted_mos']) for item in batch_results]
 
+    @staticmethod
+    def _interleave_cfg_halves(
+        cfg_off: Optional[torch.Tensor],
+        cfg_on: Optional[torch.Tensor],
+        num_prompts: int,
+        pad_last_dim: bool = False,
+    ) -> Optional[torch.Tensor]:
+        """Merge ``[prompt, half-generation]`` tensors into prompt-contiguous full groups."""
+        if cfg_off is None or cfg_on is None:
+            if cfg_off is not None or cfg_on is not None:
+                raise RuntimeError("CFG-on and CFG-off inference returned inconsistent optional outputs.")
+            return None
+        if cfg_off.shape[0] != cfg_on.shape[0] or cfg_off.shape[0] % num_prompts != 0:
+            raise RuntimeError(
+                f"Cannot interleave CFG halves with shapes {cfg_off.shape} and {cfg_on.shape} "
+                f"for {num_prompts} prompts."
+            )
+        if pad_last_dim and cfg_off.shape[-1] != cfg_on.shape[-1]:
+            max_len = max(cfg_off.shape[-1], cfg_on.shape[-1])
+            cfg_off = torch.nn.functional.pad(cfg_off, (0, max_len - cfg_off.shape[-1]))
+            cfg_on = torch.nn.functional.pad(cfg_on, (0, max_len - cfg_on.shape[-1]))
+        if cfg_off.shape[1:] != cfg_on.shape[1:]:
+            raise RuntimeError(f"CFG-on and CFG-off output shapes differ: {cfg_off.shape} vs {cfg_on.shape}.")
+
+        half_generations = cfg_off.shape[0] // num_prompts
+        output_shape = cfg_off.shape[1:]
+        merged = torch.cat(
+            [
+                cfg_off.reshape(num_prompts, half_generations, *output_shape),
+                cfg_on.reshape(num_prompts, half_generations, *output_shape),
+            ],
+            dim=1,
+        )
+        return merged.reshape(num_prompts * half_generations * 2, *output_shape)
+
+    def _merge_half_cfg_outputs(self, cfg_off_output, cfg_on_output, num_prompts: int):
+        merge = lambda off, on, pad=False: self._interleave_cfg_halves(
+            off, on, num_prompts=num_prompts, pad_last_dim=pad
+        )
+        return type(cfg_off_output)(
+            predicted_audio=merge(
+                cfg_off_output.predicted_audio, cfg_on_output.predicted_audio, pad=True
+            ),
+            predicted_audio_lens=merge(
+                cfg_off_output.predicted_audio_lens, cfg_on_output.predicted_audio_lens
+            ),
+            predicted_codes=merge(
+                cfg_off_output.predicted_codes, cfg_on_output.predicted_codes, pad=True
+            ),
+            predicted_codes_lens=merge(
+                cfg_off_output.predicted_codes_lens, cfg_on_output.predicted_codes_lens
+            ),
+            rtf_metrics={
+                "cfg_off": cfg_off_output.rtf_metrics,
+                "cfg_on": cfg_on_output.rtf_metrics,
+            },
+            predicted_phoneme_tokens=merge(
+                cfg_off_output.predicted_phoneme_tokens,
+                cfg_on_output.predicted_phoneme_tokens,
+                pad=True,
+            ),
+            predicted_phoneme_tokens_lens=merge(
+                cfg_off_output.predicted_phoneme_tokens_lens,
+                cfg_on_output.predicted_phoneme_tokens_lens,
+            ),
+            phoneme_prediction_start_idx=merge(
+                cfg_off_output.phoneme_prediction_start_idx,
+                cfg_on_output.phoneme_prediction_start_idx,
+            ),
+        )
+
     def generate_and_reward(
         self,
         batch: Dict,
@@ -792,13 +870,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             advantages, group validities, and timing information.
         """
         batch_repeated = self.repeat_items_in_batch(batch, num_generations_per_item)
-
-        use_cfg = False
-        cfg_scale = 1.0
-        inference_cfg_prob = self.cfg.get('inference_cfg_prob', 0.0)
-        if (inference_cfg_prob == 1.0) or (inference_cfg_prob > 0.0 and mode == 'train'):
-            use_cfg = random.random() < inference_cfg_prob
-            cfg_scale = self.cfg.get('inference_cfg_scale', 1.0)
+        rollout_cfg_mode = self.rollout_cfg_mode if mode == 'train' else 'off'
+        if rollout_cfg_mode == 'half' and num_generations_per_item % 2 != 0:
+            raise ValueError("rollout_cfg_mode='half' requires an even n_generations_per_item.")
 
         phoneme_input_type = 'pred'
         gt_phoneme_input_prob = self.cfg.get('gt_phoneme_input_prob', 0.0)
@@ -807,23 +881,47 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             phoneme_input_type = 'gt' if random.random() < gt_phoneme_input_prob else 'pred'
 
         generation_start_time = time.perf_counter()
-        logging.info("Inference started")
-        output = self.infer_batch(
-            batch=batch_repeated,
-            max_decoder_steps=self.max_decoder_steps,
-            temperature=self.audio_sampling_temperature,
-            topk=self.audio_sampling_topk,
-            phoneme_temperature=self.phoneme_sampling_temperature,
-            phoneme_topk=self.phoneme_sampling_topk,
-            use_cfg=use_cfg,
-            cfg_scale=cfg_scale,
-            use_local_transformer_for_inference=use_local_transformer_for_inference,
-            phoneme_input_type=phoneme_input_type,
-            phoneme_sampling_method=self.cfg.get('inference_phoneme_sampling_method', 'argmax'),
-            force_dropout_text=False,
-            use_teacher_forced=False,
-            use_inference_mode=False,
-        )
+        logging.info(f"Inference started (rollout_cfg_mode={rollout_cfg_mode})")
+
+        def run_inference(inference_batch, use_cfg):
+            return self.infer_batch(
+                batch=inference_batch,
+                max_decoder_steps=self.max_decoder_steps,
+                temperature=self.audio_sampling_temperature,
+                topk=self.audio_sampling_topk,
+                phoneme_temperature=self.phoneme_sampling_temperature,
+                phoneme_topk=self.phoneme_sampling_topk,
+                use_cfg=use_cfg,
+                cfg_scale=self.inference_cfg_scale,
+                use_local_transformer_for_inference=use_local_transformer_for_inference,
+                phoneme_input_type=phoneme_input_type,
+                phoneme_sampling_method=self.cfg.get('inference_phoneme_sampling_method', 'argmax'),
+                force_dropout_text=False,
+                use_teacher_forced=False,
+                use_inference_mode=False,
+            )
+
+        num_prompts = len(batch['raw_texts'])
+        if rollout_cfg_mode == 'half':
+            half_generations = num_generations_per_item // 2
+            half_batch = self.repeat_items_in_batch(batch, half_generations)
+            cfg_off_output = run_inference(half_batch, use_cfg=False)
+            cfg_on_output = run_inference(half_batch, use_cfg=True)
+            output = self._merge_half_cfg_outputs(cfg_off_output, cfg_on_output, num_prompts)
+            rollout_cfg_mask = torch.tensor(
+                ([False] * half_generations + [True] * half_generations) * num_prompts,
+                device=self.device,
+                dtype=torch.bool,
+            )
+        else:
+            use_cfg = rollout_cfg_mode == 'alternate' and int(self.global_step) % 2 == 1
+            output = run_inference(batch_repeated, use_cfg=use_cfg)
+            rollout_cfg_mask = torch.full(
+                (len(batch_repeated['raw_texts']),),
+                fill_value=use_cfg,
+                device=self.device,
+                dtype=torch.bool,
+            )
         logging.info("Inference ended")
         audio_generation_time_sec = time.perf_counter() - generation_start_time
 
@@ -899,6 +997,7 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 'codes_len': int(predicted_codes_lens[idx].item()),
                 'utmos': float(utmos_score),
                 'language': str(languages[idx]) if idx < len(languages) else "unknown",
+                'used_cfg': bool(rollout_cfg_mask[idx].item()),
             }
 
             best_ssim_achievable = self.cfg.get('best_ssim_achievable', 0.9)
@@ -1002,6 +1101,8 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         all_groups_std_reward = all_groups_std_reward / max(num_groups, 1)
         advantages = torch.tensor([x['advantage'] for x in batch_metrics], device=self.device, dtype=torch.float32)
         group_validities = torch.tensor(group_validities, device=self.device, dtype=torch.float32)
+        cfg_rewards = [item['reward'] for item in batch_metrics if item['used_cfg']]
+        no_cfg_rewards = [item['reward'] for item in batch_metrics if not item['used_cfg']]
         rewarding_time_sec = time.perf_counter() - rewarding_start_time
 
         return {
@@ -1015,6 +1116,17 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
             'predicted_phoneme_tokens_lens': predicted_phoneme_tokens_lens,
             'advantages': advantages,
             'group_validities': group_validities,
+            'cfg_fraction': rollout_cfg_mask.float().mean(),
+            'mean_reward_cfg': (
+                torch.tensor(np.mean(cfg_rewards), device=self.device, dtype=torch.float32)
+                if cfg_rewards
+                else None
+            ),
+            'mean_reward_no_cfg': (
+                torch.tensor(np.mean(no_cfg_rewards), device=self.device, dtype=torch.float32)
+                if no_cfg_rewards
+                else None
+            ),
             'rollout_phoneme_input_type': phoneme_input_type,
             'timings': {
                 'audio_generation_time_sec': float(audio_generation_time_sec),
@@ -1572,6 +1684,21 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.log('train_used_gt_phoneme_input', po_outputs['used_gt_phoneme_input'], prog_bar=True, sync_dist=True)
         self.log('train_mean_reward', generated_codes_and_metrics['mean_reward'], prog_bar=True, sync_dist=True)
         self.log('train_std_reward', generated_codes_and_metrics['std_reward'], prog_bar=True, sync_dist=True)
+        self.log('train_cfg_fraction', generated_codes_and_metrics['cfg_fraction'], prog_bar=False, sync_dist=True)
+        if generated_codes_and_metrics['mean_reward_cfg'] is not None:
+            self.log(
+                'train_mean_reward_cfg',
+                generated_codes_and_metrics['mean_reward_cfg'],
+                prog_bar=False,
+                sync_dist=True,
+            )
+        if generated_codes_and_metrics['mean_reward_no_cfg'] is not None:
+            self.log(
+                'train_mean_reward_no_cfg',
+                generated_codes_and_metrics['mean_reward_no_cfg'],
+                prog_bar=False,
+                sync_dist=True,
+            )
 
         # Gradient / weight diagnostics to wandb.
         for metric_name, metric_value in grad_weight_metrics.items():
