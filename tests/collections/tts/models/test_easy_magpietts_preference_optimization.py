@@ -69,31 +69,3 @@ def test_action_po_masks_kl_for_invalid_groups():
 
     assert po_loss.item() == pytest.approx(0.0)
     assert kl_loss.item() == pytest.approx(0.0)
-
-
-def test_interleave_cfg_halves_preserves_full_prompt_groups_and_pads():
-    cfg_off = torch.tensor([[0.0, 1.0], [2.0, 3.0], [10.0, 11.0], [12.0, 13.0]])
-    cfg_on = torch.tensor(
-        [[100.0, 101.0, 102.0], [103.0, 104.0, 105.0], [110.0, 111.0, 112.0], [113.0, 114.0, 115.0]]
-    )
-
-    merged = EasyMagpieTTSModelOnlinePO._interleave_cfg_halves(
-        cfg_off, cfg_on, num_prompts=2, pad_last_dim=True
-    )
-
-    assert merged.shape == (8, 3)
-    assert torch.equal(
-        merged,
-        torch.tensor(
-            [
-                [0.0, 1.0, 0.0],
-                [2.0, 3.0, 0.0],
-                [100.0, 101.0, 102.0],
-                [103.0, 104.0, 105.0],
-                [10.0, 11.0, 0.0],
-                [12.0, 13.0, 0.0],
-                [110.0, 111.0, 112.0],
-                [113.0, 114.0, 115.0],
-            ]
-        ),
-    )

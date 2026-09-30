@@ -175,9 +175,9 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         self.audio_sampling_temperature = float(self.cfg.get('inference_temperature', 0.7))
         self.audio_sampling_topk = int(self.cfg.get('inference_topk', 80))
         self.rollout_cfg_mode = str(self.cfg.get('rollout_cfg_mode', 'off'))
-        if self.rollout_cfg_mode not in {'off', 'alternate', 'half'}:
+        if self.rollout_cfg_mode not in {'off', 'alternate'}:
             raise ValueError(
-                f"rollout_cfg_mode must be one of ['off', 'alternate', 'half'], got {self.rollout_cfg_mode!r}."
+                f"rollout_cfg_mode must be one of ['off', 'alternate'], got {self.rollout_cfg_mode!r}."
             )
         self.inference_cfg_scale = float(self.cfg.get('inference_cfg_scale', 2.5))
         if self.audio_sampling_topk <= 0:
@@ -782,77 +782,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         )
         return [float(item['predicted_mos']) for item in batch_results]
 
-    @staticmethod
-    def _interleave_cfg_halves(
-        cfg_off: Optional[torch.Tensor],
-        cfg_on: Optional[torch.Tensor],
-        num_prompts: int,
-        pad_last_dim: bool = False,
-    ) -> Optional[torch.Tensor]:
-        """Merge ``[prompt, half-generation]`` tensors into prompt-contiguous full groups."""
-        if cfg_off is None or cfg_on is None:
-            if cfg_off is not None or cfg_on is not None:
-                raise RuntimeError("CFG-on and CFG-off inference returned inconsistent optional outputs.")
-            return None
-        if cfg_off.shape[0] != cfg_on.shape[0] or cfg_off.shape[0] % num_prompts != 0:
-            raise RuntimeError(
-                f"Cannot interleave CFG halves with shapes {cfg_off.shape} and {cfg_on.shape} "
-                f"for {num_prompts} prompts."
-            )
-        if pad_last_dim and cfg_off.shape[-1] != cfg_on.shape[-1]:
-            max_len = max(cfg_off.shape[-1], cfg_on.shape[-1])
-            cfg_off = torch.nn.functional.pad(cfg_off, (0, max_len - cfg_off.shape[-1]))
-            cfg_on = torch.nn.functional.pad(cfg_on, (0, max_len - cfg_on.shape[-1]))
-        if cfg_off.shape[1:] != cfg_on.shape[1:]:
-            raise RuntimeError(f"CFG-on and CFG-off output shapes differ: {cfg_off.shape} vs {cfg_on.shape}.")
-
-        half_generations = cfg_off.shape[0] // num_prompts
-        output_shape = cfg_off.shape[1:]
-        merged = torch.cat(
-            [
-                cfg_off.reshape(num_prompts, half_generations, *output_shape),
-                cfg_on.reshape(num_prompts, half_generations, *output_shape),
-            ],
-            dim=1,
-        )
-        return merged.reshape(num_prompts * half_generations * 2, *output_shape)
-
-    def _merge_half_cfg_outputs(self, cfg_off_output, cfg_on_output, num_prompts: int):
-        merge = lambda off, on, pad=False: self._interleave_cfg_halves(
-            off, on, num_prompts=num_prompts, pad_last_dim=pad
-        )
-        return type(cfg_off_output)(
-            predicted_audio=merge(
-                cfg_off_output.predicted_audio, cfg_on_output.predicted_audio, pad=True
-            ),
-            predicted_audio_lens=merge(
-                cfg_off_output.predicted_audio_lens, cfg_on_output.predicted_audio_lens
-            ),
-            predicted_codes=merge(
-                cfg_off_output.predicted_codes, cfg_on_output.predicted_codes, pad=True
-            ),
-            predicted_codes_lens=merge(
-                cfg_off_output.predicted_codes_lens, cfg_on_output.predicted_codes_lens
-            ),
-            rtf_metrics={
-                "cfg_off": cfg_off_output.rtf_metrics,
-                "cfg_on": cfg_on_output.rtf_metrics,
-            },
-            predicted_phoneme_tokens=merge(
-                cfg_off_output.predicted_phoneme_tokens,
-                cfg_on_output.predicted_phoneme_tokens,
-                pad=True,
-            ),
-            predicted_phoneme_tokens_lens=merge(
-                cfg_off_output.predicted_phoneme_tokens_lens,
-                cfg_on_output.predicted_phoneme_tokens_lens,
-            ),
-            phoneme_prediction_start_idx=merge(
-                cfg_off_output.phoneme_prediction_start_idx,
-                cfg_on_output.phoneme_prediction_start_idx,
-            ),
-        )
-
     def generate_and_reward(
         self,
         batch: Dict,
@@ -871,8 +800,6 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
         """
         batch_repeated = self.repeat_items_in_batch(batch, num_generations_per_item)
         rollout_cfg_mode = self.rollout_cfg_mode if mode == 'train' else 'off'
-        if rollout_cfg_mode == 'half' and num_generations_per_item % 2 != 0:
-            raise ValueError("rollout_cfg_mode='half' requires an even n_generations_per_item.")
 
         phoneme_input_type = 'pred'
         gt_phoneme_input_prob = self.cfg.get('gt_phoneme_input_prob', 0.0)
@@ -901,27 +828,14 @@ class EasyMagpieTTSModelOnlinePO(EasyMagpieTTSModel):
                 use_inference_mode=False,
             )
 
-        num_prompts = len(batch['raw_texts'])
-        if rollout_cfg_mode == 'half':
-            half_generations = num_generations_per_item // 2
-            half_batch = self.repeat_items_in_batch(batch, half_generations)
-            cfg_off_output = run_inference(half_batch, use_cfg=False)
-            cfg_on_output = run_inference(half_batch, use_cfg=True)
-            output = self._merge_half_cfg_outputs(cfg_off_output, cfg_on_output, num_prompts)
-            rollout_cfg_mask = torch.tensor(
-                ([False] * half_generations + [True] * half_generations) * num_prompts,
-                device=self.device,
-                dtype=torch.bool,
-            )
-        else:
-            use_cfg = rollout_cfg_mode == 'alternate' and int(self.global_step) % 2 == 1
-            output = run_inference(batch_repeated, use_cfg=use_cfg)
-            rollout_cfg_mask = torch.full(
-                (len(batch_repeated['raw_texts']),),
-                fill_value=use_cfg,
-                device=self.device,
-                dtype=torch.bool,
-            )
+        use_cfg = rollout_cfg_mode == 'alternate' and int(self.global_step) % 2 == 1
+        output = run_inference(batch_repeated, use_cfg=use_cfg)
+        rollout_cfg_mask = torch.full(
+            (len(batch_repeated['raw_texts']),),
+            fill_value=use_cfg,
+            device=self.device,
+            dtype=torch.bool,
+        )
         logging.info("Inference ended")
         audio_generation_time_sec = time.perf_counter() - generation_start_time
 
